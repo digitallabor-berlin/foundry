@@ -10,8 +10,18 @@ Foundry is a server-side service for **issuing** and **verifying** digital
 credentials, implemented as a single Rust CLI binary. It speaks
 **OpenID4VCI** (issuance) and **OpenID4VP** (verification) to wallets and
 follows the **OpenID4VC High Assurance Interoperability Profile (HAIP) 1.0
-final**. Supported credential formats: **SD-JWT VC** (`dc+sd-jwt`) and
-**mdoc** (`mso_mdoc`).
+final**. Supported credential formats: **SD-JWT VC** (`dc+sd-jwt`,
+**draft-ietf-oauth-sd-jwt-vc-17**) and **mdoc** (`mso_mdoc`).
+
+> **Versioning decision — SD-JWT VC draft-17 vs HAIP's pinned draft-13.**
+> HAIP 1.0 final (§9.4 "Pre-Final Specifications") pins SD-JWT VC **draft-13**
+> and recommends preferring that referenced version. Foundry deliberately
+> targets the **latest draft-17**
+> (<https://www.ietf.org/archive/id/draft-ietf-oauth-sd-jwt-vc-17.txt>). This is
+> a documented, intentional divergence from the letter of HAIP's pinned
+> version; the drafts are largely compatible and differences are incremental.
+> Where draft-17 and HAIP MUSTs conflict, this decision is revisited during
+> implementation.
 
 The primary command `foundry serve --config config.yaml` boots an async
 (tokio) runtime and starts an axum HTTP server exposing two surfaces. Other
@@ -323,7 +333,11 @@ v1 file-based signer loads PEM/JWK from `keys` config.
   `x509_san_dns` client-id: match the DNS SAN in the leaf against the request's
   `client_id`.
 
-### SD-JWT VC (`dc+sd-jwt`)
+### SD-JWT VC (`dc+sd-jwt`, draft-17)
+
+Target specification: **draft-ietf-oauth-sd-jwt-vc-17**. (HAIP §9.4 pins
+draft-13; see the versioning decision in §1 — Foundry intentionally tracks
+draft-17.)
 
 - **Build:** split claims into always-disclosed vs selectively-disclosable (per
   config `path`), generate salted disclosure digests (`_sd`), assemble
