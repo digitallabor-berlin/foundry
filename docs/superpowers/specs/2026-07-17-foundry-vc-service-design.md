@@ -137,10 +137,21 @@ serving. Startup fails fast with an actionable error if invalid.
 2. **Wallet ← offer:** grant
    `urn:ietf:params:oauth:grant-type:pre-authorized_code`,
    `pre-authorized_code`, and `tx_code` metadata if a PIN was set.
-3. **Wallet-facing metadata:**
-   - `/.well-known/openid-credential-issuer` (`CredentialIssuerMetadata`, incl.
-     per-type `credential_configurations_supported`)
-   - `/.well-known/oauth-authorization-server` (`AuthorizationServerMetadata`)
+3. **Wallet-facing metadata (OpenID4VCI issuer metadata hosting):** Foundry
+   hosts the Credential Issuer Metadata and Authorization Server Metadata at the
+   spec-mandated well-known paths, fully derived from config:
+   - `GET /.well-known/openid-credential-issuer` — `CredentialIssuerMetadata`:
+     `credential_issuer`, `credential_endpoint`, `nonce_endpoint`,
+     per-type `credential_configurations_supported` (format, `vct`/`doctype`,
+     `cryptographic_binding_methods_supported`, `credential_signing_alg_values`,
+     `proof_types_supported`, claim + display metadata), `display`. Optionally
+     served as `signed_metadata` (JWS with issuer `x5c`) when configured.
+   - `GET /.well-known/oauth-authorization-server` — `AuthorizationServerMetadata`
+     (token endpoint, pre-authorized grant support, `nonce_endpoint`, etc.).
+
+   Metadata content is generated from `credential_types` and `issuer` config;
+   nothing is hard-coded. Metadata correctness (paths, required fields per
+   OpenID4VCI 1.0 / HAIP) is covered by conformance tests.
 4. **Token endpoint** `POST /token`: validate `pre-authorized_code` (+
    `tx_code`), enforce HAIP client auth (wallet-attestation seam), issue an
    access token bound to the transaction and a `c_nonce`.
@@ -173,9 +184,29 @@ that validates structure + `x5c`. Enforceable but non-blocking for early interop
 
 **Admin trigger:** `POST /admin/verification/requests` with
 `{ dcql_query | named_query_ref, transport: "request_uri" | "dc_api",
-response_mode? }`. Foundry creates a verification transaction (generates
-`state`, `nonce`, ephemeral response-encryption key pair) and returns
-transport-specific material.
+response_mode?, transaction_data? }`. Foundry creates a verification transaction
+(generates `state`, `nonce`, ephemeral response-encryption key pair, and any
+`transaction_data` entries) and returns transport-specific material.
+
+### Transaction Data (OpenID4VP `transaction_data`)
+
+Foundry supports the OpenID4VP **`transaction_data`** feature for
+transaction-specific authorization/consent (e.g. binding a presentation to a
+payment or a specific action):
+
+- The caller supplies one or more transaction-data objects via the admin
+  trigger (or a `named_query`'s attached template). Each has a `type`, a
+  `credential_ids` list (referencing DCQL query ids the data is bound to), and
+  type-specific parameters.
+- Foundry base64url-encodes each object and includes the `transaction_data`
+  array in the signed authorization request object; the request advertises the
+  supported hash algorithm(s) (`transaction_data_hashes_alg`, default `sha-256`).
+- The wallet returns `transaction_data_hashes` bound into the proof of
+  presentation — the **KB-JWT** for SD-JWT VC and **DeviceAuth** for mdoc.
+- The verification engine recomputes the hashes over the exact encoded strings
+  and **verifies the binding** (correct hashes, over the correct credentials);
+  a mismatch or omission fails verification. Verified transaction data is
+  surfaced in the structured result.
 
 ### Transport A — `request_uri` (cross/same-device)
 
@@ -202,10 +233,12 @@ presented credential:
 
 - **SD-JWT VC:** verify issuer signature via `x5c` against configured **trust
   anchors**, check `exp`/`nbf`, verify **KB-JWT** (audience = client_id, nonce
-  match, `sd_hash`), enforce selective-disclosure ↔ DCQL claim set, **check
+  match, `sd_hash`, and `transaction_data_hashes` when transaction data was
+  requested), enforce selective-disclosure ↔ DCQL claim set, **check
   Token Status List**.
 - **mdoc:** verify IssuerAuth COSE_Sign1 via `x5c`/trust anchors, verify
-  DeviceAuth against the session transcript, validate elements vs DCQL, check
+  DeviceAuth against the session transcript (incl. `transaction_data_hashes`
+  binding when transaction data was requested), validate elements vs DCQL, check
   status. The engine builds the correct session transcript per transport
   (`request_uri` handover vs DC API).
 - DCQL matching enforced (required claims present, credential set satisfied).
@@ -217,7 +250,8 @@ configured callback URL.
 
 **HAIP conformance baked in:** signed request objects with `x509_san_dns`;
 encrypted responses (`direct_post.jwt` / `dc_api.jwt`); mandatory KB-JWT; X.509
-trust-anchor validation (non-self-signed leaf); status-list checking.
+trust-anchor validation (non-self-signed leaf); status-list checking;
+`transaction_data` hash binding verification when transaction data is requested.
 
 ## 5. Config Model & Credential Type Definitions
 
@@ -276,9 +310,13 @@ verifier:
   client_id_scheme: x509_san_dns
   signing_key: verifier_signing
   response_encryption: { alg: ECDH-ES, enc: A128GCM }
+  transaction_data_hashes_alg: [sha-256] # advertised in request objects
   named_queries:                         # optional reusable DCQL
     - id: over18
       dcql: { credentials: [ ... ] }
+      transaction_data:                  # optional attached template
+        - type: example.consent
+          credential_ids: [pid]
   webhook: { url: https://app.example.com/vp-callback, secret_env: FOUNDRY_WEBHOOK_SECRET }
 ```
 
