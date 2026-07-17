@@ -421,8 +421,12 @@ unit-testable with fixture keys from `quickstart`.
 
 ### Observability
 
-- `tracing` with structured spans keyed by `transaction_id`; per-request logs on
-  both surfaces. Log level via config/CLI flag (`--log-level`).
+- **Structured logging, console-only.** `tracing` + `tracing-subscriber` emit
+  structured logs to the console (stdout/stderr) exclusively — no file or remote
+  sinks. Format selectable via config/CLI flag: human-readable for dev, JSON for
+  production log aggregation. Structured spans keyed by `transaction_id`;
+  per-request logs on both surfaces. Log level via config/CLI flag
+  (`--log-level`).
 - No secrets/PII at info level; sensitive fields redacted. Debug level may
   include protocol detail.
 - **Health/readiness:** `GET /health` (liveness) and `GET /ready` (readiness —
@@ -442,7 +446,7 @@ unit-testable with fixture keys from `quickstart`.
 | CBOR / COSE | `ciborium` + `coset` |
 | X.509 | `x509-cert` / `rustls-pki-types` + path building |
 | Errors | `thiserror` |
-| Logging | `tracing` |
+| Logging | `tracing` + `tracing-subscriber` (structured, console-only; human/JSON) |
 | Protocol types | vendored `oid4vci`, `openid4vp` |
 | Formats | SD-JWT VC (`dc+sd-jwt`), mdoc (`mso_mdoc`) |
 | Query language | DCQL only |
