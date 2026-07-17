@@ -34,6 +34,12 @@ and status-list management.
 - Presentation Exchange / `presentation_definition` (DCQL only).
 - External KMS/HSM integration (file-based keys, with a `Signer` seam for later).
 - Horizontal scale / external database (SQLite embedded store in v1).
+- ISO 18013-5 / mDL **transport and retrieval** mechanisms: device engagement
+  (QR/NFC/BLE), proximity/offline retrieval, and reader (mdoc-reader) protocols
+  are out of scope. Foundry supports the mdoc **credential format** (data model)
+  only, exchanged exclusively over OpenID4VP. ISO 18013-7 is not implemented as
+  a standalone stack; only the OpenID4VP handover SessionTranscript needed to
+  verify an mdoc presented over OpenID4VP is used.
 
 ## 2. Architecture & Runtime Model
 
@@ -332,18 +338,23 @@ v1 file-based signer loads PEM/JWK from `keys` config.
 
 ### mdoc (`mso_mdoc`)
 
+**Scope: credential format only.** Foundry issues and verifies the mdoc data
+model (namespaces/elements, MSO, `IssuerAuth`) and exchanges it exclusively over
+OpenID4VP. It does NOT implement ISO 18013-5 device engagement, proximity/offline
+retrieval, or reader protocols.
+
 - CBOR/COSE via `ciborium` + `coset`. Build MSO (value digests per namespace,
   device key, validity), sign IssuerAuth `COSE_Sign1` with `x5c`.
   Namespaces/elements from config.
 - **Verify:** decode CBOR, verify IssuerAuth via trust anchors, verify DeviceAuth
   (device signature or MAC) over the session transcript, match elements to DCQL,
   check status.
-- The verifier engine builds the correct **SessionTranscript** per transport:
-  for `request_uri`, the OpenID4VP handover transcript
-  (`OID4VPHandover` = client_id, response_uri/nonce derivation per OID4VP
-  Annex B / ISO 18013-7); for DC API, the DC-API handover transcript derived
-  from the origin + request nonce. DeviceAuth is verified against the matching
-  transcript.
+- `DeviceAuth` is required for holder binding when an mdoc is presented over
+  OpenID4VP. The verifier engine builds the correct **OpenID4VP-handover
+  SessionTranscript** per transport: for `request_uri`, from client_id +
+  response_uri + nonce; for DC API, from the origin + request nonce. This is the
+  OpenID4VP handover only — the ISO 18013-5 proximity/device-retrieval
+  transcripts are explicitly out of scope.
 
 ### Token Status List (IETF draft-14)
 
