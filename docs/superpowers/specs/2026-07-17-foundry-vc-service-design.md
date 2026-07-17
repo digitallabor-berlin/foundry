@@ -78,8 +78,9 @@ Single Rust binary `foundry` (clap-based CLI). Commands:
 
 ```
 foundry (bin) ── depends on ──▶ foundry-issuer, foundry-verifier, foundry-core
-foundry-issuer ─▶ foundry-core, oid4vci
-foundry-verifier ─▶ foundry-core, openid4vp
+foundry-issuer ─▶ foundry-core, foundry-formats, oid4vci
+foundry-verifier ─▶ foundry-core, foundry-formats, openid4vp
+foundry-formats ─▶ foundry-core
 foundry-core ─▶ (vendored crates only where shared types are needed)
 oid4vci, openid4vp = vendored, self-contained
 ```
@@ -91,9 +92,12 @@ foundry/
 ├─ crates/
 │  ├─ oid4vci/         # vendored Spruce crate (owned, modifiable)
 │  ├─ openid4vp/       # vendored Spruce crate (owned, modifiable)
-│  ├─ foundry-core/    # crypto, key/cert store, X.509 trust, SD-JWT & mdoc
-│  │                   #   builders/parsers, Token Status List, storage trait
-│  │                   #   + SQLite impl, config model
+│  ├─ foundry-core/    # crypto, key/cert store, X.509 trust, Token Status List,
+│  │                   #   storage trait + SQLite impl, config model
+│  ├─ foundry-formats/ # DEDICATED credential-format package: SD-JWT VC
+│  │                   #   (draft-17) and mdoc (mso_mdoc) builders + parsers,
+│  │                   #   disclosure/selective-disclosure logic, KB-JWT,
+│  │                   #   MSO/IssuerAuth/DeviceAuth, transaction_data hashing
 │  ├─ foundry-issuer/  # OpenID4VCI server logic (offers, pre-auth, token,
 │  │                   #   nonce, credential endpoint) on oid4vci types
 │  ├─ foundry-verifier/# OpenID4VP server logic (request objects, DCQL,
@@ -370,6 +374,12 @@ v1 file-based signer loads PEM/JWK from `keys` config.
   reject self-signed leaves, check validity windows and (v1) basic key-usage.
   `x509_san_dns` client-id: match the DNS SAN in the leaf against the request's
   `client_id`.
+
+> **Packaging:** the SD-JWT VC and mdoc format implementations below live in a
+> dedicated `foundry-formats` crate (not in `foundry-core`), depending only on
+> `foundry-core` for crypto/trust primitives. This isolates all format
+> encoding/decoding behind a clean, independently-testable boundary consumed by
+> both the issuer and verifier.
 
 ### SD-JWT VC (`dc+sd-jwt`, draft-17)
 
