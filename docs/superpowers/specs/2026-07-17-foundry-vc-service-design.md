@@ -338,8 +338,12 @@ v1 file-based signer loads PEM/JWK from `keys` config.
 - **Verify:** decode CBOR, verify IssuerAuth via trust anchors, verify DeviceAuth
   (device signature or MAC) over the session transcript, match elements to DCQL,
   check status.
-- The verifier engine builds the correct session transcript per transport
-  (`request_uri` OID4VP handover vs DC API).
+- The verifier engine builds the correct **SessionTranscript** per transport:
+  for `request_uri`, the OpenID4VP handover transcript
+  (`OID4VPHandover` = client_id, response_uri/nonce derivation per OID4VP
+  Annex B / ISO 18013-7); for DC API, the DC-API handover transcript derived
+  from the origin + request nonce. DeviceAuth is verified against the matching
+  transcript.
 
 ### Token Status List (IETF draft-14)
 

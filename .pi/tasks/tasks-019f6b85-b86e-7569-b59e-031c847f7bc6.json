@@ -53,37 +53,37 @@
       "id": "5",
       "subject": "Write design doc",
       "description": "Save validated design to docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md and commit.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Writing design doc",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1784215425722,
-      "updatedAt": 1784302214597
+      "updatedAt": 1784302236674
     },
     {
       "id": "6",
       "subject": "Spec self-review",
       "description": "Inline check for placeholders, contradictions, ambiguity, scope. Fix issues inline.",
-      "status": "pending",
+      "status": "completed",
       "activeForm": "Reviewing spec",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1784215425723,
-      "updatedAt": 1784215425723
+      "updatedAt": 1784302242900
     },
     {
       "id": "7",
       "subject": "User reviews spec",
       "description": "Ask user to review the written spec file before proceeding to implementation planning.",
-      "status": "pending",
+      "status": "in_progress",
       "activeForm": "Awaiting user spec review",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1784215425725,
-      "updatedAt": 1784215425725
+      "updatedAt": 1784302242902
     },
     {
       "id": "8",
