@@ -78,9 +78,10 @@ Single Rust binary `foundry` (clap-based CLI). Commands:
 
 ```
 foundry (bin) ── depends on ──▶ foundry-issuer, foundry-verifier, foundry-core
-foundry-issuer ─▶ foundry-core, foundry-formats, oid4vci
-foundry-verifier ─▶ foundry-core, foundry-formats, openid4vp
-foundry-formats ─▶ foundry-core
+foundry-issuer ─▶ foundry-core, foundry-sd-jwt-vc, foundry-mdoc, oid4vci
+foundry-verifier ─▶ foundry-core, foundry-sd-jwt-vc, foundry-mdoc, openid4vp
+foundry-sd-jwt-vc ─▶ foundry-core
+foundry-mdoc ─▶ foundry-core
 foundry-core ─▶ (vendored crates only where shared types are needed)
 oid4vci, openid4vp = vendored, self-contained
 ```
@@ -94,10 +95,11 @@ foundry/
 │  ├─ openid4vp/       # vendored Spruce crate (owned, modifiable)
 │  ├─ foundry-core/    # crypto, key/cert store, X.509 trust, Token Status List,
 │  │                   #   storage trait + SQLite impl, config model
-│  ├─ foundry-formats/ # DEDICATED credential-format package: SD-JWT VC
-│  │                   #   (draft-17) and mdoc (mso_mdoc) builders + parsers,
-│  │                   #   disclosure/selective-disclosure logic, KB-JWT,
-│  │                   #   MSO/IssuerAuth/DeviceAuth, transaction_data hashing
+│  ├─ foundry-sd-jwt-vc/ # SD-JWT VC (draft-17) format crate: builders +
+│  │                   #   parsers, disclosure/selective-disclosure logic,
+│  │                   #   KB-JWT, transaction_data hashing
+│  ├─ foundry-mdoc/    # mdoc (mso_mdoc) format crate: MSO/IssuerAuth/DeviceAuth
+│  │                   #   builders + parsers, transaction_data hashing
 │  ├─ foundry-issuer/  # OpenID4VCI server logic (offers, pre-auth, token,
 │  │                   #   nonce, credential endpoint) on oid4vci types
 │  ├─ foundry-verifier/# OpenID4VP server logic (request objects, DCQL,
@@ -375,9 +377,9 @@ v1 file-based signer loads PEM/JWK from `keys` config.
   `x509_san_dns` client-id: match the DNS SAN in the leaf against the request's
   `client_id`.
 
-> **Packaging:** the SD-JWT VC and mdoc format implementations below live in a
-> dedicated `foundry-formats` crate (not in `foundry-core`), depending only on
-> `foundry-core` for crypto/trust primitives. This isolates all format
+> **Packaging:** each credential format lives in its own dedicated crate —
+> `foundry-sd-jwt-vc` and `foundry-mdoc` — depending only on `foundry-core` for
+> crypto/trust primitives (not on each other). This isolates each format's
 > encoding/decoding behind a clean, independently-testable boundary consumed by
 > both the issuer and verifier.
 
