@@ -77,25 +77,25 @@
       "id": "7",
       "subject": "User reviews spec",
       "description": "Ask user to review the written spec file before proceeding to implementation planning.",
-      "status": "in_progress",
+      "status": "completed",
       "activeForm": "Awaiting user spec review",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1784215425725,
-      "updatedAt": 1784302242902
+      "updatedAt": 1784304805800
     },
     {
       "id": "8",
       "subject": "Transition to implementation (writing-plans)",
       "description": "Invoke the writing-plans skill to create the implementation plan. Terminal state of brainstorming.",
-      "status": "pending",
+      "status": "completed",
       "activeForm": "Transitioning to writing-plans",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1784215425726,
-      "updatedAt": 1784215425726
+      "updatedAt": 1784305092123
     }
   ]
 }
