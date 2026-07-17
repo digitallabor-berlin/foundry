@@ -63,6 +63,7 @@ Single Rust binary `foundry` (clap-based CLI). Commands:
   — granular key/cert helpers.
 - `foundry status-list ...` — administrative status-list operations (offline/scripting).
 - `foundry config validate --config <file>` — validate without serving.
+- `foundry openapi --out <file>` — write the admin API OpenAPI spec to disk.
 
 ### Two HTTP surfaces, one process, separate routers/listeners
 
@@ -73,6 +74,21 @@ Single Rust binary `foundry` (clap-based CLI). Commands:
   credential status. Bound to a separate listener/port, protected by a
   config-set API key (bearer token). Optional webhook callbacks for
   verification results.
+
+### API documentation (OpenAPI + Swagger UI)
+
+The admin/integration API is documented with **OpenAPI 3.x**, generated from
+type-annotated handlers via `utoipa` (derive-based, kept in sync with the code —
+no hand-maintained spec drift). On the admin listener Foundry serves:
+
+- `GET /api-docs/openapi.json` (and `/api-docs/openapi.yaml`) — the machine-
+  readable OpenAPI spec files.
+- `GET /swagger-ui` — an embedded **Swagger UI** viewer (via
+  `utoipa-swagger-ui`) for browsing and trying the API.
+
+The generated spec is also written to disk on `foundry serve` startup (and via a
+`foundry openapi --out <file>` subcommand) so it can be committed/checked in CI.
+Swagger UI can be disabled via config for hardened deployments.
 
 ### Crate dependency direction (acyclic)
 
@@ -491,6 +507,7 @@ unit-testable with fixture keys from `quickstart`.
 | Language / runtime | Rust, tokio async |
 | CLI | clap |
 | HTTP server | axum |
+| API docs | `utoipa` (OpenAPI 3.x) + `utoipa-swagger-ui` (Swagger UI) |
 | Storage | SQLite (embedded), via `sqlx`/`rusqlite` |
 | JOSE / JWT / JWE | `josekit` |
 | CBOR / COSE | `ciborium` + `coset` |
