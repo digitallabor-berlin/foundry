@@ -50,11 +50,7 @@ impl Storage for SqliteStorage {
         Ok(())
     }
 
-    async fn get_kv(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<String>, StorageError> {
+    async fn get_kv(&self, namespace: &str, key: &str) -> Result<Option<String>, StorageError> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT value FROM kv WHERE namespace = ?1 AND key = ?2")
                 .bind(namespace)
@@ -76,13 +72,11 @@ impl Storage for SqliteStorage {
     }
 
     async fn purge_expired(&self, now_unix: i64) -> Result<u64, StorageError> {
-        let res = sqlx::query(
-            "DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?1",
-        )
-        .bind(now_unix)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let res = sqlx::query("DELETE FROM kv WHERE expires_at IS NOT NULL AND expires_at <= ?1")
+            .bind(now_unix)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
         Ok(res.rows_affected())
     }
 }

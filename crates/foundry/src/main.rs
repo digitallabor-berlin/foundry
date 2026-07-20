@@ -10,7 +10,9 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cli.log_level, cli.log_format);
 
     match cli.command {
-        Command::Config { action: ConfigAction::Validate { config } } => {
+        Command::Config {
+            action: ConfigAction::Validate { config },
+        } => {
             let cfg = Config::load(&config)?;
             cfg.validate()?;
             tracing::info!(path = %config.display(), "config is valid");

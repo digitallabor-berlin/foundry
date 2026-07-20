@@ -3,8 +3,7 @@ use std::path::Path;
 
 #[test]
 fn loads_minimal_yaml_and_validates() {
-    let cfg = Config::load(Path::new("tests/fixtures/minimal.yaml"))
-        .expect("should load");
+    let cfg = Config::load(Path::new("tests/fixtures/minimal.yaml")).expect("should load");
     assert_eq!(cfg.issuer.credential_issuer, "https://issuer.example.com");
     assert_eq!(cfg.credential_types.len(), 1);
     assert_eq!(cfg.credential_types[0].id, "pid");
@@ -13,8 +12,8 @@ fn loads_minimal_yaml_and_validates() {
 
 #[test]
 fn rejects_unresolvable_key_reference() {
-    let cfg = Config::load(Path::new("tests/fixtures/bad-missing-keyref.yaml"))
-        .expect("should parse");
+    let cfg =
+        Config::load(Path::new("tests/fixtures/bad-missing-keyref.yaml")).expect("should parse");
     let err = cfg.validate().expect_err("should fail validation");
     let msg = err.to_string();
     assert!(

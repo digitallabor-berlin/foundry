@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "foundry", version, about = "Digital credential issuing & verification service")]
+#[command(
+    name = "foundry",
+    version,
+    about = "Digital credential issuing & verification service"
+)]
 pub struct Cli {
     #[arg(long, global = true, default_value = "info")]
     pub log_level: String,
@@ -58,13 +62,22 @@ mod tests {
     #[test]
     fn parses_config_validate_and_log_flags() {
         let cli = Cli::parse_from([
-            "foundry", "--log-level", "debug", "--log-format", "json",
-            "config", "validate", "--config", "c.json",
+            "foundry",
+            "--log-level",
+            "debug",
+            "--log-format",
+            "json",
+            "config",
+            "validate",
+            "--config",
+            "c.json",
         ]);
         assert_eq!(cli.log_level, "debug");
         assert!(matches!(cli.log_format, LogFormat::Json));
         match cli.command {
-            Command::Config { action: ConfigAction::Validate { config } } => {
+            Command::Config {
+                action: ConfigAction::Validate { config },
+            } => {
                 assert_eq!(config.to_str().unwrap(), "c.json");
             }
             _ => panic!("expected config validate"),

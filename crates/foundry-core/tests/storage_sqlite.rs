@@ -8,7 +8,10 @@ async fn kv_roundtrip_and_expiry_purge() {
         .await
         .expect("connect");
 
-    store.put_kv("issuance", "tx-1", "{\"a\":1}", Some(100)).await.unwrap();
+    store
+        .put_kv("issuance", "tx-1", "{\"a\":1}", Some(100))
+        .await
+        .unwrap();
     let got = store.get_kv("issuance", "tx-1").await.unwrap();
     assert_eq!(got.as_deref(), Some("{\"a\":1}"));
 

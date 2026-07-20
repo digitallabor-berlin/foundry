@@ -38,7 +38,9 @@ pub struct AdminConfig {
     pub swagger_ui_enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StorageConfig {
@@ -47,7 +49,9 @@ pub struct StorageConfig {
     pub transaction_ttl_secs: u64,
 }
 
-fn default_ttl() -> u64 { 600 }
+fn default_ttl() -> u64 {
+    600
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyEntry {

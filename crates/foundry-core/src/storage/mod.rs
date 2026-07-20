@@ -14,8 +14,7 @@ pub trait Storage: Send + Sync {
         expires_at: Option<i64>,
     ) -> Result<(), StorageError>;
 
-    async fn get_kv(&self, namespace: &str, key: &str)
-        -> Result<Option<String>, StorageError>;
+    async fn get_kv(&self, namespace: &str, key: &str) -> Result<Option<String>, StorageError>;
 
     async fn delete_kv(&self, namespace: &str, key: &str) -> Result<(), StorageError>;
 
