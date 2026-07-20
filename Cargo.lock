@@ -1946,6 +1946,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "foundry-mdoc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "ciborium",
+ "coset",
+ "foundry-core",
+ "hex",
+ "josekit 0.10.3",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "time",
+]
+
+[[package]]
+name = "foundry-sd-jwt-vc"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "foundry-core",
+ "josekit 0.10.3",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.19",
+ "time",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
