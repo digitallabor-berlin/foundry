@@ -141,6 +141,26 @@ pub fn match_san_dns(leaf_pem: &[u8], expected_dns: &str) -> Result<bool, TrustE
     Ok(san_dns_names(&leaf)?.iter().any(|n| n == expected_dns))
 }
 
+/// Raw (x, y) EC public-key coordinates from a certificate's SubjectPublicKeyInfo.
+/// Assumes an uncompressed EC point (0x04 || X || Y), which is what this
+/// project's ECDSA (P-256/384/521) certificates carry.
+pub fn cert_ec_public_coords(cert: &Certificate) -> Result<(Vec<u8>, Vec<u8>), TrustError> {
+    let spki = cert.tbs_certificate().subject_public_key_info();
+    let point = spki
+        .subject_public_key
+        .as_bytes()
+        .ok_or_else(|| TrustError::Parse("SPKI bit string not byte-aligned".into()))?;
+    if point.first() != Some(&0x04) {
+        return Err(TrustError::Parse(
+            "expected uncompressed EC point (0x04 prefix)".into(),
+        ));
+    }
+    let coord_len = (point.len() - 1) / 2;
+    let x = point[1..1 + coord_len].to_vec();
+    let y = point[1 + coord_len..].to_vec();
+    Ok((x, y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

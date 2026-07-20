@@ -79,6 +79,59 @@ fn rejects_self_signed_x5c_leaf() {
 }
 
 #[test]
+fn rejects_key_cert_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    // Build a fresh PKI here (rather than write_pki) so we retain the CA key
+    // and can issue two distinct leaves from the same root: only the
+    // key<->cert mismatch should trigger failure (not self-signed, not
+    // untrusted, not missing-file).
+    fs::create_dir_all(dir.path().join("keys")).unwrap();
+    fs::create_dir_all(dir.path().join("trust")).unwrap();
+    let root = new_ca("Foundry Dev Root CA", 3650).unwrap();
+    fs::write(dir.path().join("trust/root2.pem"), &root.cert_pem).unwrap();
+    let leaf_a = issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "leaf-a.local",
+        &["leaf-a.local".to_string()],
+        365,
+    )
+    .unwrap();
+    let leaf_b = issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "leaf-b.local",
+        &["leaf-b.local".to_string()],
+        365,
+    )
+    .unwrap();
+    fs::write(dir.path().join("keys/leaf_a.pem"), &leaf_a.key_pem).unwrap();
+    fs::write(dir.path().join("keys/leaf_a-chain.pem"), &leaf_a.cert_pem).unwrap();
+    fs::write(dir.path().join("keys/leaf_b-chain.pem"), &leaf_b.cert_pem).unwrap();
+
+    // Point the key entry's private_key at leaf A's key, but x5c at leaf B's chain.
+    let bad = CONFIG_TMPL
+        .replace(
+            "private_key: ./keys/issuer_sdjwt.pem",
+            "private_key: ./keys/leaf_a.pem",
+        )
+        .replace(
+            "x5c: ./keys/issuer_sdjwt-chain.pem",
+            "x5c: ./keys/leaf_b-chain.pem",
+        )
+        .replace("certs: ./trust/root.pem", "certs: ./trust/root2.pem");
+    let cfg_path = dir.path().join("config.yaml");
+    fs::write(&cfg_path, bad).unwrap();
+
+    let cfg = Config::load(&cfg_path).unwrap();
+    let err = cfg.validate_key_material(dir.path()).unwrap_err();
+    assert!(
+        err.to_string().contains("does not match"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn reports_missing_key_file() {
     let dir = tempfile::tempdir().unwrap();
     // No PKI written → files absent.

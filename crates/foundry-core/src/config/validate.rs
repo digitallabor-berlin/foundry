@@ -1,6 +1,7 @@
 use super::model::Config;
-use crate::crypto::{FileSigner, SignatureAlgorithm};
+use crate::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use crate::error::ConfigError;
+use base64::Engine as _;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -63,7 +64,7 @@ impl Config {
                 .map_err(|e| ConfigError::Validation(format!("key '{name}': {e}")))?;
             let key_path = base_dir.join(&entry.private_key);
             let key_path = key_path.to_string_lossy();
-            FileSigner::from_pem_file(&key_path, alg)
+            let signer = FileSigner::from_pem_file(&key_path, alg)
                 .map_err(|e| ConfigError::Validation(format!("key '{name}': {e}")))?;
 
             if let Some(x5c) = &entry.x5c {
@@ -79,6 +80,39 @@ impl Config {
                 if crate::trust::is_self_signed(&cert) {
                     return Err(ConfigError::Validation(format!(
                         "key '{name}' x5c leaf must not be self-signed (HAIP §6.1.1)"
+                    )));
+                }
+
+                // The private key must match its x5c leaf certificate.
+                let jwk = signer
+                    .public_jwk()
+                    .map_err(|e| ConfigError::Validation(format!("key '{name}': {e}")))?;
+                let kx = jwk.get("x").and_then(|v| v.as_str());
+                let ky = jwk.get("y").and_then(|v| v.as_str());
+                let (kx, ky) = match (kx, ky) {
+                    (Some(x), Some(y)) => (
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(x)
+                            .map_err(|e| {
+                                ConfigError::Validation(format!("key '{name}': bad JWK x: {e}"))
+                            })?,
+                        base64::engine::general_purpose::URL_SAFE_NO_PAD
+                            .decode(y)
+                            .map_err(|e| {
+                                ConfigError::Validation(format!("key '{name}': bad JWK y: {e}"))
+                            })?,
+                    ),
+                    _ => {
+                        return Err(ConfigError::Validation(format!(
+                            "key '{name}': public JWK missing EC coordinates"
+                        )))
+                    }
+                };
+                let (cx, cy) = crate::trust::cert_ec_public_coords(&cert)
+                    .map_err(|e| ConfigError::Validation(format!("key '{name}' x5c: {e}")))?;
+                if kx != cx || ky != cy {
+                    return Err(ConfigError::Validation(format!(
+                        "key '{name}' private key does not match its x5c leaf certificate"
                     )));
                 }
             }
