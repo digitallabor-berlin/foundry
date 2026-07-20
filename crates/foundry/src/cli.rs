@@ -34,6 +34,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Key material operations.
+    Keys {
+        #[command(subcommand)]
+        action: KeysAction,
+    },
+    /// Certificate operations.
+    Cert {
+        #[command(subcommand)]
+        action: CertAction,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -42,6 +52,49 @@ pub enum ConfigAction {
     Validate {
         #[arg(long)]
         config: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysAction {
+    /// Generate a fresh EC private key (PKCS#8 PEM).
+    Generate {
+        #[arg(long, default_value = "ES256")]
+        alg: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CertAction {
+    /// Create a self-signed CA certificate + key.
+    NewCa {
+        #[arg(long, default_value = "Foundry Dev Root CA")]
+        common_name: String,
+        #[arg(long)]
+        out_cert: PathBuf,
+        #[arg(long)]
+        out_key: PathBuf,
+        #[arg(long, default_value_t = 3650)]
+        days: i64,
+    },
+    /// Issue a leaf certificate signed by a CA.
+    Issue {
+        #[arg(long)]
+        ca: PathBuf,
+        #[arg(long)]
+        key: PathBuf,
+        #[arg(long)]
+        common_name: String,
+        #[arg(long = "san-dns")]
+        san_dns: Vec<String>,
+        #[arg(long)]
+        out_cert: PathBuf,
+        #[arg(long)]
+        out_key: PathBuf,
+        #[arg(long, default_value_t = 365)]
+        days: i64,
     },
 }
 

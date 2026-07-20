@@ -1,7 +1,6 @@
 use clap::Parser;
-use foundry::cli::{Cli, Command, ConfigAction};
-use foundry::logging;
-use foundry::server;
+use foundry::cli::{CertAction, Cli, Command, ConfigAction, KeysAction};
+use foundry::{commands, logging, server};
 use foundry_core::config::Config;
 
 #[tokio::main]
@@ -24,5 +23,27 @@ async fn main() -> anyhow::Result<()> {
             cfg.validate()?;
             server::serve(cfg).await
         }
+        Command::Keys {
+            action: KeysAction::Generate { alg, out },
+        } => commands::keys_generate(&alg, &out),
+        Command::Cert {
+            action: CertAction::NewCa {
+                common_name,
+                out_cert,
+                out_key,
+                days,
+            },
+        } => commands::cert_new_ca(&common_name, &out_cert, &out_key, days),
+        Command::Cert {
+            action: CertAction::Issue {
+                ca,
+                key,
+                common_name,
+                san_dns,
+                out_cert,
+                out_key,
+                days,
+            },
+        } => commands::cert_issue(&ca, &key, &common_name, &san_dns, &out_cert, &out_key, days),
     }
 }
