@@ -1,0 +1,42 @@
+server:
+  wallet_facing:
+    public_base_url: https://issuer.example.com
+    bind: 0.0.0.0:8443
+  admin:
+    bind: 127.0.0.1:9000
+    api_key: dev-admin-key
+storage:
+  path: ./foundry.db
+  transaction_ttl_secs: 600
+keys:
+  issuer_sdjwt:
+    private_key: ./keys/issuer_ec.pem
+    x5c: ./keys/issuer_chain.pem
+    alg: ES256
+trust_anchors: []
+issuer:
+  credential_issuer: https://issuer.example.com
+  wallet_attestation: { mode: optional }
+  key_attestation: { mode: optional }
+  status_list:
+    enabled: true
+    signing_key: issuer_sdjwt
+    list_size: 1048576
+    public_base_url: https://issuer.example.com/statuslists
+credential_types:
+  - id: pid
+    format: dc+sd-jwt
+    vct: https://example.com/vct/pid
+    cryptographic_holder_binding: true
+    display: [{ name: "Person ID", locale: en-US }]
+    claims:
+      - path: [given_name]
+        selectively_disclosable: true
+      - path: [birthdate]
+        selectively_disclosable: true
+verifier:
+  client_id_scheme: x509_san_dns
+  signing_key: nonexistent_key
+  response_encryption: { alg: ECDH-ES, enc: A128GCM }
+  transaction_data_hashes_alg: [sha-256]
+  named_queries: []
