@@ -41,7 +41,8 @@ fn verify_jws_with_coords(
     message: &[u8],
     signature: &[u8],
 ) -> Result<(), FormatError> {
-    let jwk_value = json!({ "kty": "EC", "crv": curve, "x": B64URL.encode(x), "y": B64URL.encode(y) });
+    let jwk_value =
+        json!({ "kty": "EC", "crv": curve, "x": B64URL.encode(x), "y": B64URL.encode(y) });
     verify_jws_with_jwk(&jwk_value, curve, message, signature)
 }
 
@@ -143,7 +144,9 @@ pub fn verify_sd_jwt_vc(
         .and_then(|v| v.as_array())
         .ok_or_else(|| FormatError::SignatureVerification("issuer x5c missing".into()))?;
     if x5c_array.is_empty() {
-        return Err(FormatError::SignatureVerification("empty x5c header".into()));
+        return Err(FormatError::SignatureVerification(
+            "empty x5c header".into(),
+        ));
     }
     let mut chain_pems: Vec<Vec<u8>> = Vec::with_capacity(x5c_array.len());
     for val in x5c_array {
@@ -185,17 +188,17 @@ pub fn verify_sd_jwt_vc(
                 .map_err(|e| FormatError::Deserialization(format!("disclosure b64: {e}")))?,
         )
         .map_err(|e| FormatError::Deserialization(format!("disclosure json: {e}")))?;
-        let arr = d_val
-            .as_array()
-            .ok_or_else(|| FormatError::InvalidStructure("disclosure must be a JSON array".into()))?;
+        let arr = d_val.as_array().ok_or_else(|| {
+            FormatError::InvalidStructure("disclosure must be a JSON array".into())
+        })?;
         if arr.len() != 3 {
             return Err(FormatError::InvalidStructure(
                 "disclosure must have 3 items".into(),
             ));
         }
-        let name = arr[1]
-            .as_str()
-            .ok_or_else(|| FormatError::InvalidStructure("disclosure name must be a string".into()))?;
+        let name = arr[1].as_str().ok_or_else(|| {
+            FormatError::InvalidStructure("disclosure name must be a string".into())
+        })?;
         let mut hasher = Sha256::new();
         hasher.update(d_b64.as_bytes());
         let digest_b64 = B64URL.encode(hasher.finalize());
@@ -206,9 +209,9 @@ pub fn verify_sd_jwt_vc(
     if let Some(payload_map) = payload_json.as_object_mut() {
         if let Some(Value::Array(sd_array)) = payload_map.remove("_sd") {
             for digest_val in sd_array {
-                let digest_str = digest_val
-                    .as_str()
-                    .ok_or_else(|| FormatError::InvalidStructure("_sd elements must be strings".into()))?;
+                let digest_str = digest_val.as_str().ok_or_else(|| {
+                    FormatError::InvalidStructure("_sd elements must be strings".into())
+                })?;
                 if let Some((name, val)) = disclosures_map.get(digest_str) {
                     payload_map.insert(name.clone(), val.clone());
                 }
@@ -225,13 +228,25 @@ pub fn verify_sd_jwt_vc(
         .ok_or_else(|| FormatError::InvalidStructure("holder cnf.jwk missing".into()))?;
 
     // --- KB-JWT holder binding (required) ---
-    let kb = kb_jwt.ok_or_else(|| FormatError::KeyBinding("KB-JWT missing from presentation".into()))?;
-    verify_kb_jwt(kb, presentation_string, &holder_jwk, expected_audience, expected_nonce)?;
+    let kb =
+        kb_jwt.ok_or_else(|| FormatError::KeyBinding("KB-JWT missing from presentation".into()))?;
+    verify_kb_jwt(
+        kb,
+        presentation_string,
+        &holder_jwk,
+        expected_audience,
+        expected_nonce,
+    )?;
 
-    let x5c_vec: Option<Vec<String>> = header_json
-        .get("x5c")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect());
+    let x5c_vec: Option<Vec<String>> =
+        header_json
+            .get("x5c")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            });
 
     Ok(VerificationResult {
         claims: Value::Object(claims_map),
@@ -288,7 +303,8 @@ fn verify_kb_jwt(
         .get("alg")
         .and_then(|v| v.as_str())
         .ok_or_else(|| FormatError::KeyBinding("KB-JWT alg missing".into()))?;
-    let curve = curve_for_alg(alg_str).map_err(|_| FormatError::KeyBinding("unsupported KB-JWT alg".into()))?;
+    let curve = curve_for_alg(alg_str)
+        .map_err(|_| FormatError::KeyBinding("unsupported KB-JWT alg".into()))?;
     let signing_input = format!("{}.{}", kb_parts[0], kb_parts[1]);
     let sig = B64URL
         .decode(kb_parts[2])
@@ -311,24 +327,36 @@ mod tests {
     fn test_pki() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let root = new_ca("Foundry Dev Root CA", 3650).unwrap();
         let leaf = issue_leaf(
-            &root.cert_pem, &root.key_pem, "localhost",
-            &["localhost".to_string()], 365,
-        ).unwrap();
-        (root.cert_pem.into_bytes(), leaf.cert_pem.into_bytes(), leaf.key_pem.into_bytes())
+            &root.cert_pem,
+            &root.key_pem,
+            "localhost",
+            &["localhost".to_string()],
+            365,
+        )
+        .unwrap();
+        (
+            root.cert_pem.into_bytes(),
+            leaf.cert_pem.into_bytes(),
+            leaf.key_pem.into_bytes(),
+        )
     }
 
     fn holder() -> (FileSigner, serde_json::Value) {
         let jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
         let kp = EcKeyPair::from_jwk(&jwk).unwrap();
-        let signer = FileSigner::from_pem(&kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+        let signer =
+            FileSigner::from_pem(&kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
         let pubjwk = signer.public_jwk().unwrap();
         (signer, pubjwk)
     }
 
     fn der_b64(pem_bytes: &[u8]) -> String {
-        std::str::from_utf8(pem_bytes).unwrap()
-            .lines().filter(|l| !l.starts_with("-----"))
-            .collect::<Vec<_>>().join("")
+        std::str::from_utf8(pem_bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     #[test]
@@ -354,7 +382,8 @@ mod tests {
             selectively_disclosable: select,
         };
 
-        let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
         let presentation = attach_kb_jwt(issuer_pres, &holder_signer, "audience", "nonce").unwrap();
 
         // Cert validity is stamped from the system clock by pki::issue_leaf, so
@@ -373,17 +402,24 @@ mod tests {
         let (holder_signer, holder_pub) = holder();
 
         let claims = IssuerClaims {
-            iss: "localhost".to_string(), sub: "s".to_string(),
-            iat: 1700000000, exp: 1800000000, vct: "v".to_string(),
-            cnf_jwk: holder_pub, status_list_index: None, status_list_uri: None,
+            iss: "localhost".to_string(),
+            sub: "s".to_string(),
+            iat: 1700000000,
+            exp: 1800000000,
+            vct: "v".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
             always_disclosed: serde_json::Map::new(),
             selectively_disclosable: serde_json::Map::new(),
         };
-        let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
         let presentation = attach_kb_jwt(issuer_pres, &holder_signer, "audience", "WRONG").unwrap();
 
         let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let err = verify_sd_jwt_vc(&presentation, &trust_store, "audience", "nonce", now).unwrap_err();
+        let err =
+            verify_sd_jwt_vc(&presentation, &trust_store, "audience", "nonce", now).unwrap_err();
         assert!(matches!(err, FormatError::KeyBinding(_)));
     }
 }
