@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/foundry-core",
+    "crates/foundry",
+]
+resolver = "2"
+
+[workspace.package]
+name = "foundry"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+authors = ["Foundry Team"]
+repository = "https://github.com/example/foundry"
+license = "EUPL-1.2"
+
+[workspace.lints.clippy]
+all = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
