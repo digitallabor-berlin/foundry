@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/foundry-core",
-    "crates/foundry",
+    "crates/oid4vci",
+    "crates/openid4vp",
+    "crates/openid4vp-frontend",
 ]
 
 [workspace.package]
