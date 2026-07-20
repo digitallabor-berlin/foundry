@@ -23,11 +23,55 @@ pub enum StorageError {
 }
 
 #[derive(Debug, Error)]
+pub enum CryptoError {
+    #[error("failed to read key file {path}: {source}")]
+    KeyRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("unsupported signature algorithm '{0}'")]
+    UnsupportedAlgorithm(String),
+    #[error("failed to load signing key: {0}")]
+    KeyLoad(String),
+    #[error("signing failed: {0}")]
+    Sign(String),
+    #[error("key or certificate generation failed: {0}")]
+    Generation(String),
+}
+
+#[derive(Debug, Error)]
+pub enum TrustError {
+    #[error("failed to read certificate file {path}: {source}")]
+    CertRead {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse certificate: {0}")]
+    Parse(String),
+    #[error("certificate chain is empty")]
+    EmptyChain,
+    #[error("leaf certificate must not be self-signed (HAIP §6.1.1)")]
+    SelfSignedLeaf,
+    #[error("certificate is outside its validity window")]
+    Expired,
+    #[error("no configured trust anchor matches the certificate chain")]
+    UntrustedChain,
+    #[error("DNS SAN mismatch: certificate does not assert '{0}'")]
+    SanMismatch(String),
+}
+
+#[derive(Debug, Error)]
 pub enum CoreError {
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Storage(#[from] StorageError),
+    #[error(transparent)]
+    Crypto(#[from] CryptoError),
+    #[error(transparent)]
+    Trust(#[from] TrustError),
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -49,5 +93,31 @@ mod tests {
     fn core_error_wraps_storage_not_found() {
         let e: CoreError = StorageError::NotFound("tx-123".into()).into();
         assert_eq!(e.to_string(), "record not found: tx-123");
+    }
+
+    #[test]
+    fn crypto_unsupported_alg_displays() {
+        let e = CryptoError::UnsupportedAlgorithm("RS256".into());
+        assert_eq!(e.to_string(), "unsupported signature algorithm 'RS256'");
+    }
+
+    #[test]
+    fn trust_self_signed_leaf_displays() {
+        let e = TrustError::SelfSignedLeaf;
+        assert_eq!(
+            e.to_string(),
+            "leaf certificate must not be self-signed (HAIP §6.1.1)"
+        );
+    }
+
+    #[test]
+    fn core_error_wraps_crypto_and_trust() {
+        let c: CoreError = CryptoError::Sign("boom".into()).into();
+        assert_eq!(c.to_string(), "signing failed: boom");
+        let t: CoreError = TrustError::UntrustedChain.into();
+        assert_eq!(
+            t.to_string(),
+            "no configured trust anchor matches the certificate chain"
+        );
     }
 }
