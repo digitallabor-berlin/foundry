@@ -1,9 +1,7 @@
-mod cli;
-mod logging;
-mod server;
-
 use clap::Parser;
-use cli::{Cli, Command, ConfigAction};
+use foundry::cli::{Cli, Command, ConfigAction};
+use foundry::logging;
+use foundry::server;
 use foundry_core::config::Config;
 
 #[tokio::main]
