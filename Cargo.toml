@@ -30,3 +30,5 @@ async-trait = "0.1"
 josekit = "0.10"
 x509-cert = { version = "0.3", features = ["pem"] }
 base64 = "0.22"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+time = "0.3"
