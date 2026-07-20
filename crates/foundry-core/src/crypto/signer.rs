@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use crate::crypto::{SignatureAlgorithm, Signer};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-    use josekit::jwk::{Jwk, KeyPair as _};
+    use josekit::jwk::Jwk;
 
     fn generate_p256_pkcs8_pem() -> Vec<u8> {
         let jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
