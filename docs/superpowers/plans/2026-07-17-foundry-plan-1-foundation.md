@@ -168,16 +168,21 @@ Changes are made directly in `crates/`. To pull upstream fixes, diff against the
 recorded commit and cherry-pick manually. Never re-add as a crates.io dependency.
 ```
 
-- [ ] **Step 3: Add both crates as workspace members**
+- [ ] **Step 3: Set the workspace members to the crates that exist now**
 
-Modify the root `Cargo.toml` `members` list:
+The workspace uses an **incremental members list**: each task lists only the
+crates that exist after it runs (cargo refuses to operate on a workspace whose
+member directory is missing). After Task 1 the list still names
+`crates/foundry-core` and `crates/foundry`, which do not exist yet — replace the
+list so it names exactly the two vendored crates this task creates. Later tasks
+(3 and 6) add their crates back.
+
+Modify the root `Cargo.toml` `members` list to exactly:
 
 ```toml
 members = [
     "crates/oid4vci",
     "crates/openid4vp",
-    "crates/foundry-core",
-    "crates/foundry",
 ]
 ```
 
@@ -302,10 +307,25 @@ tempfile = "3"
 pub mod error;
 ```
 
+**Register the crate in the workspace (incremental members list).** Add
+`crates/foundry-core` to the root `Cargo.toml` `members` list so cargo can build
+and test it. After this step the list must be exactly:
+
+```toml
+members = [
+    "crates/oid4vci",
+    "crates/openid4vp",
+    "crates/foundry-core",
+]
+```
+
 - [ ] **Step 3: Run test to verify it fails**
 
 Run: `cargo test -p foundry-core error:: 2>&1 | tail -20`
 Expected: FAIL — crate did not previously compile / tests not found before this task. After adding the code it should compile; if the module wasn't wired the test binary reports 0 tests. Confirm the two named tests are collected.
+
+Note: the `git add` in this task's commit step must also stage the modified
+root `Cargo.toml` (member registration) in addition to `crates/foundry-core`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1018,6 +1038,19 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 ```
 
+**Register the crate in the workspace (incremental members list).** Add
+`crates/foundry` to the root `Cargo.toml` `members` list so cargo can build and
+test it. After this step the list must be exactly:
+
+```toml
+members = [
+    "crates/oid4vci",
+    "crates/openid4vp",
+    "crates/foundry-core",
+    "crates/foundry",
+]
+```
+
 `crates/foundry/src/logging.rs`:
 
 ```rust
@@ -1095,7 +1128,7 @@ Expected: prints `OK: crates/foundry-core/tests/fixtures/minimal.yaml is valid` 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/foundry
+git add crates/foundry Cargo.toml
 git commit -m "feat(cli): add clap CLI skeleton with structured console logging and config validate"
 ```
 
