@@ -63,6 +63,24 @@ pub enum TrustError {
 }
 
 #[derive(Debug, Error)]
+pub enum FormatError {
+    #[error("serialization failed: {0}")]
+    Serialization(String),
+    #[error("deserialization or parsing failed: {0}")]
+    Deserialization(String),
+    #[error("invalid credential structure: {0}")]
+    InvalidStructure(String),
+    #[error("cryptographic verification failed: {0}")]
+    SignatureVerification(String),
+    #[error("holder key binding verification failed: {0}")]
+    KeyBinding(String),
+    #[error("credential has expired or is not yet valid")]
+    Expired,
+    #[error("unsupported algorithm or key type: {0}")]
+    Unsupported(String),
+}
+
+#[derive(Debug, Error)]
 pub enum CoreError {
     #[error(transparent)]
     Config(#[from] ConfigError),
@@ -72,6 +90,8 @@ pub enum CoreError {
     Crypto(#[from] CryptoError),
     #[error(transparent)]
     Trust(#[from] TrustError),
+    #[error(transparent)]
+    Format(#[from] FormatError),
 }
 
 pub type CoreResult<T> = Result<T, CoreError>;
@@ -119,5 +139,17 @@ mod tests {
             t.to_string(),
             "no configured trust anchor matches the certificate chain"
         );
+    }
+
+    #[test]
+    fn format_error_serialization_displays() {
+        let e = FormatError::Serialization("JSON drift".into());
+        assert_eq!(e.to_string(), "serialization failed: JSON drift");
+    }
+
+    #[test]
+    fn core_error_wraps_format_error() {
+        let c: CoreError = FormatError::Expired.into();
+        assert_eq!(c.to_string(), "credential has expired or is not yet valid");
     }
 }

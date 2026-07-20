@@ -6,6 +6,7 @@ members = [
     "crates/openid4vp-frontend",
     "crates/foundry-core",
     "crates/foundry",
+    "crates/foundry-sd-jwt-vc",
 ]
 
 [workspace.package]
@@ -31,4 +32,9 @@ josekit = "0.10"
 x509-cert = { version = "0.3", features = ["pem"] }
 base64 = "0.22"
 rcgen = { version = "0.14", features = ["x509-parser"] }
-time = "0.3"
+coset = "0.3"
+ciborium = "0.2"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+time = { version = "0.3", features = ["formatting", "parsing"] }
