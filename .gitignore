@@ -1,17 +1,10 @@
-# Rust
-/target/
+/target
 **/*.rs.bk
-Cargo.lock
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Environment
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 .env
-.env.local
-*.log
+/keys
+/trust
+foundry.db
