@@ -1,10 +1,10 @@
 use crate::error::FormatError;
 use crate::types::{DeviceKeyInfo, IssuerSignedItem, MobileSecurityObject, ValidityInfo};
 use base64::{
-    engine::general_purpose::STANDARD as B64STD, engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
-    Engine as _,
+    engine::general_purpose::STANDARD as B64STD,
+    engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
 };
-use coset::{iana, CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, ProtectedHeader};
+use coset::{iana, CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, HeaderBuilder};
 use foundry_core::crypto::Signer;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -21,7 +21,7 @@ pub struct MdocClaims {
 
 fn generate_random_salt() -> Vec<u8> {
     let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
+    rand::thread_rng().fill_bytes(&mut bytes);
     bytes.to_vec()
 }
 
@@ -144,7 +144,9 @@ pub fn build_mdoc(
         digest_algorithm: "SHA-256".to_string(),
         doc_type: claims.doc_type.clone(),
         value_digests,
-        device_key_info: DeviceKeyInfo { device_key: cose_key_value },
+        device_key_info: DeviceKeyInfo {
+            device_key: cose_key_value,
+        },
         validity_info: ValidityInfo {
             signed: format_epoch_seconds(claims.signed_at)?,
             valid_until: format_epoch_seconds(claims.valid_until)?,
@@ -156,8 +158,7 @@ pub fn build_mdoc(
         .map_err(|e| FormatError::Serialization(e.to_string()))?;
 
     // IssuerAuth COSE_Sign1.
-    let mut protected = ProtectedHeader::default();
-    protected.header.alg = Some(coset::Algorithm::Assigned(alg_label(signer)));
+    let protected = HeaderBuilder::new().algorithm(alg_label(signer)).build();
 
     let mut unprotected = Header::default();
     if let Some(chain) = x5c {
@@ -169,18 +170,18 @@ pub fn build_mdoc(
             x5c_values.push(ciborium::Value::Bytes(der));
         }
         // Label 33 = x5chain (RFC 9360). TODO(interop): confirm wallet expectations.
-        unprotected.rest.push((coset::Label::Int(33), ciborium::Value::Array(x5c_values)));
+        unprotected
+            .rest
+            .push((coset::Label::Int(33), ciborium::Value::Array(x5c_values)));
     }
 
-    let partial = CoseSign1Builder::new()
-        .protected(protected)
-        .unprotected(unprotected)
-        .payload(mso_bytes.clone())
-        .build();
-
+    let protected_wrapped = coset::ProtectedHeader {
+        original_data: None,
+        header: protected.clone(),
+    };
     let tbs = coset::sig_structure_data(
         coset::SignatureContext::CoseSign1,
-        partial.protected.clone(),
+        protected_wrapped,
         None,
         &[],
         &mso_bytes,
@@ -190,8 +191,8 @@ pub fn build_mdoc(
         .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
 
     let final_sign1 = CoseSign1Builder::new()
-        .protected(partial.protected)
-        .unprotected(partial.unprotected)
+        .protected(protected)
+        .unprotected(unprotected)
         .payload(mso_bytes)
         .signature(signature)
         .build();
@@ -211,16 +212,28 @@ pub fn build_mdoc(
                     .collect(),
             ),
         ),
-        (ciborium::Value::Text("issuerAuth".to_string()), issuer_auth_val),
+        (
+            ciborium::Value::Text("issuerAuth".to_string()),
+            issuer_auth_val,
+        ),
     ];
 
     let doc_map: Vec<(ciborium::Value, ciborium::Value)> = vec![
-        (ciborium::Value::Text("docType".to_string()), ciborium::Value::Text(claims.doc_type)),
-        (ciborium::Value::Text("issuerSigned".to_string()), ciborium::Value::Map(issuer_signed)),
+        (
+            ciborium::Value::Text("docType".to_string()),
+            ciborium::Value::Text(claims.doc_type),
+        ),
+        (
+            ciborium::Value::Text("issuerSigned".to_string()),
+            ciborium::Value::Map(issuer_signed),
+        ),
     ];
 
     let outer: Vec<(ciborium::Value, ciborium::Value)> = vec![
-        (ciborium::Value::Text("version".to_string()), ciborium::Value::Text("1.0".to_string())),
+        (
+            ciborium::Value::Text("version".to_string()),
+            ciborium::Value::Text("1.0".to_string()),
+        ),
         (
             ciborium::Value::Text("documents".to_string()),
             ciborium::Value::Array(vec![ciborium::Value::Map(doc_map)]),
@@ -266,43 +279,7 @@ mod tests {
         };
 
         let bytes = build_mdoc(claims, &signer, None).unwrap();
-        assert!(!bytes.is_empty());
-        let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
-        assert!(matches!(decoded, ciborium::Value::Map(_)));
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
-    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-    use josekit::jwk::{Jwk, KeyPair as _};
-
-    fn test_signer() -> FileSigner {
-        let jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
-        let kp = EcKeyPair::from_jwk(&jwk).unwrap();
-        FileSigner::from_pem(&kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap()
-    }
-
-    #[test]
-    fn builds_mdoc_verifiably() {
-        let signer = test_signer();
-        let d_jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
-
-        let mut ns_items = BTreeMap::new();
-        let mut elements = BTreeMap::new();
-        elements.insert("given_name".to_string(), serde_json::json!("John"));
-        elements.insert("family_name".to_string(), serde_json::json!("Doe"));
-        ns_items.insert("org.iso.18013.5.1".to_string(), elements);
-
-        let claims = MdocClaims {
-            doc_type: "org.iso.18013.5.1.mDL".to_string(),
-            namespaces: ns_items,
-            device_key_jwk: serde_json::to_value(&d_jwk).unwrap(),
-            signed_at: 1700000000,
-            valid_until: 1800000000,
-        };
-
+       
         let bytes = build_mdoc(claims, &signer, None).unwrap();
         assert!(!bytes.is_empty());
         let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
