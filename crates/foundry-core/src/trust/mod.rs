@@ -1,8 +1,9 @@
 //! X.509 parsing, inspection, and (DN-based) trust-path validation.
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crate::error::TrustError;
 use x509_cert::der::oid::AssociatedOid;
-use x509_cert::der::{Decode, DecodePem};
+use x509_cert::der::{Decode, DecodePem, Encode};
 use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::SubjectAltName;
 
@@ -44,6 +45,98 @@ pub fn san_dns_names(cert: &Certificate) -> Result<Vec<String>, TrustError> {
         }
     }
     Ok(names)
+}
+
+/// Build an `x5c` array (base64 DER per cert). Order is preserved:
+/// callers pass leaf..intermediate (trust anchor excluded) per HAIP §6.1.1.
+pub fn build_x5c(chain_pems: &[Vec<u8>]) -> Result<Vec<String>, TrustError> {
+    if chain_pems.is_empty() {
+        return Err(TrustError::EmptyChain);
+    }
+    let mut out = Vec::with_capacity(chain_pems.len());
+    for pem in chain_pems {
+        let cert = parse_cert_pem(pem)?;
+        let der = cert.to_der().map_err(|e| TrustError::Parse(e.to_string()))?;
+        out.push(B64.encode(&der));
+    }
+    Ok(out)
+}
+
+/// A set of trust-anchor certificates.
+pub struct TrustStore {
+    anchors: Vec<Certificate>,
+}
+
+impl TrustStore {
+    pub fn from_pems(pems: &[Vec<u8>]) -> Result<Self, TrustError> {
+        let mut anchors = Vec::with_capacity(pems.len());
+        for pem in pems {
+            anchors.push(parse_cert_pem(pem)?);
+        }
+        Ok(Self { anchors })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchors.is_empty()
+    }
+}
+
+fn assert_in_window(cert: &Certificate, now_unix: u64) -> Result<(), TrustError> {
+    let (nb, na) = validity_window(cert);
+    if now_unix < nb || now_unix > na {
+        return Err(TrustError::Expired);
+    }
+    Ok(())
+}
+
+/// Validate a leaf (+ optional intermediates) against the trust store.
+///
+/// v1 scope: reject self-signed leaf, check validity windows, and build a
+/// DN-based path from the leaf up to a configured anchor.
+/// TODO(trust-hardening): x509-cert 0.3 cannot verify signatures. A later pass
+/// MUST cryptographically verify each link (issuer SPKI over tbs_certificate)
+/// via rustls-webpki or p256/ecdsa. This function's signature will not change.
+pub fn validate_chain(
+    leaf_pem: &[u8],
+    intermediates: &[Vec<u8>],
+    store: &TrustStore,
+    now_unix: u64,
+) -> Result<(), TrustError> {
+    let leaf = parse_cert_pem(leaf_pem)?;
+    if is_self_signed(&leaf) {
+        return Err(TrustError::SelfSignedLeaf);
+    }
+    assert_in_window(&leaf, now_unix)?;
+
+    let mut inter_parsed = Vec::with_capacity(intermediates.len());
+    for pem in intermediates {
+        inter_parsed.push(parse_cert_pem(pem)?);
+    }
+
+    // Walk from the leaf's issuer DN upward through intermediates.
+    let mut current_issuer = leaf.tbs_certificate().issuer().clone();
+    for inter in &inter_parsed {
+        if inter.tbs_certificate().subject() == &current_issuer {
+            assert_in_window(inter, now_unix)?;
+            current_issuer = inter.tbs_certificate().issuer().clone();
+        }
+    }
+
+    // The remaining issuer DN must match a trust anchor's subject.
+    for anchor in &store.anchors {
+        if anchor.tbs_certificate().subject() == &current_issuer {
+            assert_in_window(anchor, now_unix)?;
+            return Ok(());
+        }
+    }
+
+    Err(TrustError::UntrustedChain)
+}
+
+/// Whether the leaf certificate asserts `expected_dns` as a dNSName SAN.
+pub fn match_san_dns(leaf_pem: &[u8], expected_dns: &str) -> Result<bool, TrustError> {
+    let leaf = parse_cert_pem(leaf_pem)?;
+    Ok(san_dns_names(&leaf)?.iter().any(|n| n == expected_dns))
 }
 
 #[cfg(test)]
@@ -112,5 +205,81 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         let err = parse_cert_pem(b"-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n")
             .unwrap_err();
         assert!(matches!(err, crate::error::TrustError::Parse(_)));
+    }
+
+    use crate::pki::{issue_leaf, new_ca};
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    #[test]
+    fn build_x5c_encodes_each_cert() {
+        let x5c = build_x5c(&[LEAF_CERT_PEM.to_vec()]).unwrap();
+        assert_eq!(x5c.len(), 1);
+        // Valid base64 that decodes to non-empty DER.
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        let der = B64.decode(&x5c[0]).unwrap();
+        assert!(!der.is_empty());
+    }
+
+    #[test]
+    fn build_x5c_rejects_empty() {
+        let err = build_x5c(&[]).unwrap_err();
+        assert!(matches!(err, crate::error::TrustError::EmptyChain));
+    }
+
+    #[test]
+    fn valid_leaf_against_anchor_passes() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
+            &["issuer.dev.local".to_string()], 365).unwrap();
+        let store = TrustStore::from_pems(&[ca.cert_pem.into_bytes()]).unwrap();
+        assert!(!store.is_empty());
+        validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap();
+    }
+
+    #[test]
+    fn self_signed_leaf_is_rejected() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let store = TrustStore::from_pems(&[ca.cert_pem.clone().into_bytes()]).unwrap();
+        // Feed the self-signed CA as if it were the leaf.
+        let err = validate_chain(ca.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap_err();
+        assert!(matches!(err, crate::error::TrustError::SelfSignedLeaf));
+    }
+
+    #[test]
+    fn expired_leaf_is_rejected() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
+            &["issuer.dev.local".to_string()], 365).unwrap();
+        let store = TrustStore::from_pems(&[ca.cert_pem.into_bytes()]).unwrap();
+        // now far in the future → outside the 365-day window.
+        let future = now_secs() + 400 * 24 * 3600;
+        let err = validate_chain(leaf.cert_pem.as_bytes(), &[], &store, future).unwrap_err();
+        assert!(matches!(err, crate::error::TrustError::Expired));
+    }
+
+    #[test]
+    fn untrusted_anchor_is_rejected() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
+            &["issuer.dev.local".to_string()], 365).unwrap();
+        let other = new_ca("Some Other CA", 3650).unwrap();
+        let store = TrustStore::from_pems(&[other.cert_pem.into_bytes()]).unwrap();
+        let err = validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap_err();
+        assert!(matches!(err, crate::error::TrustError::UntrustedChain));
+    }
+
+    #[test]
+    fn san_matching_works() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
+            &["issuer.dev.local".to_string()], 365).unwrap();
+        assert!(match_san_dns(leaf.cert_pem.as_bytes(), "issuer.dev.local").unwrap());
+        assert!(!match_san_dns(leaf.cert_pem.as_bytes(), "attacker.example.com").unwrap());
     }
 }
