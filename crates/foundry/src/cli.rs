@@ -44,6 +44,14 @@ pub enum Command {
         #[command(subcommand)]
         action: CertAction,
     },
+    /// Generate a dev PKI and a ready-to-run config (alias: init). DEV/TEST ONLY.
+    #[command(alias = "init")]
+    Quickstart {
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        #[arg(long = "out-config", default_value = "config.yaml")]
+        out_config: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]

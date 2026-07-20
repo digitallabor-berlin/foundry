@@ -45,5 +45,6 @@ async fn main() -> anyhow::Result<()> {
                 days,
             },
         } => commands::cert_issue(&ca, &key, &common_name, &san_dns, &out_cert, &out_key, days),
+        Command::Quickstart { dir, out_config } => commands::quickstart(&dir, &out_config),
     }
 }
