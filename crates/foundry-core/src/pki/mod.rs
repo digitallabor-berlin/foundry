@@ -119,7 +119,8 @@ mod tests {
         assert!(km.public_pem.starts_with("-----BEGIN PUBLIC KEY-----"));
 
         // The generated key must be usable by the file signer.
-        let signer = FileSigner::from_pem(km.private_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+        let signer =
+            FileSigner::from_pem(km.private_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
         let sig = signer.sign(b"data").unwrap();
         assert_eq!(sig.len(), 64);
     }
@@ -127,11 +128,13 @@ mod tests {
     #[test]
     fn generates_es384_and_es512_keys() {
         let k384 = generate_ec_key(SignatureAlgorithm::Es384).unwrap();
-        let s384 = FileSigner::from_pem(k384.private_pem.as_bytes(), SignatureAlgorithm::Es384).unwrap();
+        let s384 =
+            FileSigner::from_pem(k384.private_pem.as_bytes(), SignatureAlgorithm::Es384).unwrap();
         assert_eq!(s384.sign(b"x").unwrap().len(), 96);
 
         let k512 = generate_ec_key(SignatureAlgorithm::Es512).unwrap();
-        let s512 = FileSigner::from_pem(k512.private_pem.as_bytes(), SignatureAlgorithm::Es512).unwrap();
+        let s512 =
+            FileSigner::from_pem(k512.private_pem.as_bytes(), SignatureAlgorithm::Es512).unwrap();
         assert_eq!(s512.sign(b"x").unwrap().len(), 132);
     }
 

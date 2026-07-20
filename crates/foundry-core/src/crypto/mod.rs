@@ -56,15 +56,27 @@ mod tests {
 
     #[test]
     fn parses_known_algorithms_case_insensitively() {
-        assert_eq!(SignatureAlgorithm::from_str("ES256").unwrap(), SignatureAlgorithm::Es256);
-        assert_eq!(SignatureAlgorithm::from_str("es384").unwrap(), SignatureAlgorithm::Es384);
-        assert_eq!(SignatureAlgorithm::from_str("Es512").unwrap(), SignatureAlgorithm::Es512);
+        assert_eq!(
+            SignatureAlgorithm::from_str("ES256").unwrap(),
+            SignatureAlgorithm::Es256
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("es384").unwrap(),
+            SignatureAlgorithm::Es384
+        );
+        assert_eq!(
+            SignatureAlgorithm::from_str("Es512").unwrap(),
+            SignatureAlgorithm::Es512
+        );
     }
 
     #[test]
     fn rejects_unknown_algorithm() {
         let err = SignatureAlgorithm::from_str("RS256").unwrap_err();
-        assert!(matches!(err, crate::error::CryptoError::UnsupportedAlgorithm(_)));
+        assert!(matches!(
+            err,
+            crate::error::CryptoError::UnsupportedAlgorithm(_)
+        ));
     }
 
     #[test]

@@ -25,7 +25,5 @@ fn quickstart_emits_valid_pki_and_config() {
     cfg.validate().unwrap();
 
     // Key material resolves relative to the config directory (Task 10 API).
-    // NOTE: `validate_key_material` is added in Task 10. Commented out here so
-    // Task 9 compiles and passes independently; re-enabled in Task 10 Step 1.
-    // cfg.validate_key_material(dir.path()).unwrap();
+    cfg.validate_key_material(dir.path()).unwrap();
 }

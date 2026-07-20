@@ -30,7 +30,11 @@ pub fn cert_new_ca(
     std::fs::write(out_key, ca.key_pem.as_bytes())
         .with_context(|| format!("writing CA key to {}", out_key.display()))?;
     tracing::info!(cert = %out_cert.display(), key = %out_key.display(), "generated CA");
-    println!("OK: wrote CA cert {} and key {}", out_cert.display(), out_key.display());
+    println!(
+        "OK: wrote CA cert {} and key {}",
+        out_cert.display(),
+        out_key.display()
+    );
     Ok(())
 }
 
@@ -44,8 +48,8 @@ pub fn cert_issue(
     out_key: &Path,
     days: i64,
 ) -> anyhow::Result<()> {
-    let ca_cert_pem = std::fs::read_to_string(ca)
-        .with_context(|| format!("reading CA cert {}", ca.display()))?;
+    let ca_cert_pem =
+        std::fs::read_to_string(ca).with_context(|| format!("reading CA cert {}", ca.display()))?;
     let ca_key_pem = std::fs::read_to_string(key)
         .with_context(|| format!("reading CA key {}", key.display()))?;
     let leaf = issue_leaf(&ca_cert_pem, &ca_key_pem, common_name, san_dns, days)?;
@@ -54,7 +58,11 @@ pub fn cert_issue(
     std::fs::write(out_key, leaf.key_pem.as_bytes())
         .with_context(|| format!("writing leaf key to {}", out_key.display()))?;
     tracing::info!(cert = %out_cert.display(), key = %out_key.display(), "issued leaf certificate");
-    println!("OK: wrote leaf cert {} and key {}", out_cert.display(), out_key.display());
+    println!(
+        "OK: wrote leaf cert {} and key {}",
+        out_cert.display(),
+        out_key.display()
+    );
     Ok(())
 }
 
@@ -78,7 +86,10 @@ pub fn quickstart(dir: &Path, out_config: &Path) -> anyhow::Result<()> {
         ("statuslist_signer", "Foundry Dev Status List", "localhost"),
     ] {
         let leaf = issue_leaf(&root.cert_pem, &root.key_pem, cn, &[san.to_string()], 365)?;
-        std::fs::write(keys_dir.join(format!("{name}.pem")), leaf.key_pem.as_bytes())?;
+        std::fs::write(
+            keys_dir.join(format!("{name}.pem")),
+            leaf.key_pem.as_bytes(),
+        )?;
         std::fs::write(
             keys_dir.join(format!("{name}-chain.pem")),
             leaf.cert_pem.as_bytes(),
@@ -88,7 +99,11 @@ pub fn quickstart(dir: &Path, out_config: &Path) -> anyhow::Result<()> {
     std::fs::write(out_config, QUICKSTART_CONFIG.as_bytes())?;
 
     tracing::warn!("quickstart PKI is DEV/TEST ONLY — do not use in production");
-    println!("OK: wrote dev PKI under {} and config {}", dir.display(), out_config.display());
+    println!(
+        "OK: wrote dev PKI under {} and config {}",
+        dir.display(),
+        out_config.display()
+    );
     println!("   ⚠  DEV/TEST ONLY — self-signed dev PKI, not for production.");
     println!("   Next: foundry serve --config {}", out_config.display());
     Ok(())

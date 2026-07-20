@@ -1,7 +1,7 @@
 //! X.509 parsing, inspection, and (DN-based) trust-path validation.
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crate::error::TrustError;
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Decode, DecodePem, Encode};
 use x509_cert::ext::pkix::name::GeneralName;
@@ -56,7 +56,9 @@ pub fn build_x5c(chain_pems: &[Vec<u8>]) -> Result<Vec<String>, TrustError> {
     let mut out = Vec::with_capacity(chain_pems.len());
     for pem in chain_pems {
         let cert = parse_cert_pem(pem)?;
-        let der = cert.to_der().map_err(|e| TrustError::Parse(e.to_string()))?;
+        let der = cert
+            .to_der()
+            .map_err(|e| TrustError::Parse(e.to_string()))?;
         out.push(B64.encode(&der));
     }
     Ok(out)
@@ -235,8 +237,14 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
     #[test]
     fn valid_leaf_against_anchor_passes() {
         let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
-        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
-            &["issuer.dev.local".to_string()], 365).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "issuer.dev.local",
+            &["issuer.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
         let store = TrustStore::from_pems(&[ca.cert_pem.into_bytes()]).unwrap();
         assert!(!store.is_empty());
         validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap();
@@ -254,8 +262,14 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
     #[test]
     fn expired_leaf_is_rejected() {
         let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
-        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
-            &["issuer.dev.local".to_string()], 365).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "issuer.dev.local",
+            &["issuer.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
         let store = TrustStore::from_pems(&[ca.cert_pem.into_bytes()]).unwrap();
         // now far in the future → outside the 365-day window.
         let future = now_secs() + 400 * 24 * 3600;
@@ -266,8 +280,14 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
     #[test]
     fn untrusted_anchor_is_rejected() {
         let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
-        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
-            &["issuer.dev.local".to_string()], 365).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "issuer.dev.local",
+            &["issuer.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
         let other = new_ca("Some Other CA", 3650).unwrap();
         let store = TrustStore::from_pems(&[other.cert_pem.into_bytes()]).unwrap();
         let err = validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap_err();
@@ -277,8 +297,14 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
     #[test]
     fn san_matching_works() {
         let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
-        let leaf = issue_leaf(&ca.cert_pem, &ca.key_pem, "issuer.dev.local",
-            &["issuer.dev.local".to_string()], 365).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "issuer.dev.local",
+            &["issuer.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
         assert!(match_san_dns(leaf.cert_pem.as_bytes(), "issuer.dev.local").unwrap());
         assert!(!match_san_dns(leaf.cert_pem.as_bytes(), "attacker.example.com").unwrap());
     }

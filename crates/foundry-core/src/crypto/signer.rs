@@ -112,7 +112,8 @@ mod tests {
         let path = dir.path().join("k.pem");
         std::fs::write(&path, &pem).unwrap();
 
-        let signer = FileSigner::from_pem_file(path.to_str().unwrap(), SignatureAlgorithm::Es256).unwrap();
+        let signer =
+            FileSigner::from_pem_file(path.to_str().unwrap(), SignatureAlgorithm::Es256).unwrap();
         let sig = signer.sign(b"hi").unwrap();
         assert_eq!(sig.len(), 64);
     }

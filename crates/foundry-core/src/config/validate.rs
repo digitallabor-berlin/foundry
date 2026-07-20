@@ -1,5 +1,8 @@
 use super::model::Config;
+use crate::crypto::{FileSigner, SignatureAlgorithm};
 use crate::error::ConfigError;
+use std::path::Path;
+use std::str::FromStr;
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -45,6 +48,56 @@ impl Config {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+impl Config {
+    /// Filesystem-aware validation: every key/cert reference must resolve
+    /// (relative to `base_dir`), keys must load as signers, x5c leaves must
+    /// parse and MUST NOT be self-signed (HAIP §6.1.1), and trust-anchor
+    /// certs must parse.
+    pub fn validate_key_material(&self, base_dir: &Path) -> Result<(), ConfigError> {
+        for (name, entry) in &self.keys {
+            let alg = SignatureAlgorithm::from_str(&entry.alg)
+                .map_err(|e| ConfigError::Validation(format!("key '{name}': {e}")))?;
+            let key_path = base_dir.join(&entry.private_key);
+            let key_path = key_path.to_string_lossy();
+            FileSigner::from_pem_file(&key_path, alg)
+                .map_err(|e| ConfigError::Validation(format!("key '{name}': {e}")))?;
+
+            if let Some(x5c) = &entry.x5c {
+                let cert_path = base_dir.join(x5c);
+                let pem = std::fs::read(&cert_path).map_err(|e| {
+                    ConfigError::Validation(format!(
+                        "key '{name}' x5c {}: {e}",
+                        cert_path.display()
+                    ))
+                })?;
+                let cert = crate::trust::parse_cert_pem(&pem)
+                    .map_err(|e| ConfigError::Validation(format!("key '{name}' x5c: {e}")))?;
+                if crate::trust::is_self_signed(&cert) {
+                    return Err(ConfigError::Validation(format!(
+                        "key '{name}' x5c leaf must not be self-signed (HAIP §6.1.1)"
+                    )));
+                }
+            }
+        }
+
+        for anchor in &self.trust_anchors {
+            let path = base_dir.join(&anchor.certs);
+            let pem = std::fs::read(&path).map_err(|e| {
+                ConfigError::Validation(format!(
+                    "trust anchor '{}' {}: {e}",
+                    anchor.name,
+                    path.display()
+                ))
+            })?;
+            crate::trust::parse_cert_pem(&pem).map_err(|e| {
+                ConfigError::Validation(format!("trust anchor '{}': {e}", anchor.name))
+            })?;
+        }
+
         Ok(())
     }
 }
