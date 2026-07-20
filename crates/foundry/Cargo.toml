@@ -1,0 +1,20 @@
+[package]
+name = "foundry"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "foundry"
+path = "src/main.rs"
+
+[dependencies]
+foundry-core = { path = "../foundry-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }

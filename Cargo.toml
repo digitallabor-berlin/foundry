@@ -5,6 +5,7 @@ members = [
     "crates/openid4vp",
     "crates/openid4vp-frontend",
     "crates/foundry-core",
+    "crates/foundry",
 ]
 
 [workspace.package]
