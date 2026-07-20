@@ -980,7 +980,7 @@ mod tests {
             "config", "validate", "--config", "c.json",
         ]);
         assert_eq!(cli.log_level, "debug");
-        matches!(cli.log_format, LogFormat::Json);
+        assert!(matches!(cli.log_format, LogFormat::Json));
         match cli.command {
             Command::Config { action: ConfigAction::Validate { config } } => {
                 assert_eq!(config.to_str().unwrap(), "c.json");
