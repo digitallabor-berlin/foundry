@@ -1947,6 +1947,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "foundry-issuer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "foundry-core",
+ "percent-encoding",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "foundry-mdoc"
 version = "0.1.0"
 dependencies = [
