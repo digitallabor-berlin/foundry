@@ -8,7 +8,7 @@ use crate::offer::{
     CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
 };
 use crate::status_index::allocate_status_index;
-use crate::transaction::{save_transaction, IssuanceState, IssuanceTransaction};
+use crate::transaction::{save_transaction_with_indices, IssuanceState, IssuanceTransaction};
 use foundry_core::config::Config;
 use foundry_core::storage::Storage;
 use serde::{Deserialize, Serialize};
@@ -86,10 +86,13 @@ pub async fn create_offer(
         pre_authorized_code: pre_authorized_code.clone(),
         tx_code: tx_code.clone(),
         status_list_index,
+        access_token: None,
+        c_nonce: None,
+        c_nonce_expires_at: None,
         state: IssuanceState::Offered,
         created_at: now_unix,
     };
-    save_transaction(storage, &tx, cfg.storage.transaction_ttl_secs, now_unix).await?;
+    save_transaction_with_indices(storage, &tx, cfg.storage.transaction_ttl_secs, now_unix).await?;
 
     let offer = CredentialOffer {
         credential_issuer: cfg

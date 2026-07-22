@@ -14,6 +14,9 @@ pub struct IssuanceTransaction {
     pub pre_authorized_code: String,
     pub tx_code: Option<String>,
     pub status_list_index: Option<u64>,
+    pub access_token: Option<String>,
+    pub c_nonce: Option<String>,
+    pub c_nonce_expires_at: Option<i64>,
     pub state: IssuanceState,
     pub created_at: i64,
 }
@@ -57,6 +60,51 @@ pub async fn load_transaction(
     }
 }
 
+const PRE_AUTH_NS: &str = "tx_pre_auth";
+const ACCESS_TOKEN_NS: &str = "tx_access_token";
+
+/// Persist a transaction along with secondary lookup indices for pre_authorized_code and access_token.
+pub async fn save_transaction_with_indices(
+    storage: &dyn Storage,
+    tx: &IssuanceTransaction,
+    ttl_secs: u64,
+    now_unix: i64,
+) -> Result<(), IssuanceError> {
+    save_transaction(storage, tx, ttl_secs, now_unix).await?;
+    let expires_at = now_unix + ttl_secs as i64;
+    storage
+        .put_kv(PRE_AUTH_NS, &tx.pre_authorized_code, &tx.transaction_id, Some(expires_at))
+        .await?;
+    if let Some(ref token) = tx.access_token {
+        storage
+            .put_kv(ACCESS_TOKEN_NS, token, &tx.transaction_id, Some(expires_at))
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn load_transaction_by_pre_auth_code(
+    storage: &dyn Storage,
+    code: &str,
+) -> Result<Option<IssuanceTransaction>, IssuanceError> {
+    if let Some(tx_id) = storage.get_kv(PRE_AUTH_NS, code).await? {
+        load_transaction(storage, &tx_id).await
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn load_transaction_by_access_token(
+    storage: &dyn Storage,
+    token: &str,
+) -> Result<Option<IssuanceTransaction>, IssuanceError> {
+    if let Some(tx_id) = storage.get_kv(ACCESS_TOKEN_NS, token).await? {
+        load_transaction(storage, &tx_id).await
+    } else {
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +128,9 @@ mod tests {
             pre_authorized_code: "code-123".to_string(),
             tx_code: Some("4242".to_string()),
             status_list_index: Some(7),
+            access_token: None,
+            c_nonce: None,
+            c_nonce_expires_at: None,
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
         }
@@ -101,5 +152,19 @@ mod tests {
         let storage = test_storage().await;
         let loaded = load_transaction(&storage, "does-not-exist").await.unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn lookup_by_pre_auth_code_and_access_token_round_trips() {
+        let storage = test_storage().await;
+        let mut tx = sample_tx("tx-auth-1");
+        tx.access_token = Some("bearer-token-xyz".to_string());
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000).await.unwrap();
+
+        let loaded_by_code = load_transaction_by_pre_auth_code(&storage, "code-123").await.unwrap().unwrap();
+        assert_eq!(loaded_by_code.transaction_id, "tx-auth-1");
+
+        let loaded_by_token = load_transaction_by_access_token(&storage, "bearer-token-xyz").await.unwrap().unwrap();
+        assert_eq!(loaded_by_token.transaction_id, "tx-auth-1");
     }
 }

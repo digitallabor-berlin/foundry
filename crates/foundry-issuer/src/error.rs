@@ -2,6 +2,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum IssuanceError {
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    #[error("invalid grant: {0}")]
+    InvalidGrant(String),
+    #[error("invalid proof: {0}")]
+    InvalidProof(String),
     #[error("unknown credential_type_id '{0}'")]
     UnknownCredentialType(String),
     #[error("claim validation failed: {0}")]
@@ -10,6 +16,10 @@ pub enum IssuanceError {
     StatusListExhausted(String),
     #[error(transparent)]
     Storage(#[from] foundry_core::error::StorageError),
+    #[error(transparent)]
+    Crypto(#[from] foundry_core::error::CryptoError),
+    #[error(transparent)]
+    Trust(#[from] foundry_core::error::TrustError),
     #[error("serialization failed: {0}")]
     Serialization(String),
     #[error("deserialization failed: {0}")]
