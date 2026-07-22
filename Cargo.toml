@@ -8,6 +8,7 @@ members = [
     "crates/foundry",
     "crates/foundry-sd-jwt-vc",
     "crates/foundry-mdoc",
+    "crates/foundry-issuer",
 ]
 
 [workspace.package]
@@ -38,5 +39,6 @@ ciborium = "0.2"
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
+percent-encoding = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 flate2 = "1"
