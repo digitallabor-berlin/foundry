@@ -11,7 +11,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateVerificationRequest {
     pub dcql_query: Option<serde_json::Value>,
     pub named_query_ref: Option<String>,
@@ -24,7 +24,7 @@ fn default_transport() -> String {
     "request_uri".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateVerificationResponse {
     pub verification_id: String,
     pub request_uri: Option<String>,

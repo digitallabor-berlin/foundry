@@ -13,7 +13,7 @@ use foundry_core::config::Config;
 use foundry_core::storage::Storage;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct CreateOfferRequest {
     pub credential_type_id: String,
     #[serde(default)]
@@ -22,7 +22,7 @@ pub struct CreateOfferRequest {
     pub tx_code_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CreateOfferResponse {
     pub transaction_id: String,
     pub credential_offer: CredentialOffer,

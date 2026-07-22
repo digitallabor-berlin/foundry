@@ -16,6 +16,7 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
 josekit = { workspace = true }
+utoipa = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 percent-encoding = { workspace = true }
 tracing = { workspace = true }

@@ -43,3 +43,5 @@ hex = "0.4"
 percent-encoding = "2"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 flate2 = "1"
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "6", features = ["axum"] }

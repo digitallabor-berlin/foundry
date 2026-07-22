@@ -16,6 +16,7 @@ rand = { workspace = true }
 base64 = { workspace = true }
 percent-encoding = { workspace = true }
 josekit = { workspace = true }
+utoipa = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

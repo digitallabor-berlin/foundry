@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 const NAMESPACE: &str = "verification_tx";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationState {
     Pending,
@@ -12,21 +12,21 @@ pub enum VerificationState {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CheckResult {
     pub check: String,
     pub passed: bool,
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationResult {
     pub verified: bool,
     pub checks: Vec<CheckResult>,
     pub claims: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationTransaction {
     pub id: String,
     pub state: VerificationState,
