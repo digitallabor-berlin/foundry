@@ -1,6 +1,7 @@
 //! Token Status List (IETF draft-ietf-oauth-status-list-14): bit-packed
 //! status arrays, zlib compression, and signed Status List Tokens.
 
+use crate::crypto::Signer;
 use crate::error::FormatError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
 use serde_json::{json, Value};
@@ -184,6 +185,61 @@ impl StatusList {
     }
 }
 
+/// Claims for a Status List Token, excluding the `status_list` body itself
+/// (draft-ietf-oauth-status-list-14 §5.1).
+pub struct StatusListTokenClaims {
+    pub sub: String,
+    pub iat: i64,
+    pub exp: Option<i64>,
+    pub ttl: Option<i64>,
+}
+
+fn b64url_json(value: &Value) -> Result<String, FormatError> {
+    let bytes = serde_json::to_vec(value).map_err(|e| FormatError::Serialization(e.to_string()))?;
+    Ok(B64URL.encode(bytes))
+}
+
+/// Build and sign a Status List Token (compact JWS, `typ: statuslist+jwt`)
+/// per draft-ietf-oauth-status-list-14 §5.1.
+pub fn build_status_list_token(
+    claims: StatusListTokenClaims,
+    status_list: &StatusList,
+    signer: &dyn Signer,
+    x5c: Option<Vec<String>>,
+) -> Result<String, FormatError> {
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "alg".into(),
+        Value::String(signer.algorithm().as_str().to_string()),
+    );
+    header.insert("typ".into(), Value::String("statuslist+jwt".into()));
+    if let Some(chain) = x5c {
+        header.insert(
+            "x5c".into(),
+            Value::Array(chain.into_iter().map(Value::String).collect()),
+        );
+    }
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("sub".into(), Value::String(claims.sub));
+    payload.insert("iat".into(), Value::Number(claims.iat.into()));
+    if let Some(exp) = claims.exp {
+        payload.insert("exp".into(), Value::Number(exp.into()));
+    }
+    if let Some(ttl) = claims.ttl {
+        payload.insert("ttl".into(), Value::Number(ttl.into()));
+    }
+    payload.insert("status_list".into(), status_list.to_json());
+
+    let header_b64 = b64url_json(&Value::Object(header))?;
+    let payload_b64 = b64url_json(&Value::Object(payload))?;
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let signature = signer
+        .sign(signing_input.as_bytes())
+        .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+    Ok(format!("{signing_input}.{}", B64URL.encode(signature)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +401,48 @@ mod tests {
         assert!(matches!(err, FormatError::InvalidStructure(_)));
         let err = StatusList::from_json(&serde_json::json!({"bits": 2})).unwrap_err();
         assert!(matches!(err, FormatError::InvalidStructure(_)));
+    }
+
+    #[test]
+    fn build_status_list_token_produces_compact_jws_with_correct_typ() {
+        use crate::crypto::{FileSigner, SignatureAlgorithm};
+        use crate::pki::{issue_leaf, new_ca};
+
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "localhost",
+            &["localhost".to_string()],
+            365,
+        )
+        .unwrap();
+        let signer = FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+        let x5c = crate::trust::build_x5c(&[leaf.cert_pem.into_bytes()]).unwrap();
+
+        let list = StatusList::build(&[0, 1, 2, 0], 2, None).unwrap();
+        let claims = StatusListTokenClaims {
+            sub: "https://example.com/statuslists/1".to_string(),
+            iat: 1_700_000_000,
+            exp: Some(1_800_000_000),
+            ttl: None,
+        };
+        let token = build_status_list_token(claims, &list, &signer, Some(x5c)).unwrap();
+
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3);
+        let header: Value = serde_json::from_slice(
+            &B64URL.decode(parts[0]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(header["typ"], "statuslist+jwt");
+        assert_eq!(header["alg"], "ES256");
+        assert!(header["x5c"].is_array());
+        let payload: Value = serde_json::from_slice(
+            &B64URL.decode(parts[1]).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["sub"], "https://example.com/statuslists/1");
+        assert_eq!(payload["status_list"]["bits"], 2);
     }
 }

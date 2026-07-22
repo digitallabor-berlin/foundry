@@ -64,6 +64,25 @@ pub fn build_x5c(chain_pems: &[Vec<u8>]) -> Result<Vec<String>, TrustError> {
     Ok(out)
 }
 
+/// Rebuild a PEM certificate from a single `x5c` entry (base64-STANDARD DER),
+/// as found in a JOSE header per RFC 7515 §4.1.6.
+pub fn x5c_entry_to_pem(standard_b64: &str) -> Result<Vec<u8>, TrustError> {
+    let der = B64
+        .decode(standard_b64)
+        .map_err(|e| TrustError::Parse(format!("x5c base64 decode: {e}")))?;
+    let re_b64 = B64.encode(&der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    let mut i = 0;
+    while i < re_b64.len() {
+        let end = (i + 64).min(re_b64.len());
+        pem.push_str(&re_b64[i..end]);
+        pem.push('\n');
+        i = end;
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    Ok(pem.into_bytes())
+}
+
 /// A set of trust-anchor certificates.
 pub struct TrustStore {
     anchors: Vec<Certificate>,
@@ -327,5 +346,14 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         .unwrap();
         assert!(match_san_dns(leaf.cert_pem.as_bytes(), "issuer.dev.local").unwrap());
         assert!(!match_san_dns(leaf.cert_pem.as_bytes(), "attacker.example.com").unwrap());
+    }
+
+    #[test]
+    fn x5c_entry_to_pem_round_trips_a_cert() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let der_b64 = &build_x5c(&[ca.cert_pem.clone().into_bytes()]).unwrap()[0];
+        let pem = x5c_entry_to_pem(der_b64).unwrap();
+        let reparsed = parse_cert_pem(&pem).unwrap();
+        assert!(is_self_signed(&reparsed));
     }
 }
