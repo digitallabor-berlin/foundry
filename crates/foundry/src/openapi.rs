@@ -2,6 +2,13 @@ use utoipa::OpenApi;
 
 #[derive(OpenApi)]
 #[openapi(
+    paths(
+        crate::server::health,
+        crate::server::ready,
+        crate::server::create_offer_handler,
+        crate::server::create_verification_handler,
+        crate::server::get_verification_handler,
+    ),
     components(
         schemas(
             foundry_issuer::CreateOfferRequest,

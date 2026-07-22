@@ -8,6 +8,11 @@ use axum::{
 };
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
+use foundry_issuer::{CreateOfferRequest, CreateOfferResponse};
+use foundry_verifier::{
+    CreateVerificationRequest, CreateVerificationResponse, VerificationTransaction,
+};
+use utoipa::OpenApi;
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -21,8 +26,18 @@ pub struct AppState {
 pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
     let unauthenticated = Router::new()
         .route("/health", get(health))
-        .route("/ready", get(ready))
-        .with_state(state.clone());
+        .route("/ready", get(ready));
+
+    let unauthenticated = if state.config.server.admin.swagger_ui_enabled {
+        unauthenticated.merge(
+            utoipa_swagger_ui::SwaggerUi::new("/swagger-ui")
+                .url("/api-docs/openapi.json", crate::openapi::ApiDoc::openapi()),
+        )
+    } else {
+        unauthenticated.route("/api-docs/openapi.json", get(openapi_json_handler))
+    };
+
+    let unauthenticated = unauthenticated.with_state(state.clone());
 
     let authenticated = Router::new()
         .route("/admin/issuance/offers", post(create_offer_handler))
@@ -72,11 +87,26 @@ async fn auth_server_metadata(
     ))
 }
 
-async fn health() -> &'static str {
+pub(crate) async fn openapi_json_handler() -> (
+    [(axum::http::header::HeaderName, &'static str); 1],
+    String,
+) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json",
+        )],
+        crate::openapi::generate_openapi_spec(),
+    )
+}
+
+#[utoipa::path(get, path = "/health", responses((status = 200, body = String)))]
+pub(crate) async fn health() -> &'static str {
     "ok"
 }
 
-async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode> {
+#[utoipa::path(get, path = "/ready", responses((status = 200, body = String)))]
+pub(crate) async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode> {
     // Readiness = storage reachable. A cheap purge with a far-past timestamp
     // touches the DB without deleting live rows.
     match state.storage.purge_expired(0).await {
@@ -85,10 +115,16 @@ async fn ready(State(state): State<AppState>) -> Result<&'static str, StatusCode
     }
 }
 
-async fn create_offer_handler(
+#[utoipa::path(
+    post,
+    path = "/admin/issuance/offers",
+    request_body = CreateOfferRequest,
+    responses((status = 200, body = CreateOfferResponse))
+)]
+pub(crate) async fn create_offer_handler(
     State(state): State<AppState>,
-    Json(req): Json<foundry_issuer::CreateOfferRequest>,
-) -> Result<Json<foundry_issuer::CreateOfferResponse>, (StatusCode, Json<serde_json::Value>)> {
+    Json(req): Json<CreateOfferRequest>,
+) -> Result<Json<CreateOfferResponse>, (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -254,10 +290,16 @@ fn verifier_wallet_error_response(
     )
 }
 
-async fn create_verification_handler(
+#[utoipa::path(
+    post,
+    path = "/admin/verification/requests",
+    request_body = CreateVerificationRequest,
+    responses((status = 200, body = CreateVerificationResponse))
+)]
+pub(crate) async fn create_verification_handler(
     State(state): State<AppState>,
-    Json(req): Json<foundry_verifier::CreateVerificationRequest>,
-) -> Result<Json<foundry_verifier::CreateVerificationResponse>, (StatusCode, Json<serde_json::Value>)> {
+    Json(req): Json<CreateVerificationRequest>,
+) -> Result<Json<CreateVerificationResponse>, (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -268,10 +310,15 @@ async fn create_verification_handler(
         .map_err(|e| verifier_admin_error_response(&e))
 }
 
-async fn get_verification_handler(
+#[utoipa::path(
+    get,
+    path = "/admin/verification/requests/{id}",
+    responses((status = 200, body = VerificationTransaction), (status = 404))
+)]
+pub(crate) async fn get_verification_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<foundry_verifier::VerificationTransaction>, StatusCode> {
+) -> Result<Json<VerificationTransaction>, StatusCode> {
     let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
