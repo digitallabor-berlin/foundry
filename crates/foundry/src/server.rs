@@ -1,7 +1,7 @@
 use crate::admin_auth::{require_api_key, AdminApiKey};
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware,
     routing::{get, post},
     Json, Router,
@@ -42,6 +42,9 @@ pub fn wallet_router(state: AppState) -> Router {
             "/.well-known/oauth-authorization-server",
             get(auth_server_metadata),
         )
+        .route("/token", post(token_handler))
+        .route("/nonce", post(nonce_handler))
+        .route("/credential", post(credential_handler))
         .with_state(state)
 }
 
@@ -93,12 +96,121 @@ fn admin_error_response(
     let status = match e {
         UnknownCredentialType(_) | ClaimValidation(_) => StatusCode::BAD_REQUEST,
         StatusListExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
-        Storage(_) | Serialization(_) | Deserialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (
         status,
         Json(serde_json::json!({ "error": e.to_string(), "message": e.to_string() })),
     )
+}
+
+fn wallet_error_response(
+    e: &foundry_issuer::IssuanceError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use foundry_issuer::IssuanceError::*;
+    let (status, code) = match e {
+        InvalidGrant(_) => (StatusCode::BAD_REQUEST, "invalid_grant"),
+        InvalidProof(_) => (StatusCode::BAD_REQUEST, "invalid_proof"),
+        InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        UnknownCredentialType(_) | ClaimValidation(_) => {
+            (StatusCode::BAD_REQUEST, "invalid_credential_request")
+        }
+        StatusListExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": code,
+            "error_description": e.to_string(),
+        })),
+    )
+}
+
+async fn token_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
+) -> Result<Json<foundry_issuer::TokenResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let req: foundry_issuer::TokenRequest = if content_type.contains("application/json") {
+        serde_json::from_slice(&body_bytes).map_err(|e| {
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(e.to_string()))
+        })?
+    } else {
+        serde_html_form::from_bytes(&body_bytes).map_err(|e| {
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(e.to_string()))
+        })?
+    };
+
+    let attestation_hdr = headers
+        .get("OAuth-Client-Attestation")
+        .and_then(|v| v.to_str().ok());
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    foundry_issuer::handle_token_request(
+        state.storage.as_ref(),
+        &req,
+        state.config.issuer.wallet_attestation.mode.clone(),
+        attestation_hdr,
+        now,
+    )
+    .await
+    .map(Json)
+    .map_err(|e| wallet_error_response(&e))
+}
+
+async fn nonce_handler() -> Json<serde_json::Value> {
+    let c_nonce = format!("cn_{}", uuid::Uuid::new_v4().simple());
+    Json(serde_json::json!({
+        "c_nonce": c_nonce,
+        "c_nonce_expires_in": 600
+    }))
+}
+
+async fn credential_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<foundry_issuer::CredentialRequest>,
+) -> Result<Json<foundry_issuer::CredentialResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
+                "missing authorization header".into(),
+            ))
+        })?;
+
+    let access_token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+        wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
+            "invalid bearer authorization header".into(),
+        ))
+    })?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    foundry_issuer::handle_credential_request(
+        &state.config,
+        state.storage.as_ref(),
+        access_token,
+        &req,
+        now,
+    )
+    .await
+    .map(Json)
+    .map_err(|e| wallet_error_response(&e))
 }
 
 pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
