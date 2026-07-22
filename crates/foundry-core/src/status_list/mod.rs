@@ -46,8 +46,14 @@ mod tests {
 
     #[test]
     fn status_value_unknown_is_application_specific() {
-        assert_eq!(StatusValue::from_u8(0x03), StatusValue::ApplicationSpecific(3));
-        assert_eq!(StatusValue::from_u8(0x0C), StatusValue::ApplicationSpecific(12));
+        assert_eq!(
+            StatusValue::from_u8(0x03),
+            StatusValue::ApplicationSpecific(3)
+        );
+        assert_eq!(
+            StatusValue::from_u8(0x0C),
+            StatusValue::ApplicationSpecific(12)
+        );
         assert_eq!(StatusValue::ApplicationSpecific(7).to_u8(), 7);
     }
 }
