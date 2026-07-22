@@ -401,6 +401,95 @@ pub fn verify_status_list_token(
     })
 }
 
+pub const STATUS_LIST_NAMESPACE: &str = "status_lists";
+
+/// A persistent status list stored in Storage.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistentStatusList {
+    pub credential_type: String,
+    pub bits: u8,
+    pub raw: Vec<u8>,
+}
+
+impl PersistentStatusList {
+    pub fn new(credential_type: impl Into<String>, list_size: u64, bits: u8) -> Self {
+        let per_byte = (8 / bits as usize) as u64;
+        let len = (list_size.div_ceil(per_byte)) as usize;
+        Self {
+            credential_type: credential_type.into(),
+            bits,
+            raw: vec![0u8; len],
+        }
+    }
+
+    pub fn get_status(&self, idx: u64) -> Result<StatusValue, FormatError> {
+        if self.raw.is_empty() {
+            return Ok(StatusValue::Valid);
+        }
+        let per_byte = (8 / self.bits as usize) as u64;
+        let byte_idx = (idx / per_byte) as usize;
+        if byte_idx >= self.raw.len() {
+            return Ok(StatusValue::Valid);
+        }
+        let v = unpack_status(&self.raw, self.bits, idx)?;
+        Ok(StatusValue::from_u8(v))
+    }
+
+    pub fn set_status(&mut self, idx: u64, status: StatusValue) -> Result<(), FormatError> {
+        let bits = self.bits;
+        checked_bits(bits)?;
+        let per_byte = (8 / bits as usize) as u64;
+        let byte_idx = (idx / per_byte) as usize;
+        let bit_offset = ((idx % per_byte) * bits as u64) as u32;
+        let mask = ((1u16 << bits) - 1) as u8;
+        let val = status.to_u8();
+        if val > mask {
+            return Err(FormatError::InvalidStructure(format!(
+                "status value {val} does not fit in {bits} bits"
+            )));
+        }
+        if byte_idx >= self.raw.len() {
+            self.raw.resize(byte_idx + 1, 0);
+        }
+        self.raw[byte_idx] &= !(mask << bit_offset);
+        self.raw[byte_idx] |= (val & mask) << bit_offset;
+        Ok(())
+    }
+
+    pub fn to_status_list(&self, aggregation_uri: Option<String>) -> Result<StatusList, FormatError> {
+        let compressed = compress_zlib(&self.raw)?;
+        Ok(StatusList {
+            bits: self.bits,
+            lst_b64url: B64URL.encode(compressed),
+            aggregation_uri,
+        })
+    }
+}
+
+pub async fn load_status_list(
+    storage: &dyn crate::storage::Storage,
+    credential_type: &str,
+) -> Result<Option<PersistentStatusList>, crate::error::StorageError> {
+    if let Some(json_str) = storage.get_kv(STATUS_LIST_NAMESPACE, credential_type).await? {
+        let list: PersistentStatusList = serde_json::from_str(&json_str)
+            .map_err(|e| crate::error::StorageError::Backend(e.to_string()))?;
+        Ok(Some(list))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn save_status_list(
+    storage: &dyn crate::storage::Storage,
+    list: &PersistentStatusList,
+) -> Result<(), crate::error::StorageError> {
+    let json_str = serde_json::to_string(list)
+        .map_err(|e| crate::error::StorageError::Backend(e.to_string()))?;
+    storage
+        .put_kv(STATUS_LIST_NAMESPACE, &list.credential_type, &json_str, None)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +868,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, FormatError::SignatureVerification(_)));
+    }
+
+    #[tokio::test]
+    async fn persistent_status_list_storage_roundtrip() {
+        use crate::storage::SqliteStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::connect(db_path.to_str().unwrap()).await.unwrap();
+
+        let loaded = load_status_list(&storage, "pid").await.unwrap();
+        assert!(loaded.is_none());
+
+        let mut list = PersistentStatusList::new("pid", 1024, 2);
+        assert_eq!(list.get_status(42).unwrap(), StatusValue::Valid);
+
+        list.set_status(42, StatusValue::Invalid).unwrap();
+        list.set_status(100, StatusValue::Suspended).unwrap();
+        assert_eq!(list.get_status(42).unwrap(), StatusValue::Invalid);
+        assert_eq!(list.get_status(100).unwrap(), StatusValue::Suspended);
+
+        save_status_list(&storage, &list).await.unwrap();
+
+        let loaded = load_status_list(&storage, "pid").await.unwrap().unwrap();
+        assert_eq!(loaded.get_status(42).unwrap(), StatusValue::Invalid);
+        assert_eq!(loaded.get_status(100).unwrap(), StatusValue::Suspended);
+        assert_eq!(loaded.get_status(0).unwrap(), StatusValue::Valid);
+
+        let status_list = loaded.to_status_list(None).unwrap();
+        assert_eq!(status_list.status_at(42).unwrap(), StatusValue::Invalid);
+        assert_eq!(status_list.status_at(100).unwrap(), StatusValue::Suspended);
     }
 }

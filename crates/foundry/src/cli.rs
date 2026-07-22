@@ -58,6 +58,11 @@ pub enum Command {
         #[arg(long)]
         out: String,
     },
+    /// Manage Token Status Lists offline (get, set status bit, generate status list token).
+    StatusList {
+        #[command(subcommand)]
+        command: StatusListCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -112,6 +117,37 @@ pub enum CertAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum StatusListCommands {
+    /// Get status value at a specific index.
+    Get {
+        #[arg(long, default_value = "./foundry.db")]
+        db: String,
+        #[arg(long, rename_all = "kebab-case")]
+        credential_type: String,
+        #[arg(long)]
+        index: u64,
+    },
+    /// Set status value at a specific index (valid, revoked, suspended).
+    Set {
+        #[arg(long, default_value = "./foundry.db")]
+        db: String,
+        #[arg(long, rename_all = "kebab-case")]
+        credential_type: String,
+        #[arg(long)]
+        index: u64,
+        #[arg(long)]
+        status: String,
+    },
+    /// Generate and print a signed Status List Token JWT.
+    Token {
+        #[arg(long)]
+        config: String,
+        #[arg(long, rename_all = "kebab-case")]
+        credential_type: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +193,40 @@ mod tests {
         match cli.command {
             Command::Openapi { out } => assert_eq!(out, "spec.json"),
             _ => panic!("expected openapi"),
+        }
+    }
+
+    #[test]
+    fn parses_status_list_commands() {
+        let cli = Cli::parse_from([
+            "foundry",
+            "status-list",
+            "set",
+            "--db",
+            "db.sqlite",
+            "--credential-type",
+            "pid",
+            "--index",
+            "42",
+            "--status",
+            "revoked",
+        ]);
+        match cli.command {
+            Command::StatusList {
+                command:
+                    StatusListCommands::Set {
+                        db,
+                        credential_type,
+                        index,
+                        status,
+                    },
+            } => {
+                assert_eq!(db, "db.sqlite");
+                assert_eq!(credential_type, "pid");
+                assert_eq!(index, 42);
+                assert_eq!(status, "revoked");
+            }
+            _ => panic!("expected status-list set"),
         }
     }
 }

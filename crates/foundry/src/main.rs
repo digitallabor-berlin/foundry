@@ -1,5 +1,5 @@
 use clap::Parser;
-use foundry::cli::{CertAction, Cli, Command, ConfigAction, KeysAction};
+use foundry::cli::{CertAction, Cli, Command, ConfigAction, KeysAction, StatusListCommands};
 use foundry::{commands, logging, server};
 use foundry_core::config::Config;
 
@@ -58,5 +58,22 @@ async fn main() -> anyhow::Result<()> {
             println!("Wrote OpenAPI spec to {out}");
             Ok(())
         }
+        Command::StatusList { command } => match command {
+            StatusListCommands::Get {
+                db,
+                credential_type,
+                index,
+            } => commands::status_list_get(&db, &credential_type, index).await,
+            StatusListCommands::Set {
+                db,
+                credential_type,
+                index,
+                status,
+            } => commands::status_list_set(&db, &credential_type, index, &status).await,
+            StatusListCommands::Token {
+                config,
+                credential_type,
+            } => commands::status_list_token(&config, &credential_type).await,
+        },
     }
 }

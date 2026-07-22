@@ -1,8 +1,14 @@
 //! Thin CLI command handlers: parse-free logic that calls foundry-core and does file IO.
 
 use anyhow::Context;
-use foundry_core::crypto::SignatureAlgorithm;
+use foundry_core::config::Config;
+use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
+use foundry_core::status_list::{
+    build_status_list_token, load_status_list, save_status_list, PersistentStatusList,
+    StatusListTokenClaims, StatusValue,
+};
+use foundry_core::storage::SqliteStorage;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -106,6 +112,142 @@ pub fn quickstart(dir: &Path, out_config: &Path) -> anyhow::Result<()> {
     );
     println!("   ⚠  DEV/TEST ONLY — self-signed dev PKI, not for production.");
     println!("   Next: foundry serve --config {}", out_config.display());
+    Ok(())
+}
+
+/// `foundry status-list get` — get status value at index.
+pub async fn status_list_get(db: &str, credential_type: &str, index: u64) -> anyhow::Result<()> {
+    let storage = SqliteStorage::connect(db)
+        .await
+        .with_context(|| format!("connecting to database at {db}"))?;
+    let list = load_status_list(&storage, credential_type)
+        .await
+        .with_context(|| format!("loading status list for {credential_type}"))?;
+    let status = match list {
+        Some(l) => l.get_status(index)?,
+        None => StatusValue::Valid,
+    };
+    let status_name = match status {
+        StatusValue::Valid => "valid".to_string(),
+        StatusValue::Invalid => "revoked".to_string(),
+        StatusValue::Suspended => "suspended".to_string(),
+        StatusValue::ApplicationSpecific(v) => format!("{v}"),
+    };
+    println!("Status: {status_name}");
+    Ok(())
+}
+
+/// `foundry status-list set` — set status value at index.
+pub async fn status_list_set(
+    db: &str,
+    credential_type: &str,
+    index: u64,
+    status: &str,
+) -> anyhow::Result<()> {
+    let storage = SqliteStorage::connect(db)
+        .await
+        .with_context(|| format!("connecting to database at {db}"))?;
+    let mut list = load_status_list(&storage, credential_type)
+        .await
+        .with_context(|| format!("loading status list for {credential_type}"))?
+        .unwrap_or_else(|| PersistentStatusList::new(credential_type, 1_048_576, 2));
+
+    let parsed_status = match status.to_lowercase().as_str() {
+        "valid" | "0" => StatusValue::Valid,
+        "revoked" | "invalid" | "1" => StatusValue::Invalid,
+        "suspended" | "2" => StatusValue::Suspended,
+        other => {
+            if let Ok(v) = other.parse::<u8>() {
+                StatusValue::ApplicationSpecific(v)
+            } else {
+                anyhow::bail!("invalid status value '{status}', expected 'valid', 'revoked', or 'suspended'");
+            }
+        }
+    };
+
+    list.set_status(index, parsed_status)?;
+    save_status_list(&storage, &list)
+        .await
+        .with_context(|| format!("saving status list for {credential_type}"))?;
+
+    println!("Updated index {index} for {credential_type} to {status}");
+    Ok(())
+}
+
+/// `foundry status-list token` — generate and print a signed Status List Token JWT.
+pub async fn status_list_token(config_path: &str, credential_type: &str) -> anyhow::Result<()> {
+    let cfg = Config::load(Path::new(config_path))
+        .with_context(|| format!("loading config from {config_path}"))?;
+    let base_dir = Path::new(config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    let storage_path = base_dir.join(&cfg.storage.path);
+    let db_str = storage_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("invalid storage path"))?;
+    let storage = SqliteStorage::connect(db_str)
+        .await
+        .with_context(|| format!("connecting to database at {db_str}"))?;
+
+    let persistent_list = load_status_list(&storage, credential_type)
+        .await
+        .with_context(|| format!("loading status list for {credential_type}"))?
+        .unwrap_or_else(|| {
+            PersistentStatusList::new(
+                credential_type,
+                cfg.issuer.status_list.list_size.unwrap_or(1_048_576),
+                2,
+            )
+        });
+
+    let status_list = persistent_list.to_status_list(None)?;
+
+    let base_url = cfg
+        .issuer
+        .status_list
+        .public_base_url
+        .as_deref()
+        .unwrap_or(&cfg.issuer.credential_issuer);
+    let sub = format!("{}/{}", base_url.trim_end_matches('/'), credential_type);
+
+    let key_name = cfg
+        .issuer
+        .status_list
+        .signing_key
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("issuer.status_list.signing_key is not configured"))?;
+    let key_entry = cfg.keys.get(key_name).ok_or_else(|| {
+        anyhow::anyhow!("key '{key_name}' referenced by status_list signing_key not found")
+    })?;
+
+    let key_file = base_dir.join(&key_entry.private_key);
+    let alg = key_entry.alg.parse()?;
+    let signer = FileSigner::from_pem_file(&key_file.to_string_lossy(), alg)?;
+
+    let x5c = if let Some(x5c_rel) = &key_entry.x5c {
+        let cert_file = base_dir.join(x5c_rel);
+        let pem_bytes = std::fs::read(&cert_file)
+            .with_context(|| format!("reading x5c cert from {}", cert_file.display()))?;
+        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
+    } else {
+        None
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("getting system time")?
+        .as_secs() as i64;
+
+    let claims = StatusListTokenClaims {
+        sub,
+        iat: now,
+        exp: Some(now + 86400),
+        ttl: None,
+    };
+
+    let token = build_status_list_token(claims, &status_list, &signer, x5c)?;
+    println!("{token}");
     Ok(())
 }
 
