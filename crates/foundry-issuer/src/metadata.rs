@@ -110,7 +110,7 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
         token_endpoint: format!("{base}/token"),
         nonce_endpoint: Some(format!("{base}/nonce")),
         grant_types_supported: vec![
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string()
         ],
         pre_authorized_grant_anonymous_access_supported: true,
     }
@@ -147,8 +147,12 @@ mod tests {
             trust_anchors: Vec::new(),
             issuer: IssuerConfig {
                 credential_issuer: "https://issuer.example.com".to_string(),
-                wallet_attestation: AttestationMode { mode: Mode::Optional },
-                key_attestation: AttestationMode { mode: Mode::Optional },
+                wallet_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
+                key_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
                 status_list: StatusListConfig {
                     enabled: true,
                     signing_key: None,
@@ -185,12 +189,24 @@ mod tests {
         let cfg = test_config();
         let meta = build_issuer_metadata(&cfg);
         assert_eq!(meta.credential_issuer, "https://issuer.example.com");
-        assert_eq!(meta.credential_endpoint, "https://issuer.example.com/credential");
-        assert_eq!(meta.nonce_endpoint.as_deref(), Some("https://issuer.example.com/nonce"));
+        assert_eq!(
+            meta.credential_endpoint,
+            "https://issuer.example.com/credential"
+        );
+        assert_eq!(
+            meta.nonce_endpoint.as_deref(),
+            Some("https://issuer.example.com/nonce")
+        );
         let pid = meta.credential_configurations_supported.get("pid").unwrap();
         assert_eq!(pid.format, "dc+sd-jwt");
-        assert_eq!(pid.vct.as_deref(), Some("https://issuer.example.com/vct/pid"));
-        assert_eq!(pid.cryptographic_binding_methods_supported, vec!["jwk".to_string()]);
+        assert_eq!(
+            pid.vct.as_deref(),
+            Some("https://issuer.example.com/vct/pid")
+        );
+        assert_eq!(
+            pid.cryptographic_binding_methods_supported,
+            vec!["jwk".to_string()]
+        );
         assert!(pid.proof_types_supported.contains_key("jwt"));
     }
 
@@ -199,7 +215,10 @@ mod tests {
         let mut cfg = test_config();
         cfg.issuer.credential_issuer = "https://issuer.example.com/".to_string();
         let meta = build_issuer_metadata(&cfg);
-        assert_eq!(meta.credential_endpoint, "https://issuer.example.com/credential");
+        assert_eq!(
+            meta.credential_endpoint,
+            "https://issuer.example.com/credential"
+        );
     }
 
     #[test]
