@@ -2,6 +2,8 @@
 //! status arrays, zlib compression, and signed Status List Tokens.
 
 use crate::error::FormatError;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use serde_json::{json, Value};
 
 /// A Referenced Token's status (draft-ietf-oauth-status-list-14 §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +112,76 @@ pub fn decompress_zlib(compressed: &[u8]) -> Result<Vec<u8>, FormatError> {
         .read_to_end(&mut out)
         .map_err(|e| FormatError::Deserialization(format!("zlib decompress: {e}")))?;
     Ok(out)
+}
+
+/// A Status List per draft-ietf-oauth-status-list-14 §4.2 (JSON encoding).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusList {
+    pub bits: u8,
+    pub lst_b64url: String,
+    pub aggregation_uri: Option<String>,
+}
+
+impl StatusList {
+    /// Build a Status List from per-token status values.
+    pub fn build(
+        values: &[u8],
+        bits: u8,
+        aggregation_uri: Option<String>,
+    ) -> Result<Self, FormatError> {
+        let raw = pack_status_array(values, bits)?;
+        let compressed = compress_zlib(&raw)?;
+        Ok(Self {
+            bits,
+            lst_b64url: B64URL.encode(compressed),
+            aggregation_uri,
+        })
+    }
+
+    /// Decompress `lst` back into the raw, unpacked-ready byte array.
+    pub fn decode_bytes(&self) -> Result<Vec<u8>, FormatError> {
+        let compressed = B64URL
+            .decode(&self.lst_b64url)
+            .map_err(|e| FormatError::Deserialization(format!("lst base64: {e}")))?;
+        decompress_zlib(&compressed)
+    }
+
+    /// Look up a single Referenced Token's status by index.
+    pub fn status_at(&self, idx: u64) -> Result<StatusValue, FormatError> {
+        let raw = self.decode_bytes()?;
+        let v = unpack_status(&raw, self.bits, idx)?;
+        Ok(StatusValue::from_u8(v))
+    }
+
+    pub fn to_json(&self) -> Value {
+        let mut obj = json!({ "bits": self.bits, "lst": self.lst_b64url });
+        if let Some(uri) = &self.aggregation_uri {
+            obj["aggregation_uri"] = json!(uri);
+        }
+        obj
+    }
+
+    pub fn from_json(value: &Value) -> Result<Self, FormatError> {
+        let bits = value
+            .get("bits")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| FormatError::InvalidStructure("status_list.bits missing".into()))?
+            as u8;
+        let lst_b64url = value
+            .get("lst")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| FormatError::InvalidStructure("status_list.lst missing".into()))?
+            .to_string();
+        let aggregation_uri = value
+            .get("aggregation_uri")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        Ok(Self {
+            bits,
+            lst_b64url,
+            aggregation_uri,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -235,5 +307,43 @@ mod tests {
     fn decompress_rejects_garbage() {
         let err = decompress_zlib(&[0x00, 0x01, 0x02]).unwrap_err();
         assert!(matches!(err, FormatError::Deserialization(_)));
+    }
+
+    #[test]
+    fn status_list_build_and_status_at_round_trips() {
+        // idx: 0=Invalid(1), 1=Suspended(2), 2=Valid(0), 3=ApplicationSpecific(3), 4=Suspended(2)
+        let list = StatusList::build(&[1, 2, 0, 3, 2], 2, None).unwrap();
+        assert_eq!(list.bits, 2);
+        assert_eq!(list.status_at(0).unwrap(), StatusValue::Invalid);
+        assert_eq!(list.status_at(1).unwrap(), StatusValue::Suspended);
+        assert_eq!(list.status_at(2).unwrap(), StatusValue::Valid);
+        assert_eq!(list.status_at(3).unwrap(), StatusValue::ApplicationSpecific(3));
+        assert_eq!(list.status_at(4).unwrap(), StatusValue::Suspended);
+    }
+
+    #[test]
+    fn status_list_decode_bytes_matches_packed_array() {
+        let list = StatusList::build(&[1, 2, 0, 3, 2], 2, None).unwrap();
+        assert_eq!(list.decode_bytes().unwrap(), vec![0xC9, 0x02]);
+    }
+
+    #[test]
+    fn status_list_json_round_trips() {
+        let list = StatusList::build(&[0, 1, 2, 3], 2, Some("https://example.com/agg".to_string())).unwrap();
+        let json = list.to_json();
+        assert_eq!(json["bits"], 2);
+        assert_eq!(json["aggregation_uri"], "https://example.com/agg");
+        let parsed = StatusList::from_json(&json).unwrap();
+        assert_eq!(parsed.bits, list.bits);
+        assert_eq!(parsed.lst_b64url, list.lst_b64url);
+        assert_eq!(parsed.aggregation_uri, list.aggregation_uri);
+    }
+
+    #[test]
+    fn status_list_from_json_rejects_missing_fields() {
+        let err = StatusList::from_json(&serde_json::json!({"lst": "abc"})).unwrap_err();
+        assert!(matches!(err, FormatError::InvalidStructure(_)));
+        let err = StatusList::from_json(&serde_json::json!({"bits": 2})).unwrap_err();
+        assert!(matches!(err, FormatError::InvalidStructure(_)));
     }
 }
