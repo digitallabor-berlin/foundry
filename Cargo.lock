@@ -1918,7 +1918,7 @@ dependencies = [
  "clap",
  "foundry-core",
  "foundry-issuer",
- "josekit 0.10.3",
+ "josekit",
  "serde_html_form 0.2.8",
  "serde_json",
  "tempfile",
@@ -1936,7 +1936,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "flate2",
- "josekit 0.10.3",
+ "josekit",
  "rcgen 0.14.8",
  "serde",
  "serde_json",
@@ -1958,7 +1958,7 @@ dependencies = [
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
- "josekit 0.10.3",
+ "josekit",
  "percent-encoding",
  "rand 0.8.7",
  "serde",
@@ -1978,7 +1978,7 @@ dependencies = [
  "coset",
  "foundry-core",
  "hex",
- "josekit 0.10.3",
+ "josekit",
  "rand 0.8.7",
  "serde",
  "serde_json",
@@ -1993,7 +1993,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "foundry-core",
- "josekit 0.10.3",
+ "josekit",
  "rand 0.8.7",
  "serde",
  "serde_json",
@@ -2010,7 +2010,7 @@ dependencies = [
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
- "josekit 0.10.3",
+ "josekit",
  "openid4vp",
  "percent-encoding",
  "rand 0.8.7",
@@ -2989,29 +2989,6 @@ dependencies = [
 
 [[package]]
 name = "josekit"
-version = "0.8.3"
-source = "git+https://github.com/cobward/josekit-rs?rev=635c8a7#635c8a763fef9cf4ceb12e4e6727fd774f5194ec"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64 0.21.7",
- "digest 0.10.7",
- "ecdsa",
- "elliptic-curve",
- "flate2",
- "once_cell",
- "p256",
- "rand 0.8.7",
- "regex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
- "time",
-]
-
-[[package]]
-name = "josekit"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a808e078330e6af222eb0044b71d4b1ff981bfef43e7bc8133a88234e0c86a0c"
@@ -3825,7 +3802,7 @@ dependencies = [
  "did-method-key 0.4.0",
  "hex",
  "http 1.4.2",
- "josekit 0.8.3",
+ "josekit",
  "json-syntax",
  "openid4vp-frontend",
  "p256",

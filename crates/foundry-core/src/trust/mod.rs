@@ -97,6 +97,20 @@ impl TrustStore {
         Ok(Self { anchors })
     }
 
+    pub fn from_config(anchors: &[crate::config::TrustAnchor]) -> Result<Self, TrustError> {
+        let mut pems = Vec::new();
+        for anchor in anchors {
+            for block in anchor.certs.split("-----BEGIN CERTIFICATE-----") {
+                let trimmed = block.trim();
+                if !trimmed.is_empty() {
+                    let pem = format!("-----BEGIN CERTIFICATE-----\n{}", trimmed);
+                    pems.push(pem.into_bytes());
+                }
+            }
+        }
+        Self::from_pems(&pems)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty()
     }

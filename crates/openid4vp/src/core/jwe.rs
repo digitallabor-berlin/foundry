@@ -135,7 +135,7 @@ impl JweBuilder {
         }
 
         // Create encrypter and encrypt (using P-256 curve)
-        let encrypter: josekit::jwe::alg::ecdh_es::EcdhEsJweEncrypter<p256::NistP256> =
+        let encrypter =
             josekit::jwe::ECDH_ES.encrypter_from_jwk(&recipient_key)?;
         let jwe = encode_with_encrypter(&jwt_payload, &header, &encrypter)?;
 

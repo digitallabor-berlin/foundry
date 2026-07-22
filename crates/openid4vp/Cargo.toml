@@ -17,7 +17,7 @@ async-trait = "0.1.73"
 base64 = "0.21.4"
 ciborium = "0.2"
 http = "1.1.0"
-josekit = { git = "https://github.com/cobward/josekit-rs", rev = "635c8a7" }
+josekit = { workspace = true }
 # NOTE: ssi rexports syntax_json, but does not use the `serde_json` feature for serialization/deserialization.
 # This is currently used in the jwt_vp test to go from a `VeriableCredential` to an `AnyJsonCredential` type.
 # There may be a better way to handle this that doesn't require the `json-syntax` crate directly.

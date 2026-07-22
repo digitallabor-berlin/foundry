@@ -1,6 +1,7 @@
 pub mod error;
 pub mod request;
 pub mod transaction;
+pub mod verify;
 
 pub use error::VerificationError;
 pub use request::{
@@ -11,3 +12,4 @@ pub use transaction::{
     load_verification_transaction, save_verification_transaction, CheckResult,
     VerificationResult, VerificationState, VerificationTransaction,
 };
+pub use verify::verify_vp_response;
