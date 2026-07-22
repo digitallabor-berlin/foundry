@@ -2006,11 +2006,13 @@ dependencies = [
 name = "foundry-verifier"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
  "josekit 0.10.3",
  "openid4vp",
+ "percent-encoding",
  "rand 0.8.7",
  "serde",
  "serde_json",
