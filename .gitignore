@@ -8,4 +8,5 @@
 /keys
 /trust
 foundry.db
+config.yaml
 .worktrees/
