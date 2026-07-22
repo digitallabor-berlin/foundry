@@ -1,6 +1,6 @@
 use crate::admin_auth::{require_api_key, AdminApiKey};
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     middleware,
     routing::{get, post},
@@ -26,6 +26,14 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
 
     let authenticated = Router::new()
         .route("/admin/issuance/offers", post(create_offer_handler))
+        .route(
+            "/admin/verification/requests",
+            post(create_verification_handler),
+        )
+        .route(
+            "/admin/verification/requests/:id",
+            get(get_verification_handler),
+        )
         .route_layer(middleware::from_fn_with_state(api_key, require_api_key))
         .with_state(state);
 
@@ -45,6 +53,8 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/token", post(token_handler))
         .route("/nonce", post(nonce_handler))
         .route("/credential", post(credential_handler))
+        .route("/vp/request/:id", get(get_request_object_handler))
+        .route("/vp/response/:id", post(post_response_handler))
         .with_state(state)
 }
 
@@ -212,6 +222,137 @@ async fn credential_handler(
     .map(Json)
     .map_err(|e| wallet_error_response(&e))
 }
+
+fn verifier_admin_error_response(
+    e: &foundry_verifier::VerificationError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use foundry_verifier::VerificationError::*;
+    let status = match e {
+        Dcql(_) | Serialization(_) => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (
+        status,
+        Json(serde_json::json!({ "error": e.to_string(), "message": e.to_string() })),
+    )
+}
+
+fn verifier_wallet_error_response(
+    e: &foundry_verifier::VerificationError,
+) -> (StatusCode, Json<serde_json::Value>) {
+    use foundry_verifier::VerificationError::*;
+    let (status, code) = match e {
+        Decryption(_) | Failed(_) | Serialization(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": code,
+            "error_description": e.to_string(),
+        })),
+    )
+}
+
+async fn create_verification_handler(
+    State(state): State<AppState>,
+    Json(req): Json<foundry_verifier::CreateVerificationRequest>,
+) -> Result<Json<foundry_verifier::CreateVerificationResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    foundry_verifier::create_verification_request(&state.config, state.storage.as_ref(), req, now)
+        .await
+        .map(Json)
+        .map_err(|e| verifier_admin_error_response(&e))
+}
+
+async fn get_verification_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<foundry_verifier::VerificationTransaction>, StatusCode> {
+    let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    match tx {
+        Some(tx) => Ok(Json(tx)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+async fn get_request_object_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<
+    (
+        [(axum::http::header::HeaderName, &'static str); 1],
+        String,
+    ),
+    StatusCode,
+> {
+    let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tx = match tx {
+        Some(tx) => tx,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let jws_str = foundry_verifier::build_signed_request_object(&state.config, &tx)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/oauth-authz-req+jwt",
+        )],
+        jws_str,
+    ))
+}
+
+async fn post_response_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    encrypted_jwe_str: String,
+) -> Result<
+    Json<foundry_verifier::VerificationResult>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let tx_opt = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
+        .await
+        .map_err(|e| verifier_wallet_error_response(&e))?;
+    let mut tx = match tx_opt {
+        Some(tx) => tx,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "not_found",
+                    "error_description": format!("verification transaction '{id}' not found")
+                })),
+            ))
+        }
+    };
+
+    let verify_res = foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str);
+
+    let _ = foundry_verifier::save_verification_transaction(
+        state.storage.as_ref(),
+        &tx,
+        state.config.storage.transaction_ttl_secs,
+        now,
+    )
+    .await;
+
+    match verify_res {
+        Ok(result) => Ok(Json(result)),
+        Err(e) => Err(verifier_wallet_error_response(&e)),
+    }
+}
+
 
 pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {

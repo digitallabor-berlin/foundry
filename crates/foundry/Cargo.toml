@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 foundry-core = { path = "../foundry-core" }
 foundry-issuer = { path = "../foundry-issuer" }
+foundry-verifier = { path = "../foundry-verifier" }
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
@@ -30,3 +31,6 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 josekit = { workspace = true }
+base64 = { workspace = true }
+foundry-sd-jwt-vc = { path = "../foundry-sd-jwt-vc" }
+openid4vp = { path = "../openid4vp" }
