@@ -1,0 +1,217 @@
+//! OpenID4VCI Credential Issuer Metadata and OAuth Authorization Server
+//! Metadata, hand-rolled (see plan header for the documented divergence
+//! from the vendored `oid4vci` crate's generic types).
+
+use foundry_core::config::Config;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialIssuerMetadata {
+    pub credential_issuer: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub authorization_servers: Vec<String>,
+    pub credential_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub display: Vec<serde_json::Value>,
+    pub credential_configurations_supported: BTreeMap<String, CredentialConfigurationSupported>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CredentialConfigurationSupported {
+    pub format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vct: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doctype: Option<String>,
+    pub cryptographic_binding_methods_supported: Vec<String>,
+    pub credential_signing_alg_values_supported: Vec<String>,
+    pub proof_types_supported: BTreeMap<String, ProofTypeSupported>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub display: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub claims: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProofTypeSupported {
+    pub proof_signing_alg_values_supported: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthorizationServerMetadata {
+    pub issuer: String,
+    pub token_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce_endpoint: Option<String>,
+    pub grant_types_supported: Vec<String>,
+    #[serde(rename = "pre-authorized_grant_anonymous_access_supported")]
+    pub pre_authorized_grant_anonymous_access_supported: bool,
+}
+
+/// Build the Credential Issuer Metadata document, fully derived from
+/// `cfg.credential_types` and `cfg.issuer` — nothing hard-coded per credential type.
+pub fn build_issuer_metadata(cfg: &Config) -> CredentialIssuerMetadata {
+    let base = cfg.issuer.credential_issuer.trim_end_matches('/');
+    let mut configs = BTreeMap::new();
+    for ct in &cfg.credential_types {
+        let cryptographic_binding_methods_supported = if ct.cryptographic_holder_binding {
+            vec!["jwk".to_string()]
+        } else {
+            Vec::new()
+        };
+        let claims: Vec<serde_json::Value> = ct
+            .claims
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "path": c.path,
+                    "selectively_disclosable": c.selectively_disclosable,
+                    "display": c.display,
+                })
+            })
+            .collect();
+        configs.insert(
+            ct.id.clone(),
+            CredentialConfigurationSupported {
+                format: ct.format.clone(),
+                vct: ct.vct.clone(),
+                doctype: ct.doctype.clone(),
+                cryptographic_binding_methods_supported,
+                credential_signing_alg_values_supported: vec!["ES256".to_string()],
+                proof_types_supported: BTreeMap::from([(
+                    "jwt".to_string(),
+                    ProofTypeSupported {
+                        proof_signing_alg_values_supported: vec!["ES256".to_string()],
+                    },
+                )]),
+                display: ct.display.clone(),
+                claims,
+            },
+        );
+    }
+    CredentialIssuerMetadata {
+        credential_issuer: base.to_string(),
+        authorization_servers: Vec::new(),
+        credential_endpoint: format!("{base}/credential"),
+        nonce_endpoint: Some(format!("{base}/nonce")),
+        display: Vec::new(),
+        credential_configurations_supported: configs,
+    }
+}
+
+/// Build the OAuth Authorization Server Metadata document.
+pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerMetadata {
+    let base = cfg.issuer.credential_issuer.trim_end_matches('/');
+    AuthorizationServerMetadata {
+        issuer: base.to_string(),
+        token_endpoint: format!("{base}/token"),
+        nonce_endpoint: Some(format!("{base}/nonce")),
+        grant_types_supported: vec![
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        ],
+        pre_authorized_grant_anonymous_access_supported: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use foundry_core::config::{
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, Mode, ServerConfig,
+        StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    };
+    use std::collections::BTreeMap as StdBTreeMap;
+
+    fn test_config() -> Config {
+        Config {
+            server: ServerConfig {
+                wallet_facing: WalletFacingConfig {
+                    public_base_url: "https://issuer.example.com".to_string(),
+                    bind: "0.0.0.0:8443".to_string(),
+                },
+                admin: AdminConfig {
+                    bind: "127.0.0.1:9000".to_string(),
+                    api_key: None,
+                    api_key_env: None,
+                    swagger_ui_enabled: true,
+                },
+            },
+            storage: StorageConfig {
+                path: "./foundry.db".to_string(),
+                transaction_ttl_secs: 600,
+            },
+            keys: StdBTreeMap::new(),
+            trust_anchors: Vec::new(),
+            issuer: IssuerConfig {
+                credential_issuer: "https://issuer.example.com".to_string(),
+                wallet_attestation: AttestationMode { mode: Mode::Optional },
+                key_attestation: AttestationMode { mode: Mode::Optional },
+                status_list: StatusListConfig {
+                    enabled: true,
+                    signing_key: None,
+                    list_size: Some(1024),
+                    public_base_url: None,
+                },
+            },
+            credential_types: vec![CredentialType {
+                id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://issuer.example.com/vct/pid".to_string()),
+                doctype: None,
+                cryptographic_holder_binding: true,
+                display: vec![serde_json::json!({"name": "Person ID", "locale": "en-US"})],
+                claims: vec![ClaimDef {
+                    path: vec!["given_name".to_string()],
+                    selectively_disclosable: true,
+                    display: vec![],
+                }],
+            }],
+            verifier: VerifierConfig {
+                client_id_scheme: "x509_san_dns".to_string(),
+                signing_key: "verifier_signing".to_string(),
+                response_encryption: None,
+                transaction_data_hashes_alg: vec!["sha-256".to_string()],
+                named_queries: vec![],
+                webhook: None,
+            },
+        }
+    }
+
+    #[test]
+    fn builds_issuer_metadata_from_credential_types() {
+        let cfg = test_config();
+        let meta = build_issuer_metadata(&cfg);
+        assert_eq!(meta.credential_issuer, "https://issuer.example.com");
+        assert_eq!(meta.credential_endpoint, "https://issuer.example.com/credential");
+        assert_eq!(meta.nonce_endpoint.as_deref(), Some("https://issuer.example.com/nonce"));
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        assert_eq!(pid.format, "dc+sd-jwt");
+        assert_eq!(pid.vct.as_deref(), Some("https://issuer.example.com/vct/pid"));
+        assert_eq!(pid.cryptographic_binding_methods_supported, vec!["jwk".to_string()]);
+        assert!(pid.proof_types_supported.contains_key("jwt"));
+    }
+
+    #[test]
+    fn trims_trailing_slash_from_credential_issuer() {
+        let mut cfg = test_config();
+        cfg.issuer.credential_issuer = "https://issuer.example.com/".to_string();
+        let meta = build_issuer_metadata(&cfg);
+        assert_eq!(meta.credential_endpoint, "https://issuer.example.com/credential");
+    }
+
+    #[test]
+    fn builds_authorization_server_metadata() {
+        let cfg = test_config();
+        let meta = build_authorization_server_metadata(&cfg);
+        assert_eq!(meta.issuer, "https://issuer.example.com");
+        assert_eq!(meta.token_endpoint, "https://issuer.example.com/token");
+        assert!(meta.pre_authorized_grant_anonymous_access_supported);
+        assert_eq!(
+            meta.grant_types_supported,
+            vec!["urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string()]
+        );
+    }
+}
