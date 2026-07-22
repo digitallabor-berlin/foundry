@@ -1,6 +1,8 @@
 //! Token Status List (IETF draft-ietf-oauth-status-list-14): bit-packed
 //! status arrays, zlib compression, and signed Status List Tokens.
 
+use crate::error::FormatError;
+
 /// A Referenced Token's status (draft-ietf-oauth-status-list-14 §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusValue {
@@ -30,9 +32,61 @@ impl StatusValue {
     }
 }
 
+fn checked_bits(bits: u8) -> Result<(), FormatError> {
+    if matches!(bits, 1 | 2 | 4 | 8) {
+        Ok(())
+    } else {
+        Err(FormatError::Unsupported(format!(
+            "status list bits must be 1, 2, 4, or 8 (got {bits})"
+        )))
+    }
+}
+
+/// Pack per-token status values into the uncompressed byte array described
+/// in draft-ietf-oauth-status-list-14 §4.1: statuses are packed `bits`-wide,
+/// index 0 first, least-significant bit first within each byte.
+pub fn pack_status_array(values: &[u8], bits: u8) -> Result<Vec<u8>, FormatError> {
+    checked_bits(bits)?;
+    let max_value = ((1u16 << bits) - 1) as u8;
+    for &v in values {
+        if v > max_value {
+            return Err(FormatError::InvalidStructure(format!(
+                "status value {v} does not fit in {bits} bits"
+            )));
+        }
+    }
+    let per_byte = 8 / bits as usize;
+    let len = values.len().div_ceil(per_byte);
+    let mut out = vec![0u8; len];
+    for (idx, &v) in values.iter().enumerate() {
+        let byte_idx = idx / per_byte;
+        let bit_offset = (idx % per_byte) * bits as usize;
+        out[byte_idx] |= v << bit_offset;
+    }
+    Ok(out)
+}
+
+/// Extract the `bits`-wide status value for `idx` from an uncompressed
+/// status byte array (the inverse of `pack_status_array`).
+pub fn unpack_status(byte_array: &[u8], bits: u8, idx: u64) -> Result<u8, FormatError> {
+    checked_bits(bits)?;
+    let per_byte = (8 / bits as usize) as u64;
+    let byte_idx = (idx / per_byte) as usize;
+    let byte = byte_array
+        .get(byte_idx)
+        .ok_or(FormatError::StatusIndexOutOfBounds {
+            idx,
+            len: byte_array.len() as u64 * per_byte,
+        })?;
+    let bit_offset = ((idx % per_byte) * bits as u64) as u32;
+    let mask = ((1u16 << bits) - 1) as u8;
+    Ok((byte >> bit_offset) & mask)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::FormatError;
 
     #[test]
     fn status_value_round_trips_known_values() {
@@ -55,5 +109,80 @@ mod tests {
             StatusValue::ApplicationSpecific(12)
         );
         assert_eq!(StatusValue::ApplicationSpecific(7).to_u8(), 7);
+    }
+
+    #[test]
+    fn packs_bits1_least_significant_bit_first() {
+        // index: 0 1 2 3 4 5 6 7 -> values 1 0 1 1 0 0 1 0
+        // byte = sum(v_i << i) = 1 + 0 + 4 + 8 + 0 + 0 + 64 + 0 = 77 = 0x4D
+        let packed = pack_status_array(&[1, 0, 1, 1, 0, 0, 1, 0], 1).unwrap();
+        assert_eq!(packed, vec![0x4D]);
+        for (idx, expected) in [1u8, 0, 1, 1, 0, 0, 1, 0].into_iter().enumerate() {
+            assert_eq!(unpack_status(&packed, 1, idx as u64).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn packs_bits2_four_statuses_per_byte() {
+        // index 0..3 -> values 1,2,0,3 packed LSB-first: byte = 1 | (2<<2) | (0<<4) | (3<<6) = 0xC9
+        let packed = pack_status_array(&[1, 2, 0, 3], 2).unwrap();
+        assert_eq!(packed, vec![0xC9]);
+        assert_eq!(unpack_status(&packed, 2, 0).unwrap(), 1);
+        assert_eq!(unpack_status(&packed, 2, 1).unwrap(), 2);
+        assert_eq!(unpack_status(&packed, 2, 2).unwrap(), 0);
+        assert_eq!(unpack_status(&packed, 2, 3).unwrap(), 3);
+    }
+
+    #[test]
+    fn packs_bits4_two_statuses_per_byte() {
+        // byte = 5 | (10 << 4) = 0xA5
+        let packed = pack_status_array(&[5, 10], 4).unwrap();
+        assert_eq!(packed, vec![0xA5]);
+        assert_eq!(unpack_status(&packed, 4, 0).unwrap(), 5);
+        assert_eq!(unpack_status(&packed, 4, 1).unwrap(), 10);
+    }
+
+    #[test]
+    fn packs_bits8_one_status_per_byte() {
+        let packed = pack_status_array(&[200, 3], 8).unwrap();
+        assert_eq!(packed, vec![200, 3]);
+        assert_eq!(unpack_status(&packed, 8, 0).unwrap(), 200);
+        assert_eq!(unpack_status(&packed, 8, 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn packing_spans_multiple_bytes() {
+        // 5 values at bits=2 -> byte0 covers idx 0..3 (0xC9), byte1 covers idx 4 (value 2)
+        let packed = pack_status_array(&[1, 2, 0, 3, 2], 2).unwrap();
+        assert_eq!(packed, vec![0xC9, 0x02]);
+        assert_eq!(unpack_status(&packed, 2, 4).unwrap(), 2);
+    }
+
+    #[test]
+    fn rejects_unsupported_bit_widths() {
+        let err = pack_status_array(&[1], 3).unwrap_err();
+        assert!(matches!(err, FormatError::Unsupported(_)));
+        let err = unpack_status(&[0], 3, 0).unwrap_err();
+        assert!(matches!(err, FormatError::Unsupported(_)));
+    }
+
+    #[test]
+    fn rejects_value_not_fitting_in_bits() {
+        // bits=2 allows 0..=3; 4 does not fit.
+        let err = pack_status_array(&[4], 2).unwrap_err();
+        assert!(matches!(err, FormatError::InvalidStructure(_)));
+    }
+
+    #[test]
+    fn unpack_out_of_bounds_index_errors() {
+        // packed has 1 byte -> at bits=2 that covers indices 0..=3; index 4 is out of bounds.
+        let err = unpack_status(&[0xC9], 2, 4).unwrap_err();
+        match err {
+            FormatError::StatusIndexOutOfBounds { idx, len } => {
+                assert_eq!(idx, 4);
+                assert_eq!(len, 4);
+            }
+            other => panic!("expected StatusIndexOutOfBounds, got {other:?}"),
+        }
     }
 }
