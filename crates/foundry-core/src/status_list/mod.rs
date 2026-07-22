@@ -3,7 +3,9 @@
 
 use crate::crypto::Signer;
 use crate::error::FormatError;
+use crate::trust::{cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use josekit::jwk::Jwk;
 use serde_json::{json, Value};
 
 /// A Referenced Token's status (draft-ietf-oauth-status-list-14 §7.1).
@@ -92,7 +94,7 @@ pub fn compress_zlib(raw: &[u8]) -> Result<Vec<u8>, FormatError> {
     use flate2::write::ZlibEncoder;
     use flate2::Compression;
     use std::io::Write;
-    
+
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
     encoder
         .write_all(raw)
@@ -106,7 +108,7 @@ pub fn compress_zlib(raw: &[u8]) -> Result<Vec<u8>, FormatError> {
 pub fn decompress_zlib(compressed: &[u8]) -> Result<Vec<u8>, FormatError> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
-    
+
     let mut decoder = ZlibDecoder::new(compressed);
     let mut out = Vec::new();
     decoder
@@ -240,6 +242,165 @@ pub fn build_status_list_token(
     Ok(format!("{signing_input}.{}", B64URL.encode(signature)))
 }
 
+fn curve_for_alg(alg: &str) -> Result<&'static str, FormatError> {
+    match alg {
+        "ES256" => Ok("P-256"),
+        "ES384" => Ok("P-384"),
+        "ES512" => Ok("P-521"),
+        other => Err(FormatError::Unsupported(other.to_string())),
+    }
+}
+
+fn jws_alg_for_curve(
+    curve: &str,
+) -> Result<&'static josekit::jws::alg::ecdsa::EcdsaJwsAlgorithm, FormatError> {
+    match curve {
+        "P-256" => Ok(&josekit::jws::ES256),
+        "P-384" => Ok(&josekit::jws::ES384),
+        "P-521" => Ok(&josekit::jws::ES512),
+        other => Err(FormatError::Unsupported(other.to_string())),
+    }
+}
+
+fn verify_jws_with_coords(
+    curve: &str,
+    x: &[u8],
+    y: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), FormatError> {
+    let jwk_value =
+        json!({ "kty": "EC", "crv": curve, "x": B64URL.encode(x), "y": B64URL.encode(y) });
+    let obj = jwk_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| FormatError::SignatureVerification("jwk is not an object".into()))?;
+    let jwk = Jwk::from_map(obj).map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+    let alg = jws_alg_for_curve(curve)?;
+    let verifier = alg
+        .verifier_from_jwk(&jwk)
+        .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+    verifier
+        .verify(message, signature)
+        .map_err(|e| FormatError::SignatureVerification(format!("signature mismatch: {e}")))?;
+    Ok(())
+}
+
+/// A verified, decoded Status List: the raw (unpacked-ready) byte array plus
+/// its `bits` width, ready for repeated `status_at` lookups.
+#[derive(Debug)]
+pub struct VerifiedStatusList {
+    pub bits: u8,
+    pub raw: Vec<u8>,
+    pub aggregation_uri: Option<String>,
+}
+
+impl VerifiedStatusList {
+    pub fn status_at(&self, idx: u64) -> Result<StatusValue, FormatError> {
+        let v = unpack_status(&self.raw, self.bits, idx)?;
+        Ok(StatusValue::from_u8(v))
+    }
+}
+
+/// Verify a Status List Token (compact JWS) against `trust_store`, checking
+/// `sub`, `exp`, and the issuer's x5c chain, and return the decoded list.
+pub fn verify_status_list_token(
+    token: &str,
+    trust_store: &TrustStore,
+    expected_sub: &str,
+    now_unix: u64,
+) -> Result<VerifiedStatusList, FormatError> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return Err(FormatError::InvalidStructure(
+            "status list token is not a compact JWS".into(),
+        ));
+    }
+    let header_json: Value = serde_json::from_slice(
+        &B64URL
+            .decode(parts[0])
+            .map_err(|e| FormatError::Deserialization(format!("header b64: {e}")))?,
+    )
+    .map_err(|e| FormatError::Deserialization(format!("header json: {e}")))?;
+    let payload_json: Value = serde_json::from_slice(
+        &B64URL
+            .decode(parts[1])
+            .map_err(|e| FormatError::Deserialization(format!("payload b64: {e}")))?,
+    )
+    .map_err(|e| FormatError::Deserialization(format!("payload json: {e}")))?;
+
+    if header_json.get("typ").and_then(|v| v.as_str()) != Some("statuslist+jwt") {
+        return Err(FormatError::InvalidStructure(
+            "status list token typ must be statuslist+jwt".into(),
+        ));
+    }
+
+    if payload_json.get("sub").and_then(|v| v.as_str()) != Some(expected_sub) {
+        return Err(FormatError::StatusSubjectMismatch {
+            expected: expected_sub.to_string(),
+        });
+    }
+    if let Some(exp) = payload_json.get("exp").and_then(|v| v.as_i64()) {
+        if now_unix > exp as u64 {
+            return Err(FormatError::Expired);
+        }
+    }
+
+    let x5c_array = header_json
+        .get("x5c")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            FormatError::SignatureVerification("status list token x5c missing".into())
+        })?;
+    if x5c_array.is_empty() {
+        return Err(FormatError::SignatureVerification(
+            "empty x5c header".into(),
+        ));
+    }
+    let mut chain_pems: Vec<Vec<u8>> = Vec::with_capacity(x5c_array.len());
+    for val in x5c_array {
+        let s = val
+            .as_str()
+            .ok_or_else(|| FormatError::SignatureVerification("non-string x5c element".into()))?;
+        chain_pems.push(
+            crate::trust::x5c_entry_to_pem(s)
+                .map_err(|e| FormatError::SignatureVerification(e.to_string()))?,
+        );
+    }
+    let leaf_pem = &chain_pems[0];
+    let intermediates: Vec<Vec<u8>> = chain_pems[1..].to_vec();
+    validate_chain(leaf_pem, &intermediates, trust_store, now_unix).map_err(|e| {
+        FormatError::SignatureVerification(format!("status list cert validation: {e}"))
+    })?;
+
+    let leaf_cert =
+        parse_cert_pem(leaf_pem).map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+    let (lx, ly) = cert_ec_public_coords(&leaf_cert)
+        .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+    let alg_str = header_json
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FormatError::SignatureVerification("alg missing".into()))?;
+    let curve = curve_for_alg(alg_str)?;
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig = B64URL
+        .decode(parts[2])
+        .map_err(|e| FormatError::SignatureVerification(format!("signature b64: {e}")))?;
+    verify_jws_with_coords(curve, &lx, &ly, signing_input.as_bytes(), &sig)?;
+
+    let status_list_val = payload_json
+        .get("status_list")
+        .ok_or_else(|| FormatError::InvalidStructure("status_list claim missing".into()))?;
+    let status_list = StatusList::from_json(status_list_val)?;
+    let raw = status_list.decode_bytes()?;
+
+    Ok(VerifiedStatusList {
+        bits: status_list.bits,
+        raw,
+        aggregation_uri: status_list.aggregation_uri,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,7 +506,9 @@ mod tests {
 
     #[test]
     fn zlib_round_trips_arbitrary_bytes() {
-        let raw = vec![0xC9, 0x02, 0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x01, 0x01, 0x01, 0x01];
+        let raw = vec![
+            0xC9, 0x02, 0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x01, 0x01, 0x01, 0x01,
+        ];
         let compressed = compress_zlib(&raw).unwrap();
         assert_eq!(compressed[0] & 0x0F, 8);
         let decompressed = decompress_zlib(&compressed).unwrap();
@@ -373,7 +536,10 @@ mod tests {
         assert_eq!(list.status_at(0).unwrap(), StatusValue::Invalid);
         assert_eq!(list.status_at(1).unwrap(), StatusValue::Suspended);
         assert_eq!(list.status_at(2).unwrap(), StatusValue::Valid);
-        assert_eq!(list.status_at(3).unwrap(), StatusValue::ApplicationSpecific(3));
+        assert_eq!(
+            list.status_at(3).unwrap(),
+            StatusValue::ApplicationSpecific(3)
+        );
         assert_eq!(list.status_at(4).unwrap(), StatusValue::Suspended);
     }
 
@@ -385,7 +551,12 @@ mod tests {
 
     #[test]
     fn status_list_json_round_trips() {
-        let list = StatusList::build(&[0, 1, 2, 3], 2, Some("https://example.com/agg".to_string())).unwrap();
+        let list = StatusList::build(
+            &[0, 1, 2, 3],
+            2,
+            Some("https://example.com/agg".to_string()),
+        )
+        .unwrap();
         let json = list.to_json();
         assert_eq!(json["bits"], 2);
         assert_eq!(json["aggregation_uri"], "https://example.com/agg");
@@ -417,7 +588,8 @@ mod tests {
             365,
         )
         .unwrap();
-        let signer = FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+        let signer =
+            FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
         let x5c = crate::trust::build_x5c(&[leaf.cert_pem.into_bytes()]).unwrap();
 
         let list = StatusList::build(&[0, 1, 2, 0], 2, None).unwrap();
@@ -431,18 +603,181 @@ mod tests {
 
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
-        let header: Value = serde_json::from_slice(
-            &B64URL.decode(parts[0]).unwrap(),
-        )
-        .unwrap();
+        let header: Value = serde_json::from_slice(&B64URL.decode(parts[0]).unwrap()).unwrap();
         assert_eq!(header["typ"], "statuslist+jwt");
         assert_eq!(header["alg"], "ES256");
         assert!(header["x5c"].is_array());
-        let payload: Value = serde_json::from_slice(
-            &B64URL.decode(parts[1]).unwrap(),
-        )
-        .unwrap();
+        let payload: Value = serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(payload["sub"], "https://example.com/statuslists/1");
         assert_eq!(payload["status_list"]["bits"], 2);
+    }
+
+    fn test_pki() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use crate::pki::{issue_leaf, new_ca};
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "localhost",
+            &["localhost".to_string()],
+            365,
+        )
+        .unwrap();
+        (
+            ca.cert_pem.into_bytes(),
+            leaf.cert_pem.into_bytes(),
+            leaf.key_pem.into_bytes(),
+        )
+    }
+
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn build_test_token(
+        leaf_key: &[u8],
+        leaf_cert: &[u8],
+        sub: &str,
+        iat: i64,
+        exp: Option<i64>,
+    ) -> String {
+        use crate::crypto::{FileSigner, SignatureAlgorithm};
+        let signer = FileSigner::from_pem(leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let x5c = crate::trust::build_x5c(&[leaf_cert.to_vec()]).unwrap();
+        let list = StatusList::build(&[0, 1, 2, 0], 2, None).unwrap();
+        let claims = StatusListTokenClaims {
+            sub: sub.to_string(),
+            iat,
+            exp,
+            ttl: None,
+        };
+        build_status_list_token(claims, &list, &signer, Some(x5c)).unwrap()
+    }
+
+    #[test]
+    fn verify_round_trips_and_status_at_matches_original() {
+        let (root, leaf_cert, leaf_key) = test_pki();
+        let trust_store = crate::trust::TrustStore::from_pems(&[root]).unwrap();
+        let now = now_secs();
+        let token = build_test_token(
+            &leaf_key,
+            &leaf_cert,
+            "https://example.com/statuslists/1",
+            now as i64 - 100,
+            Some(now as i64 + 3600),
+        );
+
+        let verified = verify_status_list_token(
+            &token,
+            &trust_store,
+            "https://example.com/statuslists/1",
+            now,
+        )
+        .unwrap();
+        assert_eq!(verified.status_at(0).unwrap(), StatusValue::Valid);
+        assert_eq!(verified.status_at(1).unwrap(), StatusValue::Invalid);
+        assert_eq!(verified.status_at(2).unwrap(), StatusValue::Suspended);
+        assert_eq!(verified.status_at(3).unwrap(), StatusValue::Valid);
+    }
+
+    #[test]
+    fn verify_rejects_expired_token() {
+        let (root, leaf_cert, leaf_key) = test_pki();
+        let trust_store = crate::trust::TrustStore::from_pems(&[root]).unwrap();
+        let now = now_secs();
+        let token = build_test_token(
+            &leaf_key,
+            &leaf_cert,
+            "https://example.com/statuslists/1",
+            now as i64 - 7200,
+            Some(now as i64 - 3600), // expired 3600s before `now`
+        );
+
+        let err = verify_status_list_token(
+            &token,
+            &trust_store,
+            "https://example.com/statuslists/1",
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FormatError::Expired));
+    }
+
+    #[test]
+    fn verify_rejects_subject_mismatch() {
+        let (root, leaf_cert, leaf_key) = test_pki();
+        let trust_store = crate::trust::TrustStore::from_pems(&[root]).unwrap();
+        let now = now_secs();
+        let token = build_test_token(
+            &leaf_key,
+            &leaf_cert,
+            "https://example.com/statuslists/1",
+            now as i64 - 100,
+            Some(now as i64 + 3600),
+        );
+
+        let err = verify_status_list_token(
+            &token,
+            &trust_store,
+            "https://example.com/statuslists/WRONG",
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FormatError::StatusSubjectMismatch { .. }));
+    }
+
+    #[test]
+    fn verify_rejects_untrusted_anchor() {
+        let (_root, leaf_cert, leaf_key) = test_pki();
+        use crate::pki::new_ca;
+        let other = new_ca("Some Other CA", 3650).unwrap();
+        let trust_store =
+            crate::trust::TrustStore::from_pems(&[other.cert_pem.into_bytes()]).unwrap();
+        let now = now_secs();
+        let token = build_test_token(
+            &leaf_key,
+            &leaf_cert,
+            "https://example.com/statuslists/1",
+            now as i64 - 100,
+            Some(now as i64 + 3600),
+        );
+
+        let err = verify_status_list_token(
+            &token,
+            &trust_store,
+            "https://example.com/statuslists/1",
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FormatError::SignatureVerification(_)));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let (root, leaf_cert, leaf_key) = test_pki();
+        let trust_store = crate::trust::TrustStore::from_pems(&[root]).unwrap();
+        let now = now_secs();
+        let token = build_test_token(
+            &leaf_key,
+            &leaf_cert,
+            "https://example.com/statuslists/1",
+            now as i64 - 100,
+            Some(now as i64 + 3600),
+        );
+        let mut tampered = token.clone();
+        let last = tampered.pop().unwrap();
+        tampered.push(if last == 'A' { 'B' } else { 'A' });
+
+        let err = verify_status_list_token(
+            &tampered,
+            &trust_store,
+            "https://example.com/statuslists/1",
+            now,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FormatError::SignatureVerification(_)));
     }
 }
