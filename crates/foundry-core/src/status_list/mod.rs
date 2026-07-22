@@ -214,4 +214,26 @@ mod tests {
             other => panic!("expected StatusIndexOutOfBounds, got {other:?}"),
         }
     }
+
+    #[test]
+    fn zlib_round_trips_arbitrary_bytes() {
+        let raw = vec![0xC9, 0x02, 0x00, 0xFF, 0xAB, 0xCD, 0xEF, 0x01, 0x01, 0x01, 0x01];
+        let compressed = compress_zlib(&raw).unwrap();
+        assert_eq!(compressed[0] & 0x0F, 8);
+        let decompressed = decompress_zlib(&compressed).unwrap();
+        assert_eq!(decompressed, raw);
+    }
+
+    #[test]
+    fn zlib_round_trips_empty_input() {
+        let compressed = compress_zlib(&[]).unwrap();
+        let decompressed = decompress_zlib(&compressed).unwrap();
+        assert!(decompressed.is_empty());
+    }
+
+    #[test]
+    fn decompress_rejects_garbage() {
+        let err = decompress_zlib(&[0x00, 0x01, 0x02]).unwrap_err();
+        assert!(matches!(err, FormatError::Deserialization(_)));
+    }
 }
