@@ -92,7 +92,11 @@ pub async fn create_offer(
     save_transaction(storage, &tx, cfg.storage.transaction_ttl_secs, now_unix).await?;
 
     let offer = CredentialOffer {
-        credential_issuer: cfg.issuer.credential_issuer.trim_end_matches('/').to_string(),
+        credential_issuer: cfg
+            .issuer
+            .credential_issuer
+            .trim_end_matches('/')
+            .to_string(),
         credential_configuration_ids: vec![ct.id.clone()],
         grants: CredentialOfferGrants {
             pre_authorized_code: PreAuthorizedCodeGrant {
@@ -146,8 +150,12 @@ mod tests {
             trust_anchors: Vec::new(),
             issuer: IssuerConfig {
                 credential_issuer: "https://issuer.example.com".to_string(),
-                wallet_attestation: AttestationMode { mode: Mode::Optional },
-                key_attestation: AttestationMode { mode: Mode::Optional },
+                wallet_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
+                key_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
                 status_list: StatusListConfig {
                     enabled: true,
                     signing_key: None,
@@ -205,12 +213,22 @@ mod tests {
             claims,
             tx_code_required: true,
         };
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000).await.unwrap();
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
 
-        assert_eq!(resp.credential_offer.credential_configuration_ids, vec!["pid".to_string()]);
-        assert!(resp.credential_offer_uri.starts_with("openid-credential-offer://"));
+        assert_eq!(
+            resp.credential_offer.credential_configuration_ids,
+            vec!["pid".to_string()]
+        );
+        assert!(resp
+            .credential_offer_uri
+            .starts_with("openid-credential-offer://"));
 
-        let tx = load_transaction(&storage, &resp.transaction_id).await.unwrap().unwrap();
+        let tx = load_transaction(&storage, &resp.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(tx.credential_type_id, "pid");
         assert!(tx.status_list_index.is_some());
         assert!(tx.tx_code.is_some());
@@ -226,7 +244,9 @@ mod tests {
             claims: serde_json::Map::new(),
             tx_code_required: false,
         };
-        let err = create_offer(&cfg, &storage, req, 1_700_000_000).await.unwrap_err();
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
         assert!(matches!(err, IssuanceError::UnknownCredentialType(_)));
     }
 
@@ -240,7 +260,9 @@ mod tests {
             claims: serde_json::Map::new(),
             tx_code_required: false,
         };
-        let err = create_offer(&cfg, &storage, req, 1_700_000_000).await.unwrap_err();
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
         assert!(matches!(err, IssuanceError::ClaimValidation(_)));
     }
 
@@ -256,8 +278,13 @@ mod tests {
             claims,
             tx_code_required: false,
         };
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000).await.unwrap();
-        let tx = load_transaction(&storage, &resp.transaction_id).await.unwrap().unwrap();
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_transaction(&storage, &resp.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(tx.status_list_index.is_none());
         assert!(tx.tx_code.is_none());
     }
