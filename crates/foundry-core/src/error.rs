@@ -78,6 +78,10 @@ pub enum FormatError {
     Expired,
     #[error("unsupported algorithm or key type: {0}")]
     Unsupported(String),
+    #[error("status list index {idx} out of bounds (list has {len} entries)")]
+    StatusIndexOutOfBounds { idx: u64, len: u64 },
+    #[error("status list subject mismatch: expected '{expected}'")]
+    StatusSubjectMismatch { expected: String },
 }
 
 #[derive(Debug, Error)]
