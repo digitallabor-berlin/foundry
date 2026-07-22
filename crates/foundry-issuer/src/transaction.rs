@@ -99,9 +99,7 @@ mod tests {
     #[tokio::test]
     async fn load_missing_transaction_returns_none() {
         let storage = test_storage().await;
-        let loaded = load_transaction(&storage, "does-not-exist")
-            .await
-            .unwrap();
+        let loaded = load_transaction(&storage, "does-not-exist").await.unwrap();
         assert!(loaded.is_none());
     }
 }
