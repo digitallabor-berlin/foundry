@@ -9,6 +9,7 @@ members = [
     "crates/foundry-sd-jwt-vc",
     "crates/foundry-mdoc",
     "crates/foundry-issuer",
+    "crates/foundry-verifier",
 ]
 
 [workspace.package]

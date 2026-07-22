@@ -2003,6 +2003,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "foundry-verifier"
+version = "0.1.0"
+dependencies = [
+ "foundry-core",
+ "foundry-mdoc",
+ "foundry-sd-jwt-vc",
+ "josekit 0.10.3",
+ "openid4vp",
+ "rand 0.8.7",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
