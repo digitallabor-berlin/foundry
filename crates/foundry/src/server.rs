@@ -8,6 +8,7 @@ use axum::{
 };
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
+use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,33 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
         .with_state(state);
 
     unauthenticated.merge(authenticated)
+}
+
+pub fn wallet_router(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/.well-known/openid-credential-issuer",
+            get(issuer_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(auth_server_metadata),
+        )
+        .with_state(state)
+}
+
+async fn issuer_metadata(
+    State(state): State<AppState>,
+) -> Json<foundry_issuer::CredentialIssuerMetadata> {
+    Json(foundry_issuer::build_issuer_metadata(&state.config))
+}
+
+async fn auth_server_metadata(
+    State(state): State<AppState>,
+) -> Json<foundry_issuer::AuthorizationServerMetadata> {
+    Json(foundry_issuer::build_authorization_server_metadata(
+        &state.config,
+    ))
 }
 
 async fn health() -> &'static str {
@@ -96,7 +124,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
     let config = Arc::new(cfg.clone());
     let state = AppState {
         storage: storage.clone(),
-        config,
+        config: config.clone(),
     };
     let _sweeper = spawn_sweeper(storage, 60);
 
@@ -106,10 +134,17 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
             "admin API key not configured — admin endpoints are UNAUTHENTICATED (dev only)"
         );
     }
-    let admin_app = admin_router(state, api_key);
+    let admin_app = admin_router(state.clone(), api_key);
+    let wallet_app = wallet_router(state);
 
     let admin_listener = tokio::net::TcpListener::bind(&cfg.server.admin.bind).await?;
+    let wallet_listener = tokio::net::TcpListener::bind(&cfg.server.wallet_facing.bind).await?;
     tracing::info!(bind = %cfg.server.admin.bind, "foundry admin server listening");
-    axum::serve(admin_listener, admin_app).await?;
+    tracing::info!(bind = %cfg.server.wallet_facing.bind, "foundry wallet-facing server listening");
+
+    tokio::try_join!(
+        axum::serve(admin_listener, admin_app).into_future(),
+        axum::serve(wallet_listener, wallet_app).into_future(),
+    )?;
     Ok(())
 }
