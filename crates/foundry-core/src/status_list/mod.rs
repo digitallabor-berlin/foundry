@@ -83,6 +83,35 @@ pub fn unpack_status(byte_array: &[u8], bits: u8, idx: u64) -> Result<u8, Format
     Ok((byte >> bit_offset) & mask)
 }
 
+/// zlib-compress (RFC 1950 wrapping RFC 1951 DEFLATE) at the highest
+/// compression level, per draft-ietf-oauth-status-list-14 §4.1 step 5.
+pub fn compress_zlib(raw: &[u8]) -> Result<Vec<u8>, FormatError> {
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+    
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+    encoder
+        .write_all(raw)
+        .map_err(|e| FormatError::Serialization(format!("zlib compress: {e}")))?;
+    encoder
+        .finish()
+        .map_err(|e| FormatError::Serialization(format!("zlib compress: {e}")))
+}
+
+/// zlib-decompress the inverse of `compress_zlib`.
+pub fn decompress_zlib(compressed: &[u8]) -> Result<Vec<u8>, FormatError> {
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    
+    let mut decoder = ZlibDecoder::new(compressed);
+    let mut out = Vec::new();
+    decoder
+        .read_to_end(&mut out)
+        .map_err(|e| FormatError::Deserialization(format!("zlib decompress: {e}")))?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
