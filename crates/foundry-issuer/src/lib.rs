@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod credential;
 pub mod create_offer;
 pub mod error;
 pub mod metadata;
@@ -9,6 +10,9 @@ pub mod token;
 pub mod transaction;
 
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
+pub use credential::{
+    handle_credential_request, CredentialRequest, CredentialResponse,
+};
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,

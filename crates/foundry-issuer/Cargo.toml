@@ -7,6 +7,8 @@ authors.workspace = true
 
 [dependencies]
 foundry-core = { path = "../foundry-core" }
+foundry-sd-jwt-vc = { path = "../foundry-sd-jwt-vc" }
+foundry-mdoc = { path = "../foundry-mdoc" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

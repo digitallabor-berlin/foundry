@@ -1,0 +1,375 @@
+//! OpenID4VCI credential endpoint business logic.
+
+use crate::error::IssuanceError;
+use crate::proof::{verify_holder_proof, ProofObject};
+use crate::transaction::{
+    load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
+};
+use base64::engine::general_purpose::STANDARD as B64STD;
+use base64::Engine as _;
+use foundry_core::config::Config;
+use foundry_core::crypto::FileSigner;
+use foundry_core::storage::Storage;
+use foundry_mdoc::builder::{build_mdoc, MdocClaims};
+use foundry_sd_jwt_vc::builder::{build_sd_jwt_vc, IssuerClaims};
+use serde::{Deserialize, Serialize};
+use serde_json::Map;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CredentialRequest {
+    pub credential_configuration_id: Option<String>,
+    pub format: Option<String>,
+    pub proof: Option<ProofObject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialResponse {
+    pub credential: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c_nonce: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c_nonce_expires_in: Option<u64>,
+}
+
+pub async fn handle_credential_request(
+    config: &Config,
+    storage: &dyn Storage,
+    access_token: &str,
+    req: &CredentialRequest,
+    now_unix: i64,
+) -> Result<CredentialResponse, IssuanceError> {
+    let mut tx = load_transaction_by_access_token(storage, access_token)
+        .await?
+        .ok_or_else(|| IssuanceError::InvalidGrant("invalid or expired access_token".into()))?;
+
+    if tx.state != IssuanceState::Offered {
+        return Err(IssuanceError::InvalidGrant(
+            "credential offer has already been claimed".into(),
+        ));
+    }
+
+    let c_nonce = tx
+        .c_nonce
+        .as_deref()
+        .ok_or_else(|| IssuanceError::InvalidProof("no active c_nonce on transaction".into()))?;
+    let c_nonce_expires_at = tx
+        .c_nonce_expires_at
+        .ok_or_else(|| IssuanceError::InvalidProof("missing c_nonce expiration".into()))?;
+
+    let proof = req
+        .proof
+        .as_ref()
+        .ok_or_else(|| IssuanceError::InvalidProof("missing proof in credential request".into()))?;
+
+    let verified_proof = verify_holder_proof(
+        proof,
+        &config.issuer.credential_issuer,
+        c_nonce,
+        c_nonce_expires_at,
+        now_unix,
+    )?;
+
+    let cred_type = config
+        .credential_types
+        .iter()
+        .find(|ct| ct.id == tx.credential_type_id)
+        .ok_or_else(|| IssuanceError::UnknownCredentialType(tx.credential_type_id.clone()))?;
+
+    let status_signing_key_name = config
+        .issuer
+        .status_list
+        .signing_key
+        .as_deref()
+        .or_else(|| config.keys.keys().next().map(|s| s.as_str()))
+        .ok_or_else(|| IssuanceError::InvalidRequest("no signing key configured".into()))?;
+
+    let issuer_key = config
+        .keys
+        .get(status_signing_key_name)
+        .ok_or_else(|| IssuanceError::InvalidRequest("configured signing key not found".into()))?;
+
+    let signer = FileSigner::from_pem_file(&issuer_key.private_key, issuer_key.alg.parse()?)?;
+    let x5c = if let Some(ref path) = issuer_key.x5c {
+        let pem_bytes = std::fs::read(path).map_err(|e| {
+            IssuanceError::InvalidRequest(format!("failed to read x5c file: {e}"))
+        })?;
+        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
+    } else {
+        None
+    };
+
+    let holder_jwk_json = serde_json::to_value(&verified_proof.holder_jwk)
+        .map_err(|e| IssuanceError::Serialization(e.to_string()))?;
+
+    let credential_str = match cred_type.format.as_str() {
+        "dc+sd-jwt" => {
+            let vct = cred_type
+                .vct
+                .clone()
+                .unwrap_or_else(|| tx.credential_type_id.clone());
+
+            let mut always_disclosed = Map::new();
+            let mut selectively_disclosable = Map::new();
+
+            for claim_def in &cred_type.claims {
+                if let Some(top_key) = claim_def.path.first() {
+                    if let Some(val) = tx.claims.get(top_key) {
+                        if claim_def.selectively_disclosable {
+                            selectively_disclosable.insert(top_key.clone(), val.clone());
+                        } else {
+                            always_disclosed.insert(top_key.clone(), val.clone());
+                        }
+                    }
+                }
+            }
+
+            let (status_list_index, status_list_uri) = if config.issuer.status_list.enabled {
+                (
+                    tx.status_list_index,
+                    config
+                        .issuer
+                        .status_list
+                        .public_base_url
+                        .as_ref()
+                        .map(|url| format!("{}/1", url.trim_end_matches('/'))),
+                )
+            } else {
+                (None, None)
+            };
+
+            let sd_claims = IssuerClaims {
+                iss: config.issuer.credential_issuer.clone(),
+                sub: format!("sub_{}", tx.transaction_id),
+                iat: now_unix,
+                exp: now_unix + 86400 * 365,
+                vct,
+                cnf_jwk: holder_jwk_json,
+                status_list_index,
+                status_list_uri,
+                always_disclosed,
+                selectively_disclosable,
+            };
+
+            build_sd_jwt_vc(sd_claims, &signer, x5c)
+                .map_err(|e| IssuanceError::InvalidRequest(format!("sd-jwt vc build failed: {e}")))?
+        }
+        "mso_mdoc" => {
+            let doc_type = cred_type
+                .vct
+                .clone()
+                .or_else(|| cred_type.doctype.clone())
+                .unwrap_or_else(|| tx.credential_type_id.clone());
+
+            let mut ns_map = BTreeMap::new();
+            let mut elem_map = BTreeMap::new();
+            for (k, v) in &tx.claims {
+                elem_map.insert(k.clone(), v.clone());
+            }
+            ns_map.insert(doc_type.clone(), elem_map);
+
+            let mdoc_claims = MdocClaims {
+                doc_type,
+                namespaces: ns_map,
+                device_key_jwk: holder_jwk_json,
+                signed_at: now_unix,
+                valid_until: now_unix + 86400 * 365,
+            };
+
+            let cbor_bytes = build_mdoc(mdoc_claims, &signer, x5c)
+                .map_err(|e| IssuanceError::InvalidRequest(format!("mdoc build failed: {e}")))?;
+
+            B64STD.encode(cbor_bytes)
+        }
+        other => {
+            return Err(IssuanceError::InvalidRequest(format!(
+                "unsupported credential format: {other}"
+            )))
+        }
+    };
+
+    tx.state = IssuanceState::Issued;
+    save_transaction_with_indices(storage, &tx, 600, now_unix).await?;
+
+    Ok(CredentialResponse {
+        credential: credential_str,
+        c_nonce: None,
+        c_nonce_expires_in: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transaction::{load_transaction, save_transaction_with_indices, IssuanceTransaction};
+    use foundry_core::config::{
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, KeyEntry, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    };
+    use foundry_core::crypto::SignatureAlgorithm;
+    use foundry_core::storage::SqliteStorage;
+    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+    use josekit::jwk::KeyPair as _;
+    use josekit::jws::{JwsHeader, ES256};
+    use josekit::jwt::{self, JwtPayload};
+    use std::collections::BTreeMap as StdBTreeMap;
+
+    async fn test_storage() -> SqliteStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("c.db");
+        std::mem::forget(dir);
+        SqliteStorage::connect(db.to_str().unwrap()).await.unwrap()
+    }
+
+    fn test_config(key_path: &str) -> Config {
+        let mut keys = StdBTreeMap::new();
+        keys.insert(
+            "issuer_key".to_string(),
+            KeyEntry {
+                private_key: key_path.to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+
+        Config {
+            server: ServerConfig {
+                wallet_facing: WalletFacingConfig {
+                    public_base_url: "https://issuer.example.com".to_string(),
+                    bind: "0.0.0.0:8443".to_string(),
+                },
+                admin: AdminConfig {
+                    bind: "127.0.0.1:9000".to_string(),
+                    api_key: None,
+                    api_key_env: None,
+                    swagger_ui_enabled: true,
+                },
+            },
+            storage: StorageConfig {
+                path: "./foundry.db".to_string(),
+                transaction_ttl_secs: 600,
+            },
+            keys,
+            trust_anchors: Vec::new(),
+            issuer: IssuerConfig {
+                credential_issuer: "https://issuer.example.com".to_string(),
+                wallet_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
+                key_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                },
+                status_list: StatusListConfig {
+                    enabled: false,
+                    signing_key: Some("issuer_key".to_string()),
+                    list_size: None,
+                    public_base_url: None,
+                },
+            },
+            credential_types: vec![CredentialType {
+                id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://issuer.example.com/vct/pid".to_string()),
+                doctype: None,
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![ClaimDef {
+                    path: vec!["given_name".to_string()],
+                    selectively_disclosable: true,
+                    display: vec![],
+                }],
+            }],
+            verifier: VerifierConfig {
+                client_id_scheme: "x509_san_dns".to_string(),
+                signing_key: "verifier_signing".to_string(),
+                response_encryption: None,
+                transaction_data_hashes_alg: vec![],
+                named_queries: vec![],
+                webhook: None,
+            },
+        }
+    }
+
+    fn generate_proof(c_nonce: &str, issuer: &str) -> (ProofObject, EcKeyPair) {
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut public_jwk = keypair.to_jwk_public_key();
+        public_jwk.set_algorithm("ES256");
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header.set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap())).unwrap();
+
+        let mut payload = JwtPayload::new();
+        payload.set_claim("aud", Some(serde_json::json!(issuer))).unwrap();
+        payload.set_claim("nonce", Some(serde_json::json!(c_nonce))).unwrap();
+
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        (
+            ProofObject {
+                proof_type: "jwt".to_string(),
+                jwt: Some(jwt_str),
+            },
+            keypair,
+        )
+    }
+
+    #[tokio::test]
+    async fn issues_sd_jwt_vc_credential_successfully() {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let config = test_config(key_path.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let tx = IssuanceTransaction {
+            transaction_id: "tx-cred-1".to_string(),
+            credential_type_id: "pid".to_string(),
+            claims,
+            pre_authorized_code: "code-123".to_string(),
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some("at_secret_123".to_string()),
+            c_nonce: Some("cn_nonce_123".to_string()),
+            c_nonce_expires_at: Some(1_700_000_600),
+            state: IssuanceState::Offered,
+            created_at: 1_700_000_000,
+        };
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let (proof, _) = generate_proof("cn_nonce_123", "https://issuer.example.com");
+
+        let req = CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proof: Some(proof),
+        };
+
+        let res = handle_credential_request(
+            &config,
+            &storage,
+            "at_secret_123",
+            &req,
+            1_700_000_010,
+        )
+        .await
+        .unwrap();
+
+        assert!(!res.credential.is_empty());
+
+        let updated_tx = load_transaction(&storage, "tx-cred-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated_tx.state, IssuanceState::Issued);
+    }
+}
