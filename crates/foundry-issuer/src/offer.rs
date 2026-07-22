@@ -55,7 +55,9 @@ pub fn build_offer_uri(offer: &CredentialOffer) -> Result<String, IssuanceError>
     let json =
         serde_json::to_string(offer).map_err(|e| IssuanceError::Serialization(e.to_string()))?;
     let encoded = utf8_percent_encode(&json, NON_ALPHANUMERIC).to_string();
-    Ok(format!("openid-credential-offer://?credential_offer={encoded}"))
+    Ok(format!(
+        "openid-credential-offer://?credential_offer={encoded}"
+    ))
 }
 
 #[cfg(test)]
