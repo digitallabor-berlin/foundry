@@ -52,6 +52,12 @@ pub enum Command {
         #[arg(long = "out-config", default_value = "config.yaml")]
         out_config: PathBuf,
     },
+    /// Export the Admin API OpenAPI 3.x specification to disk.
+    Openapi {
+        /// Output file path (e.g. openapi.json)
+        #[arg(long)]
+        out: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -142,6 +148,15 @@ mod tests {
                 assert_eq!(config.to_str().unwrap(), "c.json");
             }
             _ => panic!("expected config validate"),
+        }
+    }
+
+    #[test]
+    fn parses_openapi_out() {
+        let cli = Cli::parse_from(["foundry", "openapi", "--out", "spec.json"]);
+        match cli.command {
+            Command::Openapi { out } => assert_eq!(out, "spec.json"),
+            _ => panic!("expected openapi"),
         }
     }
 }

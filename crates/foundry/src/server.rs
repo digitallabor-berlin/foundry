@@ -420,6 +420,12 @@ pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::ta
 }
 
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
+    if let Err(e) = std::fs::write("openapi.json", crate::openapi::generate_openapi_spec()) {
+        tracing::warn!(error = %e, "failed to write openapi.json on startup");
+    } else {
+        tracing::debug!("wrote openapi.json on startup");
+    }
+
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::connect(&cfg.storage.path).await?);
     let config = Arc::new(cfg.clone());
     let state = AppState {

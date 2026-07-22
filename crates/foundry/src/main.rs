@@ -52,5 +52,11 @@ async fn main() -> anyhow::Result<()> {
                 },
         } => commands::cert_issue(&ca, &key, &common_name, &san_dns, &out_cert, &out_key, days),
         Command::Quickstart { dir, out_config } => commands::quickstart(&dir, &out_config),
+        Command::Openapi { out } => {
+            let spec = foundry::openapi::generate_openapi_spec();
+            std::fs::write(&out, spec)?;
+            println!("Wrote OpenAPI spec to {out}");
+            Ok(())
+        }
     }
 }
