@@ -1918,12 +1918,15 @@ dependencies = [
  "clap",
  "foundry-core",
  "foundry-issuer",
+ "josekit 0.10.3",
+ "serde_html_form 0.2.8",
  "serde_json",
  "tempfile",
  "tokio",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1953,6 +1956,9 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "foundry-core",
+ "foundry-mdoc",
+ "foundry-sd-jwt-vc",
+ "josekit 0.10.3",
  "percent-encoding",
  "rand 0.8.7",
  "serde",
@@ -1960,6 +1966,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3775,7 +3782,7 @@ dependencies = [
  "rand 0.10.2",
  "reqwest 0.13.4",
  "serde",
- "serde_html_form",
+ "serde_html_form 0.4.1",
  "serde_json",
  "serde_with 3.21.0",
  "sha2 0.10.9",
@@ -5048,6 +5055,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.2",
+]
+
+[[package]]
+name = "serde_html_form"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2f2d7ff8a2140333718bb329f5c40fc5f0865b84c426183ce14c97d2ab8154f"
+dependencies = [
+ "form_urlencoded",
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde_core",
 ]
 
 [[package]]
