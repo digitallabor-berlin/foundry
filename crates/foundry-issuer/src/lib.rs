@@ -1,9 +1,11 @@
+pub mod create_offer;
 pub mod error;
 pub mod metadata;
 pub mod offer;
 pub mod status_index;
 pub mod transaction;
 
+pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,
