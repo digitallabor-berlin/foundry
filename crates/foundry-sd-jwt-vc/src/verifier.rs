@@ -176,6 +176,28 @@ pub fn verify_sd_jwt_vc(
         .map_err(|e| FormatError::SignatureVerification(format!("signature b64: {e}")))?;
     verify_jws_with_coords(curve, &ix, &iy, signing_input.as_bytes(), &sig)?;
 
+    // --- Extract holder cnf.jwk (always disclosed, present in payload directly) ---
+    let holder_jwk = payload_json
+        .get("cnf")
+        .and_then(|cnf| cnf.get("jwk"))
+        .cloned()
+        .ok_or_else(|| FormatError::InvalidStructure("holder cnf.jwk missing".into()))?;
+
+    // --- KB-JWT holder binding (required) ---
+    // Verified before parsing individual disclosures: sd_hash covers the entire
+    // presentation string, so any tampering with a disclosure segment (even if it
+    // corrupts the disclosure's JSON) is caught here as a KeyBinding failure rather
+    // than surfacing as an unrelated parse error.
+    let kb =
+        kb_jwt.ok_or_else(|| FormatError::KeyBinding("KB-JWT missing from presentation".into()))?;
+    verify_kb_jwt(
+        kb,
+        presentation_string,
+        &holder_jwk,
+        expected_audience,
+        expected_nonce,
+    )?;
+
     // --- Reconstruct disclosed claims ---
     let mut disclosures_map: HashMap<String, (String, Value)> = HashMap::new();
     for d_b64 in disclosures_str {
@@ -220,23 +242,6 @@ pub fn verify_sd_jwt_vc(
         payload_map.remove("_sd_alg");
         claims_map = payload_map.clone();
     }
-
-    let holder_jwk = claims_map
-        .get("cnf")
-        .and_then(|cnf| cnf.get("jwk"))
-        .cloned()
-        .ok_or_else(|| FormatError::InvalidStructure("holder cnf.jwk missing".into()))?;
-
-    // --- KB-JWT holder binding (required) ---
-    let kb =
-        kb_jwt.ok_or_else(|| FormatError::KeyBinding("KB-JWT missing from presentation".into()))?;
-    verify_kb_jwt(
-        kb,
-        presentation_string,
-        &holder_jwk,
-        expected_audience,
-        expected_nonce,
-    )?;
 
     let x5c_vec: Option<Vec<String>> =
         header_json

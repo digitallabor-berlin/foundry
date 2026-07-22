@@ -279,8 +279,6 @@ mod tests {
         };
 
         let bytes = build_mdoc(claims, &signer, None).unwrap();
-       
-        let bytes = build_mdoc(claims, &signer, None).unwrap();
         assert!(!bytes.is_empty());
         let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(matches!(decoded, ciborium::Value::Map(_)));

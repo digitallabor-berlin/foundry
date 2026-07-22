@@ -1,8 +1,8 @@
 use crate::error::FormatError;
 use crate::types::{serialize_session_transcript, IssuerSignedItem, MobileSecurityObject};
 use base64::{
-    engine::general_purpose::STANDARD as B64STD, engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
-    Engine as _,
+    engine::general_purpose::STANDARD as B64STD,
+    engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
 };
 use coset::iana::EnumI64;
 use coset::{iana, CborSerializable, CoseKey, CoseSign1};
@@ -12,6 +12,7 @@ use serde_json::{json, Value as JsonValue};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub struct MdocVerificationResult {
     pub claims: BTreeMap<String, BTreeMap<String, JsonValue>>,
     pub device_key_jwk: JsonValue,
