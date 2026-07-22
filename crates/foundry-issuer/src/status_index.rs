@@ -27,9 +27,8 @@ pub async fn allocate_status_index(
             credential_type_id.to_string(),
         ));
     }
-    let mut rng = rand::rngs::ThreadRng::default();
     for _ in 0..MAX_ATTEMPTS {
-        let idx = rng.next_u64() % list_size;
+        let idx = rand::rngs::ThreadRng::default().next_u64() % list_size;
         let key = format!("{credential_type_id}:{idx}");
         let existing = storage.get_kv(USED_NAMESPACE, &key).await?;
         if existing.is_none() {

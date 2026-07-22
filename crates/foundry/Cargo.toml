@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 foundry-core = { path = "../foundry-core" }
+foundry-issuer = { path = "../foundry-issuer" }
 tokio = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
