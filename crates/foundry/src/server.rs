@@ -56,7 +56,7 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
 }
 
 pub fn wallet_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/.well-known/openid-credential-issuer",
             get(issuer_metadata),
@@ -69,16 +69,46 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/nonce", post(nonce_handler))
         .route("/credential", post(credential_handler))
         .route("/vp/request/:id", get(get_request_object_handler))
-        .route("/vp/response/:id", post(post_response_handler))
-        .with_state(state)
+        .route("/vp/response/:id", post(post_response_handler));
+
+    let router = if state.config.server.wallet_facing.swagger_ui_enabled {
+        router.merge(
+            utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
+                "/api-docs/openapi.json",
+                crate::openapi::WalletApiDoc::openapi(),
+            ),
+        )
+    } else {
+        router.route("/api-docs/openapi.json", get(wallet_openapi_json_handler))
+    };
+
+    router.with_state(state)
 }
 
+pub(crate) async fn wallet_openapi_json_handler(
+) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        crate::openapi::generate_wallet_openapi_spec(),
+    )
+}
+
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-credential-issuer",
+    responses((status = 200, body = foundry_issuer::CredentialIssuerMetadata))
+)]
 async fn issuer_metadata(
     State(state): State<AppState>,
 ) -> Json<foundry_issuer::CredentialIssuerMetadata> {
     Json(foundry_issuer::build_issuer_metadata(&state.config))
 }
 
+#[utoipa::path(
+    get,
+    path = "/.well-known/oauth-authorization-server",
+    responses((status = 200, body = foundry_issuer::AuthorizationServerMetadata))
+)]
 async fn auth_server_metadata(
     State(state): State<AppState>,
 ) -> Json<foundry_issuer::AuthorizationServerMetadata> {
@@ -168,6 +198,12 @@ fn wallet_error_response(
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/token",
+    request_body = foundry_issuer::TokenRequest,
+    responses((status = 200, body = foundry_issuer::TokenResponse))
+)]
 async fn token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -250,6 +286,12 @@ async fn nonce_handler(
     Ok(Json(res))
 }
 
+#[utoipa::path(
+    post,
+    path = "/credential",
+    request_body = foundry_issuer::CredentialRequest,
+    responses((status = 200, body = foundry_issuer::CredentialResponse))
+)]
 async fn credential_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -359,6 +401,14 @@ pub(crate) async fn get_verification_handler(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/vp/request/{id}",
+    responses(
+        (status = 200, description = "Signed Request Object JWT", content_type = "application/oauth-authz-req+jwt", body = String),
+        (status = 404)
+    )
+)]
 async fn get_request_object_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -381,6 +431,12 @@ async fn get_request_object_handler(
     ))
 }
 
+#[utoipa::path(
+    post,
+    path = "/vp/response/{id}",
+    request_body(content = String, description = "Encrypted JWE compact serialization of the VP Token response"),
+    responses((status = 200, body = foundry_verifier::VerificationResult))
+)]
 async fn post_response_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,

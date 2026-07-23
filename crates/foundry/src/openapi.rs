@@ -32,9 +32,33 @@ pub fn generate_admin_openapi_spec() -> String {
     AdminApiDoc::openapi().to_json().unwrap_or_default()
 }
 
-/// Wallet OpenAPI documentation (scaffold for Task 5)
+/// Wallet OpenAPI documentation
 #[derive(OpenApi)]
-#[openapi(paths(), components(schemas()))]
+#[openapi(
+    paths(
+        crate::server::issuer_metadata,
+        crate::server::auth_server_metadata,
+        crate::server::token_handler,
+        crate::server::nonce_handler,
+        crate::server::credential_handler,
+        crate::server::get_request_object_handler,
+        crate::server::post_response_handler,
+    ),
+    components(schemas(
+        foundry_issuer::CredentialIssuerMetadata,
+        foundry_issuer::CredentialConfigurationSupported,
+        foundry_issuer::ProofTypeSupported,
+        foundry_issuer::AuthorizationServerMetadata,
+        foundry_issuer::TokenRequest,
+        foundry_issuer::TokenResponse,
+        foundry_issuer::NonceResponse,
+        foundry_issuer::CredentialRequest,
+        foundry_issuer::CredentialResponse,
+        foundry_issuer::ProofObject,
+        foundry_verifier::VerificationResult,
+        foundry_verifier::CheckResult,
+    ))
+)]
 pub struct WalletApiDoc;
 
 /// Generate wallet OpenAPI specification
