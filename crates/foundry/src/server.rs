@@ -8,9 +8,13 @@ use axum::{
 };
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
-use foundry_issuer::{CreateOfferRequest, CreateOfferResponse};
+use foundry_issuer::{
+    AuthorizationServerMetadata, CreateOfferRequest, CreateOfferResponse, CredentialIssuerMetadata,
+    CredentialRequest, CredentialResponse, NonceResponse, TokenRequest, TokenResponse,
+};
 use foundry_verifier::{
-    CreateVerificationRequest, CreateVerificationResponse, VerificationTransaction,
+    CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
+    VerificationTransaction,
 };
 use std::future::IntoFuture;
 use std::sync::Arc;
@@ -94,22 +98,18 @@ pub(crate) async fn wallet_openapi_json_handler(
 #[utoipa::path(
     get,
     path = "/.well-known/openid-credential-issuer",
-    responses((status = 200, body = foundry_issuer::CredentialIssuerMetadata))
+    responses((status = 200, body = CredentialIssuerMetadata))
 )]
-async fn issuer_metadata(
-    State(state): State<AppState>,
-) -> Json<foundry_issuer::CredentialIssuerMetadata> {
+async fn issuer_metadata(State(state): State<AppState>) -> Json<CredentialIssuerMetadata> {
     Json(foundry_issuer::build_issuer_metadata(&state.config))
 }
 
 #[utoipa::path(
     get,
     path = "/.well-known/oauth-authorization-server",
-    responses((status = 200, body = foundry_issuer::AuthorizationServerMetadata))
+    responses((status = 200, body = AuthorizationServerMetadata))
 )]
-async fn auth_server_metadata(
-    State(state): State<AppState>,
-) -> Json<foundry_issuer::AuthorizationServerMetadata> {
+async fn auth_server_metadata(State(state): State<AppState>) -> Json<AuthorizationServerMetadata> {
     Json(foundry_issuer::build_authorization_server_metadata(
         &state.config,
     ))
@@ -199,20 +199,20 @@ fn wallet_error_response(
 #[utoipa::path(
     post,
     path = "/token",
-    request_body = foundry_issuer::TokenRequest,
-    responses((status = 200, body = foundry_issuer::TokenResponse))
+    request_body = TokenRequest,
+    responses((status = 200, body = TokenResponse))
 )]
 async fn token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body_bytes: axum::body::Bytes,
-) -> Result<Json<foundry_issuer::TokenResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<TokenResponse>, (StatusCode, Json<serde_json::Value>)> {
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let req: foundry_issuer::TokenRequest = if content_type.contains("application/json") {
+    let req: TokenRequest = if content_type.contains("application/json") {
         serde_json::from_slice(&body_bytes).map_err(|e| {
             wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
                 e.to_string(),
@@ -250,12 +250,12 @@ async fn token_handler(
 #[utoipa::path(
     post,
     path = "/nonce",
-    responses((status = 200, body = foundry_issuer::NonceResponse))
+    responses((status = 200, body = NonceResponse))
 )]
 async fn nonce_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<foundry_issuer::NonceResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<NonceResponse>, (StatusCode, Json<serde_json::Value>)> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -286,14 +286,14 @@ async fn nonce_handler(
 #[utoipa::path(
     post,
     path = "/credential",
-    request_body = foundry_issuer::CredentialRequest,
-    responses((status = 200, body = foundry_issuer::CredentialResponse))
+    request_body = CredentialRequest,
+    responses((status = 200, body = CredentialResponse))
 )]
 async fn credential_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<foundry_issuer::CredentialRequest>,
-) -> Result<Json<foundry_issuer::CredentialResponse>, (StatusCode, Json<serde_json::Value>)> {
+    Json(req): Json<CredentialRequest>,
+) -> Result<Json<CredentialResponse>, (StatusCode, Json<serde_json::Value>)> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -432,13 +432,13 @@ async fn get_request_object_handler(
     post,
     path = "/vp/response/{id}",
     request_body(content = String, description = "Encrypted JWE compact serialization of the VP Token response"),
-    responses((status = 200, body = foundry_verifier::VerificationResult))
+    responses((status = 200, body = VerificationResult))
 )]
 async fn post_response_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
     encrypted_jwe_str: String,
-) -> Result<Json<foundry_verifier::VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

@@ -247,3 +247,78 @@ async fn wallet_swagger_ui_endpoint_returns_404_when_disabled() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+/// Recursively collects every `$ref` string found anywhere in an OpenAPI JSON
+/// document (paths, requestBody, responses, nested schemas, etc.).
+fn collect_refs(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == "$ref" {
+                    if let Some(s) = v.as_str() {
+                        out.push(s.to_string());
+                    }
+                }
+                collect_refs(v, out);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_refs(v, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Regression test for a real bug: `#[utoipa::path(...)]` annotations that
+/// reference a schema type via its fully-qualified path (e.g.
+/// `body = foundry_issuer::TokenRequest`) generate a `$ref` using the dotted
+/// fully-qualified name (`#/components/schemas/foundry_issuer.TokenRequest`),
+/// which does NOT match the plain name (`TokenRequest`) that
+/// `components(schemas(...))` registers regardless of qualification. Swagger
+/// UI then fails with "Could not resolve reference". Every `$ref` in a
+/// generated spec must point at a schema key that actually exists.
+fn assert_all_refs_resolve(spec_json: &str, spec_name: &str) {
+    let doc: serde_json::Value = serde_json::from_str(spec_json)
+        .unwrap_or_else(|e| panic!("{spec_name} spec should be valid JSON: {e}"));
+
+    let schema_keys: std::collections::HashSet<String> = doc
+        .get("components")
+        .and_then(|c| c.get("schemas"))
+        .and_then(|s| s.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+
+    let mut refs = Vec::new();
+    collect_refs(&doc, &mut refs);
+
+    assert!(
+        !refs.is_empty(),
+        "{spec_name} spec should contain at least one $ref (found none — did paths/components get wired up?)"
+    );
+
+    let mut unresolved = Vec::new();
+    for r in &refs {
+        let name = r.strip_prefix("#/components/schemas/").unwrap_or(r);
+        if !schema_keys.contains(name) {
+            unresolved.push(r.clone());
+        }
+    }
+
+    assert!(
+        unresolved.is_empty(),
+        "{spec_name} spec has unresolved $ref(s): {unresolved:?}\n\
+         known schema keys: {schema_keys:?}"
+    );
+}
+
+#[test]
+fn admin_openapi_spec_all_refs_resolve() {
+    assert_all_refs_resolve(&foundry::openapi::generate_admin_openapi_spec(), "admin");
+}
+
+#[test]
+fn wallet_openapi_spec_all_refs_resolve() {
+    assert_all_refs_resolve(&foundry::openapi::generate_wallet_openapi_spec(), "wallet");
+}
