@@ -8,6 +8,7 @@ use foundry_core::config::{
 };
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::storage::SqliteStorage;
+use foundry_issuer::{load_transaction_by_access_token, save_transaction_with_indices};
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
 use josekit::jws::{JwsHeader, ES256};
@@ -242,4 +243,329 @@ async fn full_issuance_flow_end_to_end() {
     let credential_str = cred_json["credential"].as_str().unwrap();
     assert!(!credential_str.is_empty());
     assert!(credential_str.contains('~')); // SD-JWT VC format contains ~ separators
+}
+
+#[tokio::test]
+async fn token_request_with_wrong_pre_auth_code_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_form_body =
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code=does-not-exist";
+
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(token_form_body))
+        .unwrap();
+
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+    assert_eq!(token_res.status(), StatusCode::BAD_REQUEST);
+
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    assert_eq!(token_json["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn token_request_with_wrong_tx_code_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+
+    // 1. Create offer requiring a tx_code via Admin API
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": {
+            "given_name": "Alice"
+        },
+        "tx_code_required": true
+    });
+
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri("/admin/issuance/offers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(offer_req_body.to_string()))
+        .unwrap();
+
+    let offer_res = admin_app.oneshot(offer_req).await.unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .unwrap();
+
+    // 2. Attempt to exchange with the wrong tx_code
+    let wallet_app = wallet_router(state.clone());
+    let token_form_body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={}&tx_code=0000",
+        pre_auth_code
+    );
+
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(token_form_body))
+        .unwrap();
+
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+    assert_eq!(token_res.status(), StatusCode::BAD_REQUEST);
+
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    assert_eq!(token_json["error"], "invalid_grant");
+}
+
+async fn issue_offer_and_get_access_token(state: &AppState) -> String {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": {
+            "given_name": "Alice"
+        },
+        "tx_code_required": false
+    });
+
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri("/admin/issuance/offers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(offer_req_body.to_string()))
+        .unwrap();
+
+    let offer_res = admin_app.oneshot(offer_req).await.unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .unwrap();
+
+    let wallet_app = wallet_router(state.clone());
+    let token_form_body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={}",
+        pre_auth_code
+    );
+
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(token_form_body))
+        .unwrap();
+
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+    assert_eq!(token_res.status(), StatusCode::OK);
+
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+
+    token_json["access_token"].as_str().unwrap().to_string()
+}
+
+async fn mint_c_nonce(state: &AppState, access_token: &str) -> String {
+    let wallet_app = wallet_router(state.clone());
+    let nonce_req = Request::builder()
+        .method("POST")
+        .uri("/nonce")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+
+    let nonce_bytes = axum::body::to_bytes(nonce_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let nonce_json: serde_json::Value = serde_json::from_slice(&nonce_bytes).unwrap();
+    nonce_json["c_nonce"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn credential_request_with_proof_aud_mismatch_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+    let access_token = issue_offer_and_get_access_token(&state).await;
+    let c_nonce = mint_c_nonce(&state, &access_token).await;
+
+    // Build a proof whose `aud` doesn't match the configured issuer.
+    let (proof_json, _keypair) = create_proof(&c_nonce, "https://wrong-issuer.example.com");
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proof": proof_json,
+    });
+
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::BAD_REQUEST);
+
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    assert_eq!(cred_json["error"], "invalid_proof");
+}
+
+#[tokio::test]
+async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+    let access_token = issue_offer_and_get_access_token(&state).await;
+    let _c_nonce = mint_c_nonce(&state, &access_token).await;
+
+    // Build a proof carrying a nonce that does not match the transaction's c_nonce.
+    let (proof_json, _keypair) = create_proof("not-the-real-nonce", "https://issuer.example.com");
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proof": proof_json,
+    });
+
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::BAD_REQUEST);
+
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    assert_eq!(cred_json["error"], "invalid_proof");
+}
+
+#[tokio::test]
+async fn credential_request_with_expired_c_nonce_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+    let access_token = issue_offer_and_get_access_token(&state).await;
+    let c_nonce = mint_c_nonce(&state, &access_token).await;
+
+    // Force the stored c_nonce to already be expired.
+    let mut tx = load_transaction_by_access_token(state.storage.as_ref(), &access_token)
+        .await
+        .unwrap()
+        .expect("transaction should exist");
+    tx.c_nonce_expires_at = Some(0);
+    save_transaction_with_indices(state.storage.as_ref(), &tx, 600, 1_700_000_000)
+        .await
+        .unwrap();
+
+    let (proof_json, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proof": proof_json,
+    });
+
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::BAD_REQUEST);
+
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    assert_eq!(cred_json["error"], "invalid_proof");
+}
+
+#[tokio::test]
+async fn second_credential_request_with_same_access_token_is_rejected() {
+    let (state, _dir) = setup_test_app().await;
+    let access_token = issue_offer_and_get_access_token(&state).await;
+    let c_nonce = mint_c_nonce(&state, &access_token).await;
+
+    let (proof_json, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proof": proof_json,
+    });
+
+    // First request succeeds and moves the transaction to IssuanceState::Issued.
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::OK);
+
+    // Second request with the same access_token must be rejected end-to-end over HTTP
+    // because the underlying transaction is now IssuanceState::Issued. Reuse the same
+    // (already-consumed) proof/nonce here: /nonce itself now also rejects an Issued
+    // transaction, so re-minting a nonce is not a viable path for this attempt anyway.
+    let (proof_json_2, _keypair_2) = create_proof(&c_nonce, "https://issuer.example.com");
+    let cred_req_body_2 = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proof": proof_json_2,
+    });
+
+    let wallet_app = wallet_router(state.clone());
+    let cred_req_2 = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body_2.to_string()))
+        .unwrap();
+
+    let cred_res_2 = wallet_app.oneshot(cred_req_2).await.unwrap();
+    assert_eq!(cred_res_2.status(), StatusCode::BAD_REQUEST);
+
+    let cred_bytes_2 = axum::body::to_bytes(cred_res_2.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json_2: serde_json::Value = serde_json::from_slice(&cred_bytes_2).unwrap();
+    assert_eq!(cred_json_2["error"], "invalid_grant");
 }
