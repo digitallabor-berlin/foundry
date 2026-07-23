@@ -250,7 +250,6 @@ async fn token_handler(
 #[utoipa::path(
     post,
     path = "/nonce",
-    security(("bearerAuth" = [])),
     responses((status = 200, body = foundry_issuer::NonceResponse))
 )]
 async fn nonce_handler(
