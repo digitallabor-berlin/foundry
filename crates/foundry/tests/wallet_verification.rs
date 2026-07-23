@@ -456,3 +456,208 @@ async fn resubmitting_a_verification_response_is_rejected() {
     let tx: VerificationTransaction = serde_json::from_slice(&tx_bytes).unwrap();
     assert_eq!(tx.state, VerificationState::Verified);
 }
+
+#[tokio::test]
+async fn tampered_jwe_body_is_rejected_cleanly() {
+    let (state, _dir, _issuer_cert_pem, _issuer_key_pem) = setup_test_app().await;
+
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "request_uri"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    // Not a valid JWE at all — must not panic, must return a clean error response.
+    let garbage_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from("this-is-not-a-jwe-at-all"))
+        .unwrap();
+
+    let garbage_res = wallet_app.clone().oneshot(garbage_req).await.unwrap();
+    assert_eq!(garbage_res.status(), StatusCode::BAD_REQUEST);
+
+    let garbage_bytes = axum::body::to_bytes(garbage_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let garbage_json: serde_json::Value = serde_json::from_slice(&garbage_bytes).unwrap();
+    assert_eq!(garbage_json["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn presentation_from_untrusted_issuer_is_rejected() {
+    let (state, _dir, _issuer_cert_pem, _issuer_key_pem) = setup_test_app().await;
+
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "request_uri"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    assert_eq!(parts.len(), 3);
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    // Build an ENTIRELY SEPARATE, untrusted CA/leaf pair (not in the configured trust_anchors)
+    // and sign the presentation with it instead of the trusted issuer key.
+    let untrusted_root = new_ca("Untrusted Root CA", 365).unwrap();
+    let untrusted_leaf = issue_leaf(
+        &untrusted_root.cert_pem,
+        &untrusted_root.key_pem,
+        "localhost",
+        &["localhost".to_string()],
+        365,
+    )
+    .unwrap();
+
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let untrusted_issuer_signer =
+        FileSigner::from_pem(untrusted_leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &untrusted_issuer_signer,
+        Some(vec![der_b64(untrusted_leaf.cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    let sd_jwt_vc_presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+
+    let jwe_str = JweBuilder::new()
+        .payload(serde_json::json!({ "vp_token": sd_jwt_vc_presentation }))
+        .recipient_key_json(&ephem_public_jwk)
+        .unwrap()
+        .alg("ECDH-ES")
+        .enc("A128GCM")
+        .build()
+        .unwrap();
+
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(jwe_str))
+        .unwrap();
+
+    let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::BAD_REQUEST);
+
+    let body_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_request");
+}
+
+#[tokio::test]
+async fn response_for_unknown_transaction_id_returns_404() {
+    let (state, _dir, _issuer_cert_pem, _issuer_key_pem) = setup_test_app().await;
+    let wallet_app = wallet_router(state.clone());
+
+    let unknown_id = uuid::Uuid::new_v4().to_string();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{unknown_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from("irrelevant-body"))
+        .unwrap();
+
+    let res = wallet_app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
