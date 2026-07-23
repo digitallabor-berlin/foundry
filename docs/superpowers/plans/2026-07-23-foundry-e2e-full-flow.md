@@ -29,7 +29,7 @@
 - Test: `crates/foundry-core/src/status_list/mod.rs` (new `#[test]` in the existing `#[cfg(test)] mod tests` block)
 
 **Interfaces:**
-- Produces: `pub fn sign_status_list_token(status_list: &StatusList, sub: String, now_unix: i64, key_path: &str, alg: SignatureAlgorithm, x5c_path: Option<&str>) -> Result<String, CoreError>` in `foundry_core::status_list` — consumed by Task 2's new HTTP route handler and by this task's refactored `commands.rs::status_list_token`.
+- Produces: `pub fn sign_status_list_token(status_list: &StatusList, sub: String, now_unix: i64, key_path: &str, alg: SignatureAlgorithm, x5c_path: Option<&Path>) -> Result<String, CoreError>` in `foundry_core::status_list` (`x5c_path` takes `&std::path::Path`, not `&str` — a post-Task-1-review fix: an `Option<&str>` parameter forced callers through a lossy/fallible UTF-8 conversion that could silently drop the x5c chain on a non-UTF-8 path instead of erroring) — consumed by Task 2's new HTTP route handler and by this task's refactored `commands.rs::status_list_token`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -105,13 +105,13 @@ pub fn sign_status_list_token(
     now_unix: i64,
     key_path: &str,
     alg: SignatureAlgorithm,
-    x5c_path: Option<&str>,
+    x5c_path: Option<&std::path::Path>,
 ) -> Result<String, CoreError> {
     let signer = FileSigner::from_pem_file(key_path, alg)?;
     let x5c = match x5c_path {
         Some(path) => {
             let pem_bytes = std::fs::read(path).map_err(|source| CryptoError::KeyRead {
-                path: path.to_string(),
+                path: path.display().to_string(),
                 source,
             })?;
             Some(build_x5c(&[pem_bytes])?)
@@ -226,7 +226,7 @@ with:
         now,
         &key_file.to_string_lossy(),
         alg,
-        x5c_file.as_deref().and_then(|p| p.to_str()),
+        x5c_file.as_deref(),
     )?;
     println!("{token}");
     Ok(())
@@ -502,7 +502,7 @@ async fn status_list_handler(
         now,
         &key_entry.private_key,
         alg,
-        key_entry.x5c.as_deref(),
+        key_entry.x5c.as_deref().map(std::path::Path::new),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
