@@ -1,5 +1,6 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
+use axum::routing::get;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
@@ -10,7 +11,11 @@ use foundry_core::config::{
 };
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::pki::{issue_leaf, new_ca};
+use foundry_core::status_list::{build_status_list_token, StatusList, StatusListTokenClaims};
 use foundry_core::storage::SqliteStorage;
+use foundry_core::trust::build_x5c;
+use foundry_mdoc::builder::{build_mdoc, MdocClaims};
+use foundry_mdoc::types::serialize_session_transcript;
 use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
 use foundry_verifier::{
     CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
@@ -22,6 +27,37 @@ use std::collections::BTreeMap as StdBTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt;
+
+/// Build a signed Status List Token (compact JWS, `statuslist+jwt`) whose list
+/// marks `revoked_idx` (if any) Invalid and everything else Valid, signed by
+/// the issuer leaf so it chains to the test root trust anchor. `sub == uri`.
+fn build_status_token(
+    issuer_cert_pem: &str,
+    issuer_key_pem: &str,
+    sub: &str,
+    len: usize,
+    revoked_idx: Option<u64>,
+) -> String {
+    let signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let x5c = build_x5c(&[issuer_cert_pem.as_bytes().to_vec()]).unwrap();
+    let mut values = vec![0u8; len];
+    if let Some(i) = revoked_idx {
+        values[i as usize] = 1; // Invalid
+    }
+    let list = StatusList::build(&values, 2, None).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let claims = StatusListTokenClaims {
+        sub: sub.to_string(),
+        iat: now - 100,
+        exp: Some(now + 3600),
+        ttl: None,
+    };
+    build_status_list_token(claims, &list, &signer, Some(x5c)).unwrap()
+}
 
 fn der_b64(pem_bytes: &[u8]) -> String {
     std::str::from_utf8(pem_bytes)
@@ -660,4 +696,394 @@ async fn response_for_unknown_transaction_id_returns_404() {
 
     let res = wallet_app.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dcql_vct_mismatch_is_rejected() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    // Request vct "pid" ...
+    let create_req_body = serde_json::json!({
+        "dcql_query": { "credentials": [{
+            "id": "c1", "format": "dc+sd-jwt",
+            "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+        }]},
+        "transport": "request_uri"
+    });
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    // ... but issue a credential with a DIFFERENT vct.
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/OTHER".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let jwe_str = JweBuilder::new()
+        .payload(serde_json::json!({ "vp_token": presentation }))
+        .recipient_key_json(&ephem_public_jwk)
+        .unwrap()
+        .alg("ECDH-ES")
+        .enc("A128GCM")
+        .build()
+        .unwrap();
+
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(jwe_str))
+        .unwrap();
+    let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
+
+    assert!(!verify_result.verified, "DCQL vct mismatch must not verify");
+    assert!(verify_result
+        .checks
+        .iter()
+        .any(|c| c.check == "dcql_match" && !c.passed));
+}
+
+/// Run the full SD-JWT VC verification flow issuing a credential whose
+/// `status.status_list` points at an in-process status server. Returns the
+/// decoded `VerificationResult`.
+async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> VerificationResult {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": { "credentials": [{
+            "id": "c1", "format": "dc+sd-jwt",
+            "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+        }]},
+        "transport": "request_uri"
+    });
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    // Status server: bind first to learn the port, so the token's `sub` can
+    // equal the credential's `uri` (draft-ietf-oauth-status-list-14 §5.1).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let uri = format!("http://{addr}/statuslists/1");
+    let token = build_status_token(&issuer_cert_pem, &issuer_key_pem, &uri, 128, revoked_idx);
+    let app = axum::Router::new().route(
+        "/statuslists/1",
+        get(move || {
+            let token = token.clone();
+            async move { token }
+        }),
+    );
+    let _server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: Some(credential_idx),
+        status_list_uri: Some(uri),
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let jwe_str = JweBuilder::new()
+        .payload(serde_json::json!({ "vp_token": presentation }))
+        .recipient_key_json(&ephem_public_jwk)
+        .unwrap()
+        .alg("ECDH-ES")
+        .enc("A128GCM")
+        .build()
+        .unwrap();
+
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(jwe_str))
+        .unwrap();
+    let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&verify_bytes).unwrap()
+}
+
+#[tokio::test]
+async fn revoked_credential_is_rejected() {
+    // Credential at index 5; the status list marks index 5 revoked.
+    let result = run_status_flow(Some(5), 5).await;
+    assert!(!result.verified, "revoked credential must not verify");
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.check == "status_check" && !c.passed));
+}
+
+#[tokio::test]
+async fn valid_non_revoked_credential_succeeds() {
+    // Credential at index 5; nothing is revoked.
+    let result = run_status_flow(None, 5).await;
+    assert!(result.verified, "checks={:?}", result.checks);
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.check == "status_check" && c.passed));
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.check == "dcql_match" && c.passed));
+    assert_eq!(result.claims["given_name"], "Alice");
+}
+
+#[tokio::test]
+async fn mdoc_presentation_is_accepted() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": { "credentials": [{
+            "id": "c1", "format": "mso_mdoc",
+            "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+            "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+        }]},
+        "transport": "request_uri"
+    });
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+    let response_uri = format!("https://localhost:8443/vp/response/{verification_id}");
+
+    // Device key + issued mdoc.
+    let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+    let d_signer =
+        FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut elements = std::collections::BTreeMap::new();
+    elements.insert("given_name".to_string(), serde_json::json!("John"));
+    let mut namespaces = std::collections::BTreeMap::new();
+    namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+    let mdoc_claims = MdocClaims {
+        doc_type: "org.iso.18013.5.1.mDL".to_string(),
+        namespaces,
+        device_key_jwk: d_jwk_pub,
+        signed_at: (now - 100) as i64,
+        valid_until: (now + 3600) as i64,
+    };
+    let mdoc_bytes = build_mdoc(
+        mdoc_claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    // Detached DeviceAuth over the reconstructed SessionTranscript.
+    let transcript =
+        serialize_session_transcript(Some(client_id), Some(response_uri), nonce).unwrap();
+    let protected = coset::HeaderBuilder::new()
+        .algorithm(coset::iana::Algorithm::ES256)
+        .build();
+    let partial = coset::CoseSign1Builder::new()
+        .protected(protected.clone())
+        .build();
+    let d_tbs = coset::sig_structure_data(
+        coset::SignatureContext::CoseSign1,
+        partial.protected.clone(),
+        None,
+        &[],
+        &transcript,
+    );
+    let sig = {
+        use foundry_core::crypto::Signer as _;
+        d_signer.sign(&d_tbs).unwrap()
+    };
+    let d_sign = coset::CoseSign1Builder::new()
+        .protected(protected)
+        .signature(sig)
+        .build();
+    let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+
+    let vp_token = serde_json::json!({
+        "mdoc": B64URL.encode(&mdoc_bytes),
+        "device_signature": B64URL.encode(&d_sig_bytes),
+    });
+    let jwe_str = JweBuilder::new()
+        .payload(serde_json::json!({ "vp_token": vp_token }))
+        .recipient_key_json(&ephem_public_jwk)
+        .unwrap()
+        .alg("ECDH-ES")
+        .enc("A128GCM")
+        .build()
+        .unwrap();
+
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(jwe_str))
+        .unwrap();
+    let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
+
+    assert!(verify_result.verified, "checks={:?}", verify_result.checks);
+    assert_eq!(
+        verify_result.claims["org.iso.18013.5.1"]["given_name"],
+        "John"
+    );
+    assert!(verify_result
+        .checks
+        .iter()
+        .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
 }
