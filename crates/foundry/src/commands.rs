@@ -237,7 +237,7 @@ pub async fn status_list_token(config_path: &str, credential_type: &str) -> anyh
         now,
         &key_file.to_string_lossy(),
         alg,
-        x5c_file.as_deref().and_then(|p| p.to_str()),
+        x5c_file.as_deref(),
     )?;
     println!("{token}");
     Ok(())

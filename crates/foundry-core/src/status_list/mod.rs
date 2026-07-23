@@ -254,13 +254,13 @@ pub fn sign_status_list_token(
     now_unix: i64,
     key_path: &str,
     alg: SignatureAlgorithm,
-    x5c_path: Option<&str>,
+    x5c_path: Option<&std::path::Path>,
 ) -> Result<String, CoreError> {
     let signer = FileSigner::from_pem_file(key_path, alg)?;
     let x5c = match x5c_path {
         Some(path) => {
             let pem_bytes = std::fs::read(path).map_err(|source| CryptoError::KeyRead {
-                path: path.to_string(),
+                path: path.display().to_string(),
                 source,
             })?;
             Some(build_x5c(&[pem_bytes])?)
