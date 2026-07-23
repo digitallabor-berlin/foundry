@@ -213,10 +213,16 @@ async fn token_handler(
     .map_err(|e| wallet_error_response(&e))
 }
 
+#[utoipa::path(
+    post,
+    path = "/nonce",
+    security(("bearerAuth" = [])),
+    responses((status = 200, body = foundry_issuer::NonceResponse))
+)]
 async fn nonce_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<foundry_issuer::NonceResponse>, (StatusCode, Json<serde_json::Value>)> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -241,10 +247,7 @@ async fn nonce_handler(
         .await
         .map_err(|e| wallet_error_response(&e))?;
 
-    Ok(Json(serde_json::json!({
-        "c_nonce": res.c_nonce,
-        "c_nonce_expires_in": res.c_nonce_expires_in
-    })))
+    Ok(Json(res))
 }
 
 async fn credential_handler(
