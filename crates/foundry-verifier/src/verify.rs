@@ -248,6 +248,7 @@ mod tests {
                 wallet_facing: WalletFacingConfig {
                     public_base_url: "https://localhost:8443".to_string(),
                     bind: "127.0.0.1:8443".to_string(),
+                    swagger_ui_enabled: true,
                 },
                 admin: AdminConfig {
                     bind: "127.0.0.1:8444".to_string(),

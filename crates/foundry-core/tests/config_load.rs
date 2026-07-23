@@ -7,6 +7,10 @@ fn loads_minimal_yaml_and_validates() {
     assert_eq!(cfg.issuer.credential_issuer, "https://issuer.example.com");
     assert_eq!(cfg.credential_types.len(), 1);
     assert_eq!(cfg.credential_types[0].id, "pid");
+    assert!(
+        cfg.server.wallet_facing.swagger_ui_enabled,
+        "swagger_ui_enabled should default to true when omitted from YAML"
+    );
     cfg.validate().expect("minimal config should be valid");
 }
 

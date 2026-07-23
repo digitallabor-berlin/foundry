@@ -25,6 +25,8 @@ pub struct ServerConfig {
 pub struct WalletFacingConfig {
     pub public_base_url: String,
     pub bind: String,
+    #[serde(default = "default_true")]
+    pub swagger_ui_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

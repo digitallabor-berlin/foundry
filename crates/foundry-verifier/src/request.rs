@@ -264,6 +264,7 @@ mod tests {
                 wallet_facing: WalletFacingConfig {
                     public_base_url: "https://verifier.example.com".to_string(),
                     bind: "127.0.0.1:8080".to_string(),
+                    swagger_ui_enabled: true,
                 },
                 admin: AdminConfig {
                     bind: "127.0.0.1:8081".to_string(),

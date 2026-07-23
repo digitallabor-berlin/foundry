@@ -17,6 +17,7 @@ fn test_config(status_list_enabled: bool) -> Config {
             wallet_facing: WalletFacingConfig {
                 public_base_url: "https://localhost:8443".to_string(),
                 bind: "0.0.0.0:8443".to_string(),
+                swagger_ui_enabled: true,
             },
             admin: AdminConfig {
                 bind: "127.0.0.1:9000".to_string(),
