@@ -24,6 +24,14 @@ fn default_transport() -> String {
     "request_uri".to_string()
 }
 
+pub(crate) fn dns_host_only(base_url: &str) -> String {
+    let host = base_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let host = host.split('/').next().unwrap_or(host);
+    host.split(':').next().unwrap_or(host).to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateVerificationResponse {
     pub verification_id: String,
@@ -122,9 +130,7 @@ pub async fn create_verification_request(
         })
     } else {
         let request_uri = format!("{base_url}/vp/request/{id}");
-        let host = base_url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
+        let host = dns_host_only(base_url);
         let client_id = format!("x509_san_dns:{host}");
         let client_id_enc = utf8_percent_encode(&client_id, NON_ALPHANUMERIC).to_string();
         let request_uri_enc = utf8_percent_encode(&request_uri, NON_ALPHANUMERIC).to_string();
@@ -166,9 +172,7 @@ pub fn build_signed_request_object(
     };
 
     let base_url = config.server.wallet_facing.public_base_url.trim_end_matches('/');
-    let host = base_url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
+    let host = dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
     let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 

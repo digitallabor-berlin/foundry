@@ -58,9 +58,7 @@ fn do_verify_vp_response(
     let trust_store = TrustStore::from_config(&config.trust_anchors)?;
 
     let base_url = config.server.wallet_facing.public_base_url.trim_end_matches('/');
-    let host = base_url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
+    let host = crate::request::dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
 
     let now_unix = std::time::SystemTime::now()
@@ -261,7 +259,7 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost:8443";
+        let client_id = "x509_san_dns:localhost";
         let presentation =
             attach_kb_jwt(issuer_pres, &holder_signer, client_id, &tx.nonce).unwrap();
 
@@ -348,7 +346,7 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost:8443";
+        let client_id = "x509_san_dns:localhost";
         // Attach KB-JWT with wrong nonce
         let presentation =
             attach_kb_jwt(issuer_pres, &holder_signer, client_id, "wrong-nonce").unwrap();
