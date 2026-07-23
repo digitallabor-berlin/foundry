@@ -519,6 +519,15 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         tracing::debug!("wrote openapi.json on startup");
     }
 
+    if let Err(e) = std::fs::write(
+        "openapi-wallet.json",
+        crate::openapi::generate_wallet_openapi_spec(),
+    ) {
+        tracing::warn!(error = %e, "failed to write openapi-wallet.json on startup");
+    } else {
+        tracing::debug!("wrote openapi-wallet.json on startup");
+    }
+
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::connect(&cfg.storage.path).await?);
     let config = Arc::new(cfg.clone());
     let state = AppState {
