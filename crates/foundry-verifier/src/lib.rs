@@ -9,7 +9,7 @@ pub use request::{
     CreateVerificationResponse,
 };
 pub use transaction::{
-    load_verification_transaction, save_verification_transaction, CheckResult,
-    VerificationResult, VerificationState, VerificationTransaction,
+    load_verification_transaction, save_verification_transaction, CheckResult, VerificationResult,
+    VerificationState, VerificationTransaction,
 };
 pub use verify::verify_vp_response;

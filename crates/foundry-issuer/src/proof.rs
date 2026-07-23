@@ -55,9 +55,9 @@ pub fn verify_holder_proof(
     let header = JwsHeader::from_bytes(&header_bytes)
         .map_err(|e| IssuanceError::InvalidProof(format!("invalid proof header: {e}")))?;
 
-    let typ = header.token_type().ok_or_else(|| {
-        IssuanceError::InvalidProof("missing typ header in proof JWT".into())
-    })?;
+    let typ = header
+        .token_type()
+        .ok_or_else(|| IssuanceError::InvalidProof("missing typ header in proof JWT".into()))?;
     if typ != "openid4vci-proof+jwt" {
         return Err(IssuanceError::InvalidProof(format!(
             "invalid proof typ header: {typ}, expected openid4vci-proof+jwt"
@@ -70,25 +70,32 @@ pub fn verify_holder_proof(
     let jwk: Jwk = serde_json::from_value(jwk_val.clone())
         .map_err(|e| IssuanceError::InvalidProof(format!("invalid jwk in proof header: {e}")))?;
 
-    let verifier = ES256
-        .verifier_from_jwk(&jwk)
-        .map_err(|e| IssuanceError::InvalidProof(format!("unable to create verifier from jwk: {e}")))?;
-
-    let (payload, _) = josekit::jwt::decode_with_verifier(jwt_str, &verifier)
-        .map_err(|e| IssuanceError::InvalidProof(format!("proof JWS signature verification failed: {e}")))?;
-
-    let aud = payload.claim("aud").and_then(|v| v.as_str()).ok_or_else(|| {
-        IssuanceError::InvalidProof("missing or non-string aud claim in proof payload".into())
+    let verifier = ES256.verifier_from_jwk(&jwk).map_err(|e| {
+        IssuanceError::InvalidProof(format!("unable to create verifier from jwk: {e}"))
     })?;
+
+    let (payload, _) = josekit::jwt::decode_with_verifier(jwt_str, &verifier).map_err(|e| {
+        IssuanceError::InvalidProof(format!("proof JWS signature verification failed: {e}"))
+    })?;
+
+    let aud = payload
+        .claim("aud")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            IssuanceError::InvalidProof("missing or non-string aud claim in proof payload".into())
+        })?;
     if aud != expected_issuer {
         return Err(IssuanceError::InvalidProof(format!(
             "proof aud mismatch: got {aud}, expected {expected_issuer}"
         )));
     }
 
-    let nonce = payload.claim("nonce").and_then(|v| v.as_str()).ok_or_else(|| {
-        IssuanceError::InvalidProof("missing or non-string nonce claim in proof payload".into())
-    })?;
+    let nonce = payload
+        .claim("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            IssuanceError::InvalidProof("missing or non-string nonce claim in proof payload".into())
+        })?;
     if nonce != expected_c_nonce {
         return Err(IssuanceError::InvalidProof(format!(
             "proof nonce mismatch: got {nonce}, expected {expected_c_nonce}"
@@ -112,11 +119,17 @@ mod tests {
 
         let mut header = JwsHeader::new();
         header.set_token_type("openid4vci-proof+jwt");
-        header.set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap())).unwrap();
+        header
+            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+            .unwrap();
 
         let mut payload = JwtPayload::new();
-        payload.set_claim("aud", Some(serde_json::json!("https://issuer.example.com"))).unwrap();
-        payload.set_claim("nonce", Some(serde_json::json!("nonce-123"))).unwrap();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .unwrap();
 
         let private_jwk = keypair.to_jwk_private_key();
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
@@ -147,11 +160,17 @@ mod tests {
 
         let mut header = JwsHeader::new();
         header.set_token_type("openid4vci-proof+jwt");
-        header.set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap())).unwrap();
+        header
+            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+            .unwrap();
 
         let mut payload = JwtPayload::new();
-        payload.set_claim("aud", Some(serde_json::json!("https://issuer.example.com"))).unwrap();
-        payload.set_claim("nonce", Some(serde_json::json!("wrong-nonce"))).unwrap();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("wrong-nonce")))
+            .unwrap();
 
         let private_jwk = keypair.to_jwk_private_key();
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();

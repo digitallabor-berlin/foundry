@@ -456,7 +456,10 @@ impl PersistentStatusList {
         Ok(())
     }
 
-    pub fn to_status_list(&self, aggregation_uri: Option<String>) -> Result<StatusList, FormatError> {
+    pub fn to_status_list(
+        &self,
+        aggregation_uri: Option<String>,
+    ) -> Result<StatusList, FormatError> {
         let compressed = compress_zlib(&self.raw)?;
         Ok(StatusList {
             bits: self.bits,
@@ -470,7 +473,10 @@ pub async fn load_status_list(
     storage: &dyn crate::storage::Storage,
     credential_type: &str,
 ) -> Result<Option<PersistentStatusList>, crate::error::StorageError> {
-    if let Some(json_str) = storage.get_kv(STATUS_LIST_NAMESPACE, credential_type).await? {
+    if let Some(json_str) = storage
+        .get_kv(STATUS_LIST_NAMESPACE, credential_type)
+        .await?
+    {
         let list: PersistentStatusList = serde_json::from_str(&json_str)
             .map_err(|e| crate::error::StorageError::Backend(e.to_string()))?;
         Ok(Some(list))
@@ -486,7 +492,12 @@ pub async fn save_status_list(
     let json_str = serde_json::to_string(list)
         .map_err(|e| crate::error::StorageError::Backend(e.to_string()))?;
     storage
-        .put_kv(STATUS_LIST_NAMESPACE, &list.credential_type, &json_str, None)
+        .put_kv(
+            STATUS_LIST_NAMESPACE,
+            &list.credential_type,
+            &json_str,
+            None,
+        )
         .await
 }
 
@@ -875,7 +886,9 @@ mod tests {
         use crate::storage::SqliteStorage;
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
-        let storage = SqliteStorage::connect(db_path.to_str().unwrap()).await.unwrap();
+        let storage = SqliteStorage::connect(db_path.to_str().unwrap())
+            .await
+            .unwrap();
 
         let loaded = load_status_list(&storage, "pid").await.unwrap();
         assert!(loaded.is_none());

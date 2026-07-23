@@ -1,5 +1,7 @@
 use crate::error::VerificationError;
-use crate::transaction::{save_verification_transaction, VerificationState, VerificationTransaction};
+use crate::transaction::{
+    save_verification_transaction, VerificationState, VerificationTransaction,
+};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use foundry_core::config::Config;
@@ -71,8 +73,8 @@ pub async fn create_verification_request(
     let id = format!("v_{}", Uuid::new_v4().simple());
     let nonce = format!("vn_{}", Uuid::new_v4().simple());
 
-    let keypair = EcKeyPair::generate(EcCurve::P256)
-        .map_err(|e| VerificationError::Crypto(e.to_string()))?;
+    let keypair =
+        EcKeyPair::generate(EcCurve::P256).map_err(|e| VerificationError::Crypto(e.to_string()))?;
 
     let public_jwk = keypair.to_jwk_public_key();
     let private_jwk = keypair.to_jwk_private_key();
@@ -110,7 +112,11 @@ pub async fn create_verification_request(
     save_verification_transaction(storage, &tx, config.storage.transaction_ttl_secs, now_unix)
         .await?;
 
-    let base_url = config.server.wallet_facing.public_base_url.trim_end_matches('/');
+    let base_url = config
+        .server
+        .wallet_facing
+        .public_base_url
+        .trim_end_matches('/');
 
     if transport_str == "dc_api" {
         let dc_api_obj = serde_json::json!({
@@ -164,14 +170,19 @@ pub fn build_signed_request_object(
     let signer = FileSigner::from_pem_file(&key_entry.private_key, alg)?;
 
     let x5c = if let Some(ref path) = key_entry.x5c {
-        let pem_bytes = std::fs::read(path)
-            .map_err(|e| VerificationError::Crypto(format!("failed to read x5c file '{path}': {e}")))?;
+        let pem_bytes = std::fs::read(path).map_err(|e| {
+            VerificationError::Crypto(format!("failed to read x5c file '{path}': {e}"))
+        })?;
         Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
     } else {
         None
     };
 
-    let base_url = config.server.wallet_facing.public_base_url.trim_end_matches('/');
+    let base_url = config
+        .server
+        .wallet_facing
+        .public_base_url
+        .trim_end_matches('/');
     let host = dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
     let response_uri = format!("{base_url}/vp/response/{}", tx.id);
@@ -179,7 +190,10 @@ pub fn build_signed_request_object(
     let mut payload_map = serde_json::Map::new();
     payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     payload_map.insert("response_uri".to_string(), serde_json::json!(response_uri));
-    payload_map.insert("response_mode".to_string(), serde_json::json!("direct_post.jwt"));
+    payload_map.insert(
+        "response_mode".to_string(),
+        serde_json::json!("direct_post.jwt"),
+    );
     payload_map.insert("nonce".to_string(), serde_json::json!(tx.nonce));
     payload_map.insert("state".to_string(), serde_json::json!(tx.id));
     payload_map.insert("dcql_query".to_string(), tx.dcql_query.clone());
@@ -456,14 +470,13 @@ mod tests {
 
         // Verify JWS signature using verifier key
         let keypair = EcKeyPair::from_pem(km.private_pem.as_bytes(), None).unwrap();
-        let verifier = ES256.verifier_from_jwk(&keypair.to_jwk_public_key()).unwrap();
+        let verifier = ES256
+            .verifier_from_jwk(&keypair.to_jwk_public_key())
+            .unwrap();
 
         let (verified_payload, verified_header) =
             josekit::jwt::decode_with_verifier(&jws_str, &verifier).unwrap();
-        assert_eq!(
-            verified_header.token_type(),
-            Some("oauth-authz-req+jwt")
-        );
+        assert_eq!(verified_header.token_type(), Some("oauth-authz-req+jwt"));
         assert_eq!(
             verified_payload.claim("state").and_then(|v| v.as_str()),
             Some(tx.id.as_str())

@@ -135,8 +135,7 @@ impl JweBuilder {
         }
 
         // Create encrypter and encrypt (using P-256 curve)
-        let encrypter =
-            josekit::jwe::ECDH_ES.encrypter_from_jwk(&recipient_key)?;
+        let encrypter = josekit::jwe::ECDH_ES.encrypter_from_jwk(&recipient_key)?;
         let jwe = encode_with_encrypter(&jwt_payload, &header, &encrypter)?;
 
         Ok(jwe)
@@ -418,7 +417,7 @@ mod tests {
 
     #[test]
     fn find_encryption_jwk_success() {
-        let jwks = vec![
+        let jwks = [
             // Signing key (should be skipped)
             json!({
                 "kty": "EC",
@@ -450,7 +449,7 @@ mod tests {
 
     #[test]
     fn find_encryption_jwk_no_enc_key() {
-        let jwks = vec![json!({
+        let jwks = [json!({
             "kty": "EC",
             "crv": "P-256",
             "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
@@ -468,7 +467,7 @@ mod tests {
     #[test]
     fn find_encryption_jwk_missing_alg() {
         // Per OID4VP v1.0 §8.3, alg MUST be present in JWKs
-        let jwks = vec![json!({
+        let jwks = [json!({
             "kty": "EC",
             "crv": "P-256",
             "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",

@@ -88,8 +88,8 @@ async fn openapi_json_endpoint_returns_valid_spec() {
     );
 
     let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let json_val: serde_json::Value = serde_json::from_slice(&body_bytes)
-        .expect("Response body should be valid JSON");
+    let json_val: serde_json::Value =
+        serde_json::from_slice(&body_bytes).expect("Response body should be valid JSON");
 
     assert!(
         json_val.get("openapi").is_some(),

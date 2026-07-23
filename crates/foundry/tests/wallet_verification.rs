@@ -205,7 +205,7 @@ async fn full_verification_flow_end_to_end() {
 
     // 4. Issue SD-JWT VC to holder key pair and create KB-JWT
     let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
-    let holder_pub_jwk = serde_json::to_value(&holder_kp.to_jwk_public_key()).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
     let holder_signer =
         FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
     let issuer_signer =
@@ -356,7 +356,7 @@ async fn resubmitting_a_verification_response_is_rejected() {
 
     // 4. Issue SD-JWT VC to holder key pair and create KB-JWT
     let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
-    let holder_pub_jwk = serde_json::to_value(&holder_kp.to_jwk_public_key()).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
     let holder_signer =
         FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
     let issuer_signer =

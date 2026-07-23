@@ -102,7 +102,9 @@ fn test_cli_status_list_set_get_and_token() {
         String::from_utf8_lossy(&token_output.stderr)
     );
 
-    let token_jwt = String::from_utf8_lossy(&token_output.stdout).trim().to_string();
+    let token_jwt = String::from_utf8_lossy(&token_output.stdout)
+        .trim()
+        .to_string();
     assert_eq!(
         token_jwt.split('.').count(),
         3,

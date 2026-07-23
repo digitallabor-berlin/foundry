@@ -19,7 +19,10 @@ fn test_cli_openapi_subcommand() {
     );
 
     let content = std::fs::read_to_string(&temp_path).expect("Failed to read openapi output file");
-    assert!(!content.is_empty(), "Exported OpenAPI spec should not be empty");
+    assert!(
+        !content.is_empty(),
+        "Exported OpenAPI spec should not be empty"
+    );
 
     let json: serde_json::Value =
         serde_json::from_str(&content).expect("Exported content should be valid JSON");

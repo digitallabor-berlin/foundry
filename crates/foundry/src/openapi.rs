@@ -9,22 +9,20 @@ use utoipa::OpenApi;
         crate::server::create_verification_handler,
         crate::server::get_verification_handler,
     ),
-    components(
-        schemas(
-            foundry_issuer::CreateOfferRequest,
-            foundry_issuer::CreateOfferResponse,
-            foundry_issuer::CredentialOffer,
-            foundry_issuer::CredentialOfferGrants,
-            foundry_issuer::PreAuthorizedCodeGrant,
-            foundry_issuer::TxCodeDefinition,
-            foundry_verifier::request::CreateVerificationRequest,
-            foundry_verifier::request::CreateVerificationResponse,
-            foundry_verifier::VerificationTransaction,
-            foundry_verifier::VerificationState,
-            foundry_verifier::VerificationResult,
-            foundry_verifier::CheckResult,
-        )
-    )
+    components(schemas(
+        foundry_issuer::CreateOfferRequest,
+        foundry_issuer::CreateOfferResponse,
+        foundry_issuer::CredentialOffer,
+        foundry_issuer::CredentialOfferGrants,
+        foundry_issuer::PreAuthorizedCodeGrant,
+        foundry_issuer::TxCodeDefinition,
+        foundry_verifier::request::CreateVerificationRequest,
+        foundry_verifier::request::CreateVerificationResponse,
+        foundry_verifier::VerificationTransaction,
+        foundry_verifier::VerificationState,
+        foundry_verifier::VerificationResult,
+        foundry_verifier::CheckResult,
+    ))
 )]
 pub struct ApiDoc;
 

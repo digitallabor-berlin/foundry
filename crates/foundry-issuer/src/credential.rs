@@ -91,9 +91,8 @@ pub async fn handle_credential_request(
 
     let signer = FileSigner::from_pem_file(&issuer_key.private_key, issuer_key.alg.parse()?)?;
     let x5c = if let Some(ref path) = issuer_key.x5c {
-        let pem_bytes = std::fs::read(path).map_err(|e| {
-            IssuanceError::InvalidRequest(format!("failed to read x5c file: {e}"))
-        })?;
+        let pem_bytes = std::fs::read(path)
+            .map_err(|e| IssuanceError::InvalidRequest(format!("failed to read x5c file: {e}")))?;
         Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
     } else {
         None
@@ -151,8 +150,9 @@ pub async fn handle_credential_request(
                 selectively_disclosable,
             };
 
-            build_sd_jwt_vc(sd_claims, &signer, x5c)
-                .map_err(|e| IssuanceError::InvalidRequest(format!("sd-jwt vc build failed: {e}")))?
+            build_sd_jwt_vc(sd_claims, &signer, x5c).map_err(|e| {
+                IssuanceError::InvalidRequest(format!("sd-jwt vc build failed: {e}"))
+            })?
         }
         "mso_mdoc" => {
             let doc_type = cred_type
@@ -201,7 +201,9 @@ pub async fn handle_credential_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{load_transaction, save_transaction_with_indices, IssuanceTransaction};
+    use crate::transaction::{
+        load_transaction, save_transaction_with_indices, IssuanceTransaction,
+    };
     use foundry_core::config::{
         AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, KeyEntry, Mode,
         ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
@@ -297,11 +299,17 @@ mod tests {
 
         let mut header = JwsHeader::new();
         header.set_token_type("openid4vci-proof+jwt");
-        header.set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap())).unwrap();
+        header
+            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+            .unwrap();
 
         let mut payload = JwtPayload::new();
-        payload.set_claim("aud", Some(serde_json::json!(issuer))).unwrap();
-        payload.set_claim("nonce", Some(serde_json::json!(c_nonce))).unwrap();
+        payload
+            .set_claim("aud", Some(serde_json::json!(issuer)))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!(c_nonce)))
+            .unwrap();
 
         let private_jwk = keypair.to_jwk_private_key();
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
@@ -354,15 +362,10 @@ mod tests {
             proof: Some(proof),
         };
 
-        let res = handle_credential_request(
-            &config,
-            &storage,
-            "at_secret_123",
-            &req,
-            1_700_000_010,
-        )
-        .await
-        .unwrap();
+        let res =
+            handle_credential_request(&config, &storage, "at_secret_123", &req, 1_700_000_010)
+                .await
+                .unwrap();
 
         assert!(!res.credential.is_empty());
 

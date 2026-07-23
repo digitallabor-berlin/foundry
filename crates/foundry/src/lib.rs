@@ -6,4 +6,3 @@ pub mod openapi;
 pub mod server;
 
 pub use openapi::{generate_openapi_spec, ApiDoc};
-

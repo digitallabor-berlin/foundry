@@ -160,7 +160,9 @@ pub async fn status_list_set(
             if let Ok(v) = other.parse::<u8>() {
                 StatusValue::ApplicationSpecific(v)
             } else {
-                anyhow::bail!("invalid status value '{status}', expected 'valid', 'revoked', or 'suspended'");
+                anyhow::bail!(
+                    "invalid status value '{status}', expected 'valid', 'revoked', or 'suspended'"
+                );
             }
         }
     };

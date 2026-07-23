@@ -73,7 +73,12 @@ pub async fn save_transaction_with_indices(
     save_transaction(storage, tx, ttl_secs, now_unix).await?;
     let expires_at = now_unix + ttl_secs as i64;
     storage
-        .put_kv(PRE_AUTH_NS, &tx.pre_authorized_code, &tx.transaction_id, Some(expires_at))
+        .put_kv(
+            PRE_AUTH_NS,
+            &tx.pre_authorized_code,
+            &tx.transaction_id,
+            Some(expires_at),
+        )
         .await?;
     if let Some(ref token) = tx.access_token {
         storage
@@ -159,12 +164,20 @@ mod tests {
         let storage = test_storage().await;
         let mut tx = sample_tx("tx-auth-1");
         tx.access_token = Some("bearer-token-xyz".to_string());
-        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000).await.unwrap();
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
 
-        let loaded_by_code = load_transaction_by_pre_auth_code(&storage, "code-123").await.unwrap().unwrap();
+        let loaded_by_code = load_transaction_by_pre_auth_code(&storage, "code-123")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded_by_code.transaction_id, "tx-auth-1");
 
-        let loaded_by_token = load_transaction_by_access_token(&storage, "bearer-token-xyz").await.unwrap().unwrap();
+        let loaded_by_token = load_transaction_by_access_token(&storage, "bearer-token-xyz")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded_by_token.transaction_id, "tx-auth-1");
     }
 }

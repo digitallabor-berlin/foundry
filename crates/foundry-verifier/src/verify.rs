@@ -1,5 +1,7 @@
 use crate::error::VerificationError;
-use crate::transaction::{CheckResult, VerificationResult, VerificationState, VerificationTransaction};
+use crate::transaction::{
+    CheckResult, VerificationResult, VerificationState, VerificationTransaction,
+};
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
@@ -51,13 +53,17 @@ fn do_verify_vp_response(
     }];
 
     // 2. vp_token Extraction & Verification
-    let vp_token = response_json
-        .get("vp_token")
-        .ok_or_else(|| VerificationError::Failed("missing vp_token in response payload".to_string()))?;
+    let vp_token = response_json.get("vp_token").ok_or_else(|| {
+        VerificationError::Failed("missing vp_token in response payload".to_string())
+    })?;
 
     let trust_store = TrustStore::from_config(&config.trust_anchors)?;
 
-    let base_url = config.server.wallet_facing.public_base_url.trim_end_matches('/');
+    let base_url = config
+        .server
+        .wallet_facing
+        .public_base_url
+        .trim_end_matches('/');
     let host = crate::request::dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
 
@@ -90,7 +96,9 @@ fn do_verify_vp_response(
             }
         }
     } else {
-        return Err(VerificationError::Failed("unsupported vp_token format".to_string()));
+        return Err(VerificationError::Failed(
+            "unsupported vp_token format".to_string(),
+        ));
     }
 
     // 3. Result Construction
@@ -177,8 +185,12 @@ mod tests {
             }],
             issuer: IssuerConfig {
                 credential_issuer: "https://localhost:8443".to_string(),
-                wallet_attestation: AttestationMode { mode: Mode::Disabled },
-                key_attestation: AttestationMode { mode: Mode::Disabled },
+                wallet_attestation: AttestationMode {
+                    mode: Mode::Disabled,
+                },
+                key_attestation: AttestationMode {
+                    mode: Mode::Disabled,
+                },
                 status_list: StatusListConfig {
                     enabled: false,
                     signing_key: None,
@@ -277,8 +289,14 @@ mod tests {
         assert!(res.verified);
         assert_eq!(tx.state, VerificationState::Verified);
         assert_eq!(res.claims["given_name"], "Alice");
-        assert!(res.checks.iter().any(|c| c.check == "jwe_decryption" && c.passed));
-        assert!(res.checks.iter().any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "jwe_decryption" && c.passed));
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
     }
 
     #[test]
