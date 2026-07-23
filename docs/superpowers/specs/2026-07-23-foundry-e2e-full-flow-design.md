@@ -74,23 +74,34 @@ feature with a side-channel mock server.
 
 ### Change
 
-- Extract the shared "load persistent list for `credential_type`, build signed status-list
-  token" logic out of `commands.rs::status_list_token` into a reusable function (candidate
-  home: `foundry-core` status_list module, or a small helper in `foundry-issuer` alongside
-  other issuer-facing logic — final placement decided at planning time), parameterized by
-  `Storage`, the resolved signing key material, and the `credential_type`.
-- Add `GET /statuslists/:credential_type` to `wallet_router`, **unauthenticated** (status list
-  tokens are meant to be publicly fetchable by any relying party per the IETF Token Status
-  List convention — consistent with `issuer.status_list.public_base_url` living under the
+**Important existing-behavior finding:** `foundry-issuer/src/credential.rs` (the `dc+sd-jwt`
+issuance path) hardcodes the embedded `status.status_list.uri` as
+`format!("{}/1", public_base_url.trim_end_matches('/'))` — a literal `"1"`, not the credential
+type's `id`. Today every credential type's issued credentials share one status list keyed
+`"1"` in storage; this is decoupled from the CLI's `--credential-type <name>` convention (which
+accepts any free-form storage-key string, including `"1"`). This spec does not change that
+behavior (out of scope) — it only makes sure the new route and the e2e test agree with what is
+actually embedded, rather than introducing a mismatch (e.g. serving/revoking under `"pid"` while
+every real credential points at `"1"`, which would silently make any revocation test a false
+negative).
+
+- Extract the shared "load persistent list for a given storage key, build signed status-list
+  token" logic out of `commands.rs::status_list_token` into a reusable function in
+  `foundry-core`'s `status_list` module, parameterized by `Storage`, resolved signing key
+  material (key PEM path + optional x5c cert PEM path + `SignatureAlgorithm`, already resolved
+  by the caller — see Task 1), and the storage-key string (called `id` below, not
+  `credential_type`, since it is not necessarily one).
+- Add `GET /statuslists/:id` to `wallet_router`, **unauthenticated** (status list tokens are
+  meant to be publicly fetchable by any relying party per the IETF Token Status List
+  convention — consistent with `issuer.status_list.public_base_url` living under the
   wallet-facing, not admin, listener).
 - Handler behavior:
-  - Loads the `PersistentStatusList` for the path's `credential_type` from storage.
+  - Loads the `PersistentStatusList` for the path's `id` from storage.
   - If none exists yet, return `404`.
-  - If the credential type's `issuer.status_list.enabled` is `false`, return `404`.
+  - If `issuer.status_list.enabled` is `false` for the running config, return `404`.
   - Otherwise sign and return the `statuslist+jwt` token (`Content-Type` per the Token Status
-    List spec, e.g. `application/statuslist+jwt`) with `sub` derived the same way
-    `commands.rs::status_list_token` derives it today
-    (`{public_base_url}/{credential_type}`).
+    List spec, e.g. `application/statuslist+jwt`) with `sub` equal to
+    `{public_base_url}/{id}` (matching exactly what `credential.rs` embeds — `.../1` today).
 - Register the new route in the wallet-facing OpenAPI spec generation
   (`crates/foundry/src/openapi.rs`), per AGENTS.md §5 ("Changes to those endpoints must be
   reflected in the specification").
@@ -209,11 +220,14 @@ Response includes a credential offer (pre-authorized_code grant) per
 
 ### Step 4 — Revoke
 
-- From Step 2's parsed credential, read `status.status_list.idx`.
+- From Step 2's parsed credential, read `status.status_list.idx` **and** `status.status_list.uri`
+  from the issuer-signed JWT payload; the URI's final path segment is the storage-key `id` to
+  revoke (today always the literal `"1"` — see the finding in §4 — but the test derives it from
+  the credential rather than hardcoding it, so it stays correct if that changes later).
 - Determine the live SQLite DB path from the (rewritten) config's `storage.path`, resolved
   relative to the config file's directory.
-- Run `foundry status-list set --db <resolved-db-path> --credential-type pid --index <idx>
-  --status revoked` as a subprocess, while `serve` continues running. (sqlx's default
+- Run `foundry status-list set --db <resolved-db-path> --credential-type <id-from-uri> --index
+  <idx> --status revoked` as a subprocess, while `serve` continues running. (sqlx's default
   `SqliteConnectOptions` busy-timeout tolerates this brief cross-process write; both
   processes access the same on-disk SQLite file.) Assert the subprocess exits successfully.
 
