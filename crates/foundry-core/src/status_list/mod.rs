@@ -1,9 +1,9 @@
 //! Token Status List (IETF draft-ietf-oauth-status-list-14): bit-packed
 //! status arrays, zlib compression, and signed Status List Tokens.
 
-use crate::crypto::Signer;
-use crate::error::FormatError;
-use crate::trust::{cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
+use crate::crypto::{FileSigner, SignatureAlgorithm, Signer};
+use crate::error::{CoreError, CryptoError, FormatError};
+use crate::trust::{build_x5c, cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
 use josekit::jwk::Jwk;
 use serde_json::{json, Value};
@@ -240,6 +240,40 @@ pub fn build_status_list_token(
         .sign(signing_input.as_bytes())
         .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
     Ok(format!("{signing_input}.{}", B64URL.encode(signature)))
+}
+
+/// Sign a Status List Token (`statuslist+jwt`) for an already-loaded `status_list`,
+/// resolving the signer from `key_path`/`alg` and, if given, an x5c chain from
+/// `x5c_path`. `key_path`/`x5c_path` must already be resolved to real filesystem
+/// paths by the caller — this function has no config-relative-path knowledge, so
+/// both the CLI (`foundry status-list token`) and the `/statuslists/:id` HTTP
+/// route can share it while resolving paths their own way.
+pub fn sign_status_list_token(
+    status_list: &StatusList,
+    sub: String,
+    now_unix: i64,
+    key_path: &str,
+    alg: SignatureAlgorithm,
+    x5c_path: Option<&str>,
+) -> Result<String, CoreError> {
+    let signer = FileSigner::from_pem_file(key_path, alg)?;
+    let x5c = match x5c_path {
+        Some(path) => {
+            let pem_bytes = std::fs::read(path).map_err(|source| CryptoError::KeyRead {
+                path: path.to_string(),
+                source,
+            })?;
+            Some(build_x5c(&[pem_bytes])?)
+        }
+        None => None,
+    };
+    let claims = StatusListTokenClaims {
+        sub,
+        iat: now_unix,
+        exp: Some(now_unix + 86400),
+        ttl: None,
+    };
+    Ok(build_status_list_token(claims, status_list, &signer, x5c)?)
 }
 
 fn curve_for_alg(alg: &str) -> Result<&'static str, FormatError> {
@@ -505,6 +539,36 @@ pub async fn save_status_list(
 mod tests {
     use super::*;
     use crate::error::FormatError;
+
+    #[test]
+    fn sign_status_list_token_produces_parseable_jwt_with_expected_sub() {
+        use crate::crypto::SignatureAlgorithm;
+        use crate::pki::generate_ec_key;
+
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&key_path, &km.private_pem).unwrap();
+
+        let list = StatusList::build(&[0, 1, 0], 2, None).unwrap();
+        let token = sign_status_list_token(
+            &list,
+            "https://issuer.example.com/statuslists/1".to_string(),
+            1_700_000_000,
+            key_path.to_str().unwrap(),
+            SignatureAlgorithm::Es256,
+            None,
+        )
+        .unwrap();
+
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "must be a compact JWS");
+        let payload: Value = serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(payload["sub"], "https://issuer.example.com/statuslists/1");
+        assert_eq!(payload["iat"], 1_700_000_000);
+        assert_eq!(payload["status_list"]["bits"], 2);
+        assert!(payload["status_list"]["lst"].is_string());
+    }
 
     #[test]
     fn status_value_round_trips_known_values() {

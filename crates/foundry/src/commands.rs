@@ -2,12 +2,9 @@
 
 use anyhow::Context;
 use foundry_core::config::Config;
-use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
+use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
-use foundry_core::status_list::{
-    build_status_list_token, load_status_list, save_status_list, PersistentStatusList,
-    StatusListTokenClaims, StatusValue,
-};
+use foundry_core::status_list::{load_status_list, save_status_list, PersistentStatusList, StatusValue};
 use foundry_core::storage::SqliteStorage;
 use std::path::Path;
 use std::str::FromStr;
@@ -225,30 +222,21 @@ pub async fn status_list_token(config_path: &str, credential_type: &str) -> anyh
 
     let key_file = base_dir.join(&key_entry.private_key);
     let alg = key_entry.alg.parse()?;
-    let signer = FileSigner::from_pem_file(&key_file.to_string_lossy(), alg)?;
-
-    let x5c = if let Some(x5c_rel) = &key_entry.x5c {
-        let cert_file = base_dir.join(x5c_rel);
-        let pem_bytes = std::fs::read(&cert_file)
-            .with_context(|| format!("reading x5c cert from {}", cert_file.display()))?;
-        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
-    } else {
-        None
-    };
+    let x5c_file = key_entry.x5c.as_ref().map(|rel| base_dir.join(rel));
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("getting system time")?
         .as_secs() as i64;
 
-    let claims = StatusListTokenClaims {
+    let token = foundry_core::status_list::sign_status_list_token(
+        &status_list,
         sub,
-        iat: now,
-        exp: Some(now + 86400),
-        ttl: None,
-    };
-
-    let token = build_status_list_token(claims, &status_list, &signer, x5c)?;
+        now,
+        &key_file.to_string_lossy(),
+        alg,
+        x5c_file.as_deref().and_then(|p| p.to_str()),
+    )?;
     println!("{token}");
     Ok(())
 }
