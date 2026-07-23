@@ -1,5 +1,6 @@
 use crate::dcql::{check_dcql_match, PresentedFormat};
 use crate::error::VerificationError;
+use crate::status::{check_status, StatusListResolver};
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
 };
@@ -8,12 +9,13 @@ use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
 use serde_json::Value;
 
-pub fn verify_vp_response(
+pub async fn verify_vp_response(
     config: &Config,
     tx: &mut VerificationTransaction,
     encrypted_jwe_str: &str,
+    resolver: &dyn StatusListResolver,
 ) -> Result<VerificationResult, VerificationError> {
-    match do_verify_vp_response(config, tx, encrypted_jwe_str) {
+    match do_verify_vp_response(config, tx, encrypted_jwe_str, resolver).await {
         Ok(result) => {
             tx.state = if result.verified {
                 VerificationState::Verified
@@ -30,10 +32,11 @@ pub fn verify_vp_response(
     }
 }
 
-fn do_verify_vp_response(
+async fn do_verify_vp_response(
     config: &Config,
     tx: &VerificationTransaction,
     encrypted_jwe_str: &str,
+    resolver: &dyn StatusListResolver,
 ) -> Result<VerificationResult, VerificationError> {
     // 1. JWE Decryption
     let jwk_str = serde_json::to_string(&tx.ephem_private_jwk)
@@ -77,7 +80,10 @@ fn do_verify_vp_response(
         .map_err(|e| VerificationError::Crypto(e.to_string()))?
         .as_secs();
 
+    // 3. Credential-format-specific signature/binding verification + disclosure.
     let mut disclosed_claims = serde_json::Map::new();
+    let presented_format;
+    let doc_type: Option<String>;
 
     if let Some(jwt_str) = vp_token.as_str() {
         let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
@@ -100,6 +106,8 @@ fn do_verify_vp_response(
                 disclosed_claims.insert(k, v);
             }
         }
+        presented_format = PresentedFormat::SdJwtVc;
+        doc_type = None;
     } else {
         return Err(VerificationError::Failed(
             "unsupported vp_token format".to_string(),
@@ -108,15 +116,19 @@ fn do_verify_vp_response(
 
     let claims_value = Value::Object(disclosed_claims);
 
-    // 3. DCQL query satisfaction (SD-JWT VC path)
+    // 4. DCQL query satisfaction (shared across credential formats).
     checks.push(check_dcql_match(
         &tx.dcql_query,
-        PresentedFormat::SdJwtVc,
+        presented_format,
         &claims_value,
-        None,
+        doc_type.as_deref(),
     ));
 
-    // 4. Overall verdict is the AND of every check performed.
+    // 5. Token Status List revocation check (shared across credential formats).
+    //    A network failure fetching the token propagates as a hard error.
+    checks.push(check_status(&claims_value, &trust_store, resolver, now_unix).await?);
+
+    // 6. Overall verdict is the AND of every check performed.
     let verified = checks.iter().all(|c| c.passed);
     Ok(VerificationResult {
         verified,
@@ -128,6 +140,7 @@ fn do_verify_vp_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
     use foundry_core::config::{
         AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
@@ -252,8 +265,8 @@ mod tests {
         (tx, public_jwk)
     }
 
-    #[test]
-    fn test_verify_vp_response_sd_jwt_vc() {
+    #[tokio::test]
+    async fn test_verify_vp_response_sd_jwt_vc() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
         let config = test_config(&ca_str);
@@ -300,7 +313,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let res = verify_vp_response(&config, &mut tx, &jwe_str).unwrap();
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap();
 
         assert!(res.verified);
         assert_eq!(tx.state, VerificationState::Verified);
@@ -315,8 +329,8 @@ mod tests {
             .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
     }
 
-    #[test]
-    fn test_verify_vp_response_missing_vp_token() {
+    #[tokio::test]
+    async fn test_verify_vp_response_missing_vp_token() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
         let config = test_config(&ca_str);
@@ -331,25 +345,27 @@ mod tests {
             .build()
             .unwrap();
 
-        let err = verify_vp_response(&config, &mut tx, &jwe_str).unwrap_err();
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
 
-    #[test]
-    fn test_verify_vp_response_invalid_jwe() {
+    #[tokio::test]
+    async fn test_verify_vp_response_invalid_jwe() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
         let config = test_config(&ca_str);
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
-        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token").unwrap_err();
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver).await.unwrap_err();
         assert!(matches!(err, VerificationError::Decryption(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
 
-    #[test]
-    fn test_verify_vp_response_kb_nonce_mismatch() {
+    #[tokio::test]
+    async fn test_verify_vp_response_kb_nonce_mismatch() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
         let config = test_config(&ca_str);
@@ -394,13 +410,14 @@ mod tests {
             .build()
             .unwrap();
 
-        let err = verify_vp_response(&config, &mut tx, &jwe_str).unwrap_err();
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
 
-    #[test]
-    fn test_verify_vp_response_dcql_vct_mismatch_is_not_verified() {
+    #[tokio::test]
+    async fn test_verify_vp_response_dcql_vct_mismatch_is_not_verified() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
         let config = test_config(&ca_str);
@@ -448,7 +465,8 @@ mod tests {
             .build()
             .unwrap();
 
-        let res = verify_vp_response(&config, &mut tx, &jwe_str).unwrap();
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap();
         assert!(!res.verified, "DCQL vct mismatch must not verify");
         assert_eq!(tx.state, VerificationState::Failed);
         let dcql = res.checks.iter().find(|c| c.check == "dcql_match").unwrap();

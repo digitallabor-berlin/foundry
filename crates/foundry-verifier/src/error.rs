@@ -20,6 +20,9 @@ pub enum VerificationError {
     #[error("verification failed: {0}")]
     Failed(String),
 
+    #[error("status list unavailable: {0}")]
+    StatusUnavailable(String),
+
     #[error(transparent)]
     Storage(#[from] foundry_core::error::StorageError),
 
@@ -59,5 +62,8 @@ mod tests {
 
         let err = VerificationError::Serialization("json fail".to_string());
         assert_eq!(err.to_string(), "serialization error: json fail");
+
+        let err = VerificationError::StatusUnavailable("network".to_string());
+        assert_eq!(err.to_string(), "status list unavailable: network");
     }
 }

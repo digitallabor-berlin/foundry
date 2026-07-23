@@ -306,6 +306,7 @@ fn verifier_wallet_error_response(
         Decryption(_) | Failed(_) | Serialization(_) => {
             (StatusCode::BAD_REQUEST, "invalid_request")
         }
+        StatusUnavailable(_) => (StatusCode::BAD_GATEWAY, "status_unavailable"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
     (
@@ -412,8 +413,13 @@ async fn post_response_handler(
         ));
     }
 
+    let resolver = match foundry_verifier::HttpStatusListResolver::new() {
+        Ok(r) => r,
+        Err(e) => return Err(verifier_wallet_error_response(&e)),
+    };
     let verify_res =
-        foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str);
+        foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str, &resolver)
+            .await;
 
     let _ = foundry_verifier::save_verification_transaction(
         state.storage.as_ref(),
