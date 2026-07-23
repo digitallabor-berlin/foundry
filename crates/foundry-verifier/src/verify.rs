@@ -4,6 +4,8 @@ use crate::status::{check_status, StatusListResolver};
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
@@ -108,6 +110,54 @@ async fn do_verify_vp_response(
         }
         presented_format = PresentedFormat::SdJwtVc;
         doc_type = None;
+    } else if let Some(obj) = vp_token.as_object() {
+        // mdoc presentation envelope:
+        //   { "mdoc": <b64url(issued mdoc CBOR)>,
+        //     "device_signature": <b64url(COSE_Sign1 over SessionTranscript)> }
+        let mdoc_b64 = obj
+            .get("mdoc")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| VerificationError::Failed("mdoc vp_token missing 'mdoc'".to_string()))?;
+        let dev_sig_b64 = obj
+            .get("device_signature")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                VerificationError::Failed("mdoc vp_token missing 'device_signature'".to_string())
+            })?;
+        let mdoc_bytes = B64URL
+            .decode(mdoc_b64)
+            .map_err(|e| VerificationError::Failed(format!("mdoc base64 decode: {e}")))?;
+        let dev_sig_bytes = B64URL
+            .decode(dev_sig_b64)
+            .map_err(|e| VerificationError::Failed(format!("device_signature base64 decode: {e}")))?;
+
+        let response_uri = format!("{base_url}/vp/response/{}", tx.id);
+        let mdoc_res = foundry_mdoc::verifier::verify_mdoc(
+            &mdoc_bytes,
+            &trust_store,
+            Some(client_id.clone()),
+            Some(response_uri),
+            tx.nonce.clone(),
+            &dev_sig_bytes,
+            now_unix,
+        )
+        .map_err(|e| VerificationError::Failed(format!("mdoc verification failed: {e}")))?;
+
+        checks.push(CheckResult {
+            check: "mdoc_issuer_auth_and_device_signature".to_string(),
+            passed: true,
+            detail: None,
+        });
+
+        for (ns, elements) in mdoc_res.claims {
+            let mut ns_obj = serde_json::Map::new();
+            for (k, v) in elements {
+                ns_obj.insert(k, v);
+            }
+            disclosed_claims.insert(ns, Value::Object(ns_obj));
+        }
+        presented_format = PresentedFormat::MsoMdoc;
+        doc_type = Some(mdoc_res.doc_type);
     } else {
         return Err(VerificationError::Failed(
             "unsupported vp_token format".to_string(),
@@ -142,6 +192,9 @@ mod tests {
     use super::*;
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
+    use foundry_mdoc::builder::{build_mdoc, MdocClaims};
+    use foundry_mdoc::types::serialize_session_transcript;
+    use std::collections::BTreeMap;
     use foundry_core::config::{
         AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
         StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
@@ -476,5 +529,105 @@ mod tests {
             .checks
             .iter()
             .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
+    }
+
+    #[tokio::test]
+    async fn test_verify_vp_response_mdoc_presentation() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let config = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        // Device (holder) key.
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(&d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        // Request an mdoc of the doctype/namespace/element we will issue.
+        tx.dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "mso_mdoc",
+                "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+            }]
+        });
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+        // Build the issued mdoc.
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_claims = MdocClaims {
+            doc_type: "org.iso.18013.5.1.mDL".to_string(),
+            namespaces,
+            device_key_jwk: d_jwk_pub,
+            signed_at: (now - 100) as i64,
+            valid_until: (now + 3600) as i64,
+        };
+        let mdoc_bytes =
+            build_mdoc(mdoc_claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // Build the detached DeviceAuth COSE_Sign1 over the OpenID4VP SessionTranscript.
+        let client_id = "x509_san_dns:localhost".to_string();
+        let response_uri = format!("https://localhost:8443/vp/response/{}", tx.id);
+        let transcript =
+            serialize_session_transcript(Some(client_id), Some(response_uri), tx.nonce.clone())
+                .unwrap();
+        let protected = coset::HeaderBuilder::new()
+            .algorithm(coset::iana::Algorithm::ES256)
+            .build();
+        let partial = coset::CoseSign1Builder::new()
+            .protected(protected.clone())
+            .build();
+        let d_tbs = coset::sig_structure_data(
+            coset::SignatureContext::CoseSign1,
+            partial.protected.clone(),
+            None,
+            &[],
+            &transcript,
+        );
+        let sig = {
+            use foundry_core::crypto::Signer as _;
+            d_signer.sign(&d_tbs).unwrap()
+        };
+        let d_sign = coset::CoseSign1Builder::new()
+            .protected(protected)
+            .signature(sig)
+            .build();
+        let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+
+        // Envelope + JWE.
+        let vp_token = serde_json::json!({
+            "mdoc": B64URL.encode(&mdoc_bytes),
+            "device_signature": B64URL.encode(&d_sig_bytes),
+        });
+        let jwe_str = JweBuilder::new()
+            .payload(serde_json::json!({ "vp_token": vp_token }))
+            .recipient_key_json(&tx.ephem_public_jwk)
+            .unwrap()
+            .alg("ECDH-ES")
+            .enc("A128GCM")
+            .build()
+            .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(res.verified, "checks={:?}", res.checks);
+        assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
+        assert!(res.checks.iter().any(|c| c.check == "dcql_match" && c.passed));
+        assert!(res.checks.iter().any(|c| c.check == "status_check" && c.passed));
     }
 }
