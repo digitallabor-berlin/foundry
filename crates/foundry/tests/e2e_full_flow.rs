@@ -11,6 +11,13 @@
 //!
 //! Run with: `cargo test -p foundry --test e2e_full_flow -- --ignored`
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine;
+use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use josekit::jwk::KeyPair as _;
+use josekit::jws::{JwsHeader, ES256};
+use josekit::jwt::{self, JwtPayload};
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
@@ -184,33 +191,196 @@ async fn spawn_server() -> (ServerGuard, tempfile::TempDir, u16, u16) {
     (guard, dir, admin_port, wallet_port)
 }
 
+/// Build an OpenID4VCI key-proof JWT (`openid4vci-proof+jwt`) bound to
+/// `c_nonce` and `issuer`. Ported from
+/// `crates/foundry/tests/wallet_issuance.rs::create_proof`.
+fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(issuer)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(c_nonce)))
+        .unwrap();
+
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+    (
+        serde_json::json!({ "proof_type": "jwt", "jwt": jwt_str }),
+        keypair,
+    )
+}
+
+/// An issued SD-JWT VC credential plus what later verification/revocation
+/// steps need from it: its status-list index/uri, and the holder signing key
+/// bound in its `cnf` claim (needed to build a matching KB-JWT later).
+///
+/// `status_idx`/`status_uri`/`holder_signer` are unused by this task's test
+/// body but are consumed by Task 5's verification/revocation steps; `allow`
+/// suppresses the interim dead_code lint until that task lands.
+#[allow(dead_code)]
+struct IssuedCredential {
+    compact: String,
+    status_idx: u64,
+    status_uri: String,
+    holder_signer: FileSigner,
+}
+
+/// Create a credential offer via the admin API, then perform the full
+/// OpenID4VCI pre-authorized_code flow as the wallet: `/token` → `/nonce` →
+/// `/credential`. Asserts the disclosed claims match what was requested and
+/// returns everything later steps need. Ported (offer/token/nonce/credential
+/// shapes) from `crates/foundry/tests/wallet_issuance.rs`.
+async fn create_offer_and_issue_credential(
+    client: &reqwest::Client,
+    admin_base: &str,
+    wallet_base: &str,
+) -> IssuedCredential {
+    let offer_res = client
+        .post(format!("{admin_base}/admin/issuance/offers"))
+        .bearer_auth("dev-admin-key")
+        .json(&serde_json::json!({
+            "credential_type_id": "pid",
+            "claims": { "given_name": "Alice", "birthdate": "1990-01-01" },
+            "tx_code_required": false
+        }))
+        .send()
+        .await
+        .expect("POST /admin/issuance/offers");
+    assert_eq!(offer_res.status(), reqwest::StatusCode::OK);
+    let offer_json: serde_json::Value = offer_res.json().await.unwrap();
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized_code present")
+        .to_string();
+
+    let token_form = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+    );
+    let token_res = client
+        .post(format!("{wallet_base}/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(token_form)
+        .send()
+        .await
+        .expect("POST /token");
+    assert_eq!(token_res.status(), reqwest::StatusCode::OK);
+    let token_json: serde_json::Value = token_res.json().await.unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    let nonce_res = client
+        .post(format!("{wallet_base}/nonce"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("POST /nonce");
+    assert_eq!(nonce_res.status(), reqwest::StatusCode::OK);
+    let nonce_json: serde_json::Value = nonce_res.json().await.unwrap();
+    let c_nonce = nonce_json["c_nonce"].as_str().unwrap().to_string();
+
+    // `aud` must equal the config's `issuer.credential_issuer` value
+    // (`https://localhost:8443` from the quickstart template — a metadata
+    // label only, never dereferenced over the network; see the design doc's
+    // non-goals), not the real bound socket address.
+    let (proof_json, holder_keypair) = create_proof(&c_nonce, "https://localhost:8443");
+    let cred_res = client
+        .post(format!("{wallet_base}/credential"))
+        .bearer_auth(&access_token)
+        .json(&serde_json::json!({
+            "credential_configuration_id": "pid",
+            "format": "dc+sd-jwt",
+            "proof": proof_json,
+        }))
+        .send()
+        .await
+        .expect("POST /credential");
+    assert_eq!(cred_res.status(), reqwest::StatusCode::OK);
+    let cred_json: serde_json::Value = cred_res.json().await.unwrap();
+    let compact = cred_json["credential"].as_str().unwrap().to_string();
+    assert!(
+        compact.contains('~'),
+        "SD-JWT VC compact serialization must contain '~' separators"
+    );
+
+    // Parse the issuer-signed JWT (first segment before '~') for the status claim.
+    let issuer_jwt = compact.split('~').next().unwrap();
+    let jwt_parts: Vec<&str> = issuer_jwt.split('.').collect();
+    assert_eq!(
+        jwt_parts.len(),
+        3,
+        "issuer-signed JWT must be a compact JWS"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&B64URL.decode(jwt_parts[1]).unwrap()).unwrap();
+    let status_idx = payload["status"]["status_list"]["idx"]
+        .as_u64()
+        .expect("status.status_list.idx present");
+    let status_uri = payload["status"]["status_list"]["uri"]
+        .as_str()
+        .expect("status.status_list.uri present")
+        .to_string();
+
+    // `given_name`/`birthdate` are selectively disclosable in the quickstart
+    // `pid` credential type, so they live in disclosure segments
+    // (`<jwt>~<d1>~<d2>~...~`), not directly in the issuer JWT payload.
+    let mut disclosed: std::collections::BTreeMap<String, serde_json::Value> =
+        std::collections::BTreeMap::new();
+    for seg in compact.split('~').skip(1).filter(|s| !s.is_empty()) {
+        let decoded = B64URL.decode(seg).expect("disclosure is valid base64url");
+        let arr: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("disclosure is a JSON array");
+        let arr = arr.as_array().expect("disclosure is [salt, name, value]");
+        assert_eq!(
+            arr.len(),
+            3,
+            "disclosure must be [salt, claim_name, claim_value]"
+        );
+        disclosed.insert(arr[1].as_str().unwrap().to_string(), arr[2].clone());
+    }
+    assert_eq!(
+        disclosed.get("given_name"),
+        Some(&serde_json::json!("Alice"))
+    );
+    assert_eq!(
+        disclosed.get("birthdate"),
+        Some(&serde_json::json!("1990-01-01"))
+    );
+
+    let holder_signer = FileSigner::from_pem(
+        &holder_keypair.to_pem_private_key(),
+        SignatureAlgorithm::Es256,
+    )
+    .unwrap();
+
+    IssuedCredential {
+        compact,
+        status_idx,
+        status_uri,
+        holder_signer,
+    }
+}
+
 #[tokio::test]
 #[ignore]
 async fn full_flow_issue_verify_revoke_reverify() {
     let (guard, _dir, admin_port, wallet_port) = spawn_server().await;
     let admin_base = format!("http://127.0.0.1:{admin_port}");
     let wallet_base = format!("http://127.0.0.1:{wallet_port}");
-
-    // Smoke check for this task: the server is up and reachable on both
-    // pre-selected ports. Tasks 4-6 extend this test with the actual flow.
     let client = reqwest::Client::new();
-    let health = client
-        .get(format!("{admin_base}/health"))
-        .send()
-        .await
-        .expect("GET /health");
-    assert!(health.status().is_success(), "logs:\n{}", guard.dump_logs());
 
-    let metadata = client
-        .get(format!(
-            "{wallet_base}/.well-known/openid-credential-issuer"
-        ))
-        .send()
-        .await
-        .expect("GET /.well-known/openid-credential-issuer");
-    assert!(
-        metadata.status().is_success(),
-        "logs:\n{}",
-        guard.dump_logs()
-    );
+    let issued = create_offer_and_issue_credential(&client, &admin_base, &wallet_base).await;
+    assert!(!issued.compact.is_empty(), "logs:\n{}", guard.dump_logs());
 }
