@@ -29,10 +29,10 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
         .route("/ready", get(ready));
 
     let unauthenticated = if state.config.server.admin.swagger_ui_enabled {
-        unauthenticated.merge(
-            utoipa_swagger_ui::SwaggerUi::new("/api-docs")
-                .url("/api-docs/openapi.json", crate::openapi::AdminApiDoc::openapi()),
-        )
+        unauthenticated.merge(utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
+            "/api-docs/openapi.json",
+            crate::openapi::AdminApiDoc::openapi(),
+        ))
     } else {
         unauthenticated.route("/api-docs/openapi.json", get(openapi_json_handler))
     };
@@ -72,12 +72,10 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/vp/response/:id", post(post_response_handler));
 
     let router = if state.config.server.wallet_facing.swagger_ui_enabled {
-        router.merge(
-            utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
-                "/api-docs/openapi.json",
-                crate::openapi::WalletApiDoc::openapi(),
-            ),
-        )
+        router.merge(utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
+            "/api-docs/openapi.json",
+            crate::openapi::WalletApiDoc::openapi(),
+        ))
     } else {
         router.route("/api-docs/openapi.json", get(wallet_openapi_json_handler))
     };
@@ -513,7 +511,10 @@ pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::ta
 }
 
 pub async fn serve(cfg: Config) -> anyhow::Result<()> {
-    if let Err(e) = std::fs::write("openapi.json", crate::openapi::generate_admin_openapi_spec()) {
+    if let Err(e) = std::fs::write(
+        "openapi.json",
+        crate::openapi::generate_admin_openapi_spec(),
+    ) {
         tracing::warn!(error = %e, "failed to write openapi.json on startup");
     } else {
         tracing::debug!("wrote openapi.json on startup");
