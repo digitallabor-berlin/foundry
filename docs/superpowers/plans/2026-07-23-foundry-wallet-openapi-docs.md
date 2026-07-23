@@ -481,6 +481,24 @@ mod tests {
 }
 ```
 
+- [ ] **Step 1a: Update `crates/foundry/src/lib.rs`'s re-export**
+
+In `crates/foundry/src/lib.rs`, change:
+
+```rust
+pub use openapi::{generate_openapi_spec, ApiDoc};
+```
+
+to:
+
+```rust
+pub use openapi::{
+    generate_admin_openapi_spec, generate_wallet_openapi_spec, AdminApiDoc, WalletApiDoc,
+};
+```
+
+(This crate-root re-export has no external callers found in this workspace, but it must still be updated to match the new names in `openapi.rs` or the crate will fail to compile — `pub use` requires the referenced names to exist.)
+
 - [ ] **Step 2: Update `server.rs`'s admin router — rename path and function call**
 
 In `crates/foundry/src/server.rs`, change:
