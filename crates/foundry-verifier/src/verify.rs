@@ -1,3 +1,4 @@
+use crate::dcql::{check_dcql_match, PresentedFormat};
 use crate::error::VerificationError;
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
@@ -14,7 +15,11 @@ pub fn verify_vp_response(
 ) -> Result<VerificationResult, VerificationError> {
     match do_verify_vp_response(config, tx, encrypted_jwe_str) {
         Ok(result) => {
-            tx.state = VerificationState::Verified;
+            tx.state = if result.verified {
+                VerificationState::Verified
+            } else {
+                VerificationState::Failed
+            };
             tx.result = Some(result.clone());
             Ok(result)
         }
@@ -101,11 +106,22 @@ fn do_verify_vp_response(
         ));
     }
 
-    // 3. Result Construction
+    let claims_value = Value::Object(disclosed_claims);
+
+    // 3. DCQL query satisfaction (SD-JWT VC path)
+    checks.push(check_dcql_match(
+        &tx.dcql_query,
+        PresentedFormat::SdJwtVc,
+        &claims_value,
+        None,
+    ));
+
+    // 4. Overall verdict is the AND of every check performed.
+    let verified = checks.iter().all(|c| c.passed);
     Ok(VerificationResult {
-        verified: true,
+        verified,
         checks,
-        claims: Value::Object(disclosed_claims),
+        claims: claims_value,
     })
 }
 
@@ -381,5 +397,66 @@ mod tests {
         let err = verify_vp_response(&config, &mut tx, &jwe_str).unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
+    }
+
+    #[test]
+    fn test_verify_vp_response_dcql_vct_mismatch_is_not_verified() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let config = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        // Require a vct the credential will NOT have.
+        tx.dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/OTHER"] }
+            }]
+        });
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, "x509_san_dns:localhost", &tx.nonce).unwrap();
+
+        let jwe_str = JweBuilder::new()
+            .payload(serde_json::json!({ "vp_token": presentation }))
+            .recipient_key_json(&tx.ephem_public_jwk)
+            .unwrap()
+            .alg("ECDH-ES")
+            .enc("A128GCM")
+            .build()
+            .unwrap();
+
+        let res = verify_vp_response(&config, &mut tx, &jwe_str).unwrap();
+        assert!(!res.verified, "DCQL vct mismatch must not verify");
+        assert_eq!(tx.state, VerificationState::Failed);
+        let dcql = res.checks.iter().find(|c| c.check == "dcql_match").unwrap();
+        assert!(!dcql.passed);
+        // The signature check still passed and is still reported for transparency.
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
     }
 }
