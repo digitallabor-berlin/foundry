@@ -13,9 +13,7 @@
 
 use crate::transaction::CheckResult;
 use openid4vp::core::credential_format::ClaimFormatDesignation;
-use openid4vp::core::dcql_query::{
-    DcqlCredentialClaimsQueryPath, DcqlCredentialQuery, DcqlQuery,
-};
+use openid4vp::core::dcql_query::{DcqlCredentialClaimsQueryPath, DcqlCredentialQuery, DcqlQuery};
 use serde_json::Value;
 
 /// The concrete credential format actually present in the `vp_token`.
@@ -113,7 +111,10 @@ fn credential_query_satisfied(
     if let Some(claim_queries) = cq.claims() {
         for claim in claim_queries.iter() {
             let found = resolve_path(claims, claim.path()).ok_or_else(|| {
-                format!("required claim path {:?} not disclosed", path_debug(claim.path()))
+                format!(
+                    "required claim path {:?} not disclosed",
+                    path_debug(claim.path())
+                )
             })?;
             if let Some(expected) = claim.values() {
                 let ok = expected.iter().any(|e| {
@@ -140,7 +141,10 @@ fn credential_query_satisfied(
 /// Walk a claims `Value` by a DCQL claims path. Supports `String` (object key)
 /// and `Integer` (array index) segments. `Null` (array wildcard) segments are
 /// not supported in this phase and cause the lookup to fail (fail-closed).
-fn resolve_path<'a>(claims: &'a Value, path: &[DcqlCredentialClaimsQueryPath]) -> Option<&'a Value> {
+fn resolve_path<'a>(
+    claims: &'a Value,
+    path: &[DcqlCredentialClaimsQueryPath],
+) -> Option<&'a Value> {
     let mut cur = claims;
     for seg in path {
         match seg {
@@ -215,7 +219,12 @@ mod tests {
             "meta":{"doctype_value":"org.iso.18013.5.1.mDL"},
             "claims":[{"path":["org.iso.18013.5.1","given_name"]}]}]});
         let claims = json!({"org.iso.18013.5.1":{"given_name":"John"}});
-        let r = check_dcql_match(&q, PresentedFormat::MsoMdoc, &claims, Some("org.iso.18013.5.1.mDL"));
+        let r = check_dcql_match(
+            &q,
+            PresentedFormat::MsoMdoc,
+            &claims,
+            Some("org.iso.18013.5.1.mDL"),
+        );
         assert!(r.passed, "detail={:?}", r.detail);
         let bad = check_dcql_match(&q, PresentedFormat::MsoMdoc, &claims, Some("org.iso.WRONG"));
         assert!(!bad.passed);

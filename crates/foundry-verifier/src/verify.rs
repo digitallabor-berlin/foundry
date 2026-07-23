@@ -127,9 +127,9 @@ async fn do_verify_vp_response(
         let mdoc_bytes = B64URL
             .decode(mdoc_b64)
             .map_err(|e| VerificationError::Failed(format!("mdoc base64 decode: {e}")))?;
-        let dev_sig_bytes = B64URL
-            .decode(dev_sig_b64)
-            .map_err(|e| VerificationError::Failed(format!("device_signature base64 decode: {e}")))?;
+        let dev_sig_bytes = B64URL.decode(dev_sig_b64).map_err(|e| {
+            VerificationError::Failed(format!("device_signature base64 decode: {e}"))
+        })?;
 
         let response_uri = format!("{base_url}/vp/response/{}", tx.id);
         let mdoc_res = foundry_mdoc::verifier::verify_mdoc(
@@ -192,19 +192,19 @@ mod tests {
     use super::*;
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
-    use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-    use foundry_mdoc::types::serialize_session_transcript;
-    use std::collections::BTreeMap;
     use foundry_core::config::{
         AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
         StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
     };
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
+    use foundry_mdoc::builder::{build_mdoc, MdocClaims};
+    use foundry_mdoc::types::serialize_session_transcript;
     use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
     use openid4vp::core::jwe::JweBuilder;
+    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn test_pki() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
@@ -367,7 +367,9 @@ mod tests {
             .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap();
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
 
         assert!(res.verified);
         assert_eq!(tx.state, VerificationState::Verified);
@@ -399,7 +401,9 @@ mod tests {
             .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap_err();
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
@@ -412,7 +416,9 @@ mod tests {
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver).await.unwrap_err();
+        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, VerificationError::Decryption(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
@@ -464,7 +470,9 @@ mod tests {
             .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap_err();
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
@@ -488,7 +496,10 @@ mod tests {
             }]
         });
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let mut select = serde_json::Map::new();
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
 
@@ -506,8 +517,13 @@ mod tests {
         };
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, "x509_san_dns:localhost", &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx.nonce,
+        )
+        .unwrap();
 
         let jwe_str = JweBuilder::new()
             .payload(serde_json::json!({ "vp_token": presentation }))
@@ -519,7 +535,9 @@ mod tests {
             .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await.unwrap();
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
         assert!(!res.verified, "DCQL vct mismatch must not verify");
         assert_eq!(tx.state, VerificationState::Failed);
         let dcql = res.checks.iter().find(|c| c.check == "dcql_match").unwrap();
@@ -541,7 +559,7 @@ mod tests {
 
         // Device (holder) key.
         let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
-        let d_jwk_pub = serde_json::to_value(&d_kp.to_jwk_public_key()).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
         let d_signer =
             FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
 
@@ -556,7 +574,10 @@ mod tests {
             }]
         });
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         // Build the issued mdoc.
         let mut elements = std::collections::BTreeMap::new();
@@ -627,7 +648,13 @@ mod tests {
             .checks
             .iter()
             .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
-        assert!(res.checks.iter().any(|c| c.check == "dcql_match" && c.passed));
-        assert!(res.checks.iter().any(|c| c.check == "status_check" && c.passed));
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "dcql_match" && c.passed));
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "status_check" && c.passed));
     }
 }

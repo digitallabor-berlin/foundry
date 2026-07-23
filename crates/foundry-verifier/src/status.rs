@@ -97,11 +97,19 @@ pub async fn check_status(
 
     let uri = match status_list.get("uri").and_then(|v| v.as_str()) {
         Some(u) => u,
-        None => return Ok(failed("status_list.uri missing or not a string".to_string())),
+        None => {
+            return Ok(failed(
+                "status_list.uri missing or not a string".to_string(),
+            ))
+        }
     };
     let idx = match status_list.get("idx").and_then(|v| v.as_u64()) {
         Some(i) => i,
-        None => return Ok(failed("status_list.idx missing or not an integer".to_string())),
+        None => {
+            return Ok(failed(
+                "status_list.idx missing or not an integer".to_string(),
+            ))
+        }
     };
 
     // IO: fetch the token. A network failure is a hard, recoverable error.
@@ -111,7 +119,11 @@ pub async fn check_status(
     // referenced token's `uri`, so we verify against `uri` as the expected sub.
     let verified = match verify_status_list_token(&token, trust_store, uri, now_unix) {
         Ok(v) => v,
-        Err(e) => return Ok(failed(format!("status list token verification failed: {e}"))),
+        Err(e) => {
+            return Ok(failed(format!(
+                "status list token verification failed: {e}"
+            )))
+        }
     };
 
     match verified.status_at(idx) {
@@ -245,7 +257,8 @@ mod tests {
     #[tokio::test]
     async fn subject_mismatch_fails_check() {
         // Token sub differs from the credential's uri -> verification fails -> failed check.
-        let (trust_store, token) = token_with_revoked(2, "https://issuer.example/statuslists/OTHER");
+        let (trust_store, token) =
+            token_with_revoked(2, "https://issuer.example/statuslists/OTHER");
         let resolver = MockResolver { token: Some(token) };
         let claims = json!({ "status": { "status_list": { "idx": 0, "uri": URI } } });
         let r = check_status(&claims, &trust_store, &resolver, now())

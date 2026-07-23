@@ -1946,8 +1946,10 @@ dependencies = [
  "axum 0.7.9",
  "base64 0.22.1",
  "clap",
+ "coset",
  "foundry-core",
  "foundry-issuer",
+ "foundry-mdoc",
  "foundry-sd-jwt-vc",
  "foundry-verifier",
  "josekit",
@@ -2042,7 +2044,9 @@ dependencies = [
 name = "foundry-verifier"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
+ "coset",
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
@@ -2050,6 +2054,7 @@ dependencies = [
  "openid4vp",
  "percent-encoding",
  "rand 0.8.7",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
