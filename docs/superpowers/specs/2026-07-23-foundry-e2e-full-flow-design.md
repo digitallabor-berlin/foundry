@@ -115,15 +115,36 @@ conventions) named e.g. `full_flow_issue_verify_revoke_reverify`.
 
 ### 5.2 Port discovery
 
-- Because §4's change means `server.rs` already logs `bind = %cfg.server.admin.bind` /
-  `%cfg.server.wallet_facing.bind` (the *configured* value), this spec also requires changing
-  those two log statements in `serve()` to log the listener's actual resolved address
+**Correction from the initial design (found during planning):** `foundry-verifier`'s
+`HttpStatusListResolver::fetch()` performs a real, server-initiated `reqwest::Client::get(uri)`
+where `uri` is the credential's embedded `status.status_list.uri` — itself derived **at
+issuance time** from the static config value `issuer.status_list.public_base_url`
+(`credential.rs:132`), fixed before the server ever binds. If the wallet-facing port is left as
+an OS-assigned `bind: 127.0.0.1:0` unknown until after boot, `status_list.public_base_url`
+would be an unreachable placeholder and the in-process status-check HTTP fetch would fail to
+connect — breaking even the happy-path assertion, not just the revocation scenario. No other
+`public_base_url`/`credential_issuer` config value has this live-dereference requirement (they
+are only echoed into JWT claims compared as strings, or used to build URLs the *test* — not the
+server — constructs directly against the real discovered socket).
+
+Therefore port discovery uses **probe-and-release**, not log-line parsing, as the primary
+mechanism:
+
+- For both the admin and wallet-facing listeners: bind a `tokio::net::TcpListener` to
+  `127.0.0.1:0` in the test process, read `.local_addr()`, then drop the listener to free the
+  port. This determines both real ports *before* the config is written.
+- Write those exact ports into `server.admin.bind` / `server.wallet_facing.bind`, **and** set
+  `issuer.status_list.public_base_url` to `http://127.0.0.1:{wallet_port}/statuslists` so the
+  credential's embedded status URI is genuinely reachable once the real server binds to that
+  same pre-selected port. Accepts a small, standard probe-and-release race window (another
+  process could theoretically grab the port first) — acceptable for a test harness.
+- `server.rs`'s log statements are still changed to log the listener's actual resolved address
   (`admin_listener.local_addr()?` / `wallet_listener.local_addr()?`) instead of the configured
-  string. This is a minimal, purely observability-improving change (correct in general, not
-  just for `bind: ...:0`).
-- The test reads the child's stdout line-by-line (JSON log format, one object per line),
-  looking for the two "listening" records, and parses each record's `bind` field into a real
-  `SocketAddr` for the admin and wallet-facing listeners respectively.
+  string — this remains a genuine, independent production-logging correctness improvement. The
+  test uses it as a **secondary sanity assertion** (the logged address must equal the
+  pre-selected port) rather than as the mechanism for learning where to send requests.
+- The test reads the child's stdout line-by-line (JSON log format, one object per line) to
+  perform that sanity assertion, and to capture diagnostics.
 - A background task continuously drains remaining stdout/stderr into an in-memory buffer
   (bounded, e.g. last N KB or last N lines) for later failure diagnostics — this prevents the
   child from blocking on a full OS pipe buffer once the test stops actively reading lines.
