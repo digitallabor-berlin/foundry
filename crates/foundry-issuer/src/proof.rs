@@ -7,7 +7,7 @@ use josekit::jwk::Jwk;
 use josekit::jws::{JwsHeader, ES256};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ProofObject {
     pub proof_type: String,
     pub jwt: Option<String>,

@@ -6,7 +6,7 @@ use foundry_core::config::Config;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CredentialIssuerMetadata {
     pub credential_issuer: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -15,11 +15,12 @@ pub struct CredentialIssuerMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<Object>)]
     pub display: Vec<serde_json::Value>,
     pub credential_configurations_supported: BTreeMap<String, CredentialConfigurationSupported>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CredentialConfigurationSupported {
     pub format: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -30,17 +31,19 @@ pub struct CredentialConfigurationSupported {
     pub credential_signing_alg_values_supported: Vec<String>,
     pub proof_types_supported: BTreeMap<String, ProofTypeSupported>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<Object>)]
     pub display: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<Object>)]
     pub claims: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ProofTypeSupported {
     pub proof_signing_alg_values_supported: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AuthorizationServerMetadata {
     pub issuer: String,
     pub token_endpoint: String,

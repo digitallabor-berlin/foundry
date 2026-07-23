@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct CredentialRequest {
     pub credential_configuration_id: Option<String>,
     pub format: Option<String>,
     pub proof: Option<ProofObject>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CredentialResponse {
     pub credential: String,
     #[serde(skip_serializing_if = "Option::is_none")]
