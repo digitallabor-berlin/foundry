@@ -38,3 +38,4 @@ foundry-sd-jwt-vc = { path = "../foundry-sd-jwt-vc" }
 openid4vp = { path = "../openid4vp" }
 foundry-mdoc = { path = "../foundry-mdoc" }
 coset = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

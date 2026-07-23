@@ -625,8 +625,10 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
 
     let admin_listener = tokio::net::TcpListener::bind(&cfg.server.admin.bind).await?;
     let wallet_listener = tokio::net::TcpListener::bind(&cfg.server.wallet_facing.bind).await?;
-    tracing::info!(bind = %cfg.server.admin.bind, "foundry admin server listening");
-    tracing::info!(bind = %cfg.server.wallet_facing.bind, "foundry wallet-facing server listening");
+    let admin_bound_addr = admin_listener.local_addr()?;
+    let wallet_bound_addr = wallet_listener.local_addr()?;
+    tracing::info!(bind = %admin_bound_addr, "foundry admin server listening");
+    tracing::info!(bind = %wallet_bound_addr, "foundry wallet-facing server listening");
 
     tokio::try_join!(
         axum::serve(admin_listener, admin_app).into_future(),
