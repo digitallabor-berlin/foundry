@@ -17,6 +17,7 @@ pub struct MdocVerificationResult {
     pub claims: BTreeMap<String, BTreeMap<String, JsonValue>>,
     pub device_key_jwk: JsonValue,
     pub issuer_x5c: Option<Vec<String>>,
+    pub doc_type: String,
 }
 
 fn curve_for_alg(alg: &str) -> Result<&'static str, FormatError> {
@@ -307,6 +308,7 @@ pub fn verify_mdoc(
         claims: verified_claims,
         device_key_jwk,
         issuer_x5c: Some(x5c_b64s),
+        doc_type: mso.doc_type.clone(),
     })
 }
 
@@ -447,5 +449,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
+        assert_eq!(res.doc_type, "org.iso.18013.5.1.mDL");
     }
 }
