@@ -89,7 +89,22 @@ cargo run -p foundry -- serve --config config.yaml
 **Admin Server (`127.0.0.1:9000`):**
 - `GET /health` — Health check endpoint
 - `GET /ready` — Readiness check endpoint (verifies storage connectivity)
+- `GET /swagger-ui` — Interactive OpenAPI/Swagger UI (enabled by default; see [API Documentation](#api-documentation-openapi--swagger-ui) below)
+- `GET /api-docs/openapi.json` — Raw OpenAPI 3.x spec (JSON)
 - `POST /admin/issuance/offers` — Create credential offers (requires Bearer token if `admin.api_key` is set)
+
+#### API Documentation (OpenAPI / Swagger UI)
+
+Foundry auto-generates an OpenAPI 3.x specification for its HTTP API and serves it from the **Admin Server**.
+
+- **Swagger UI** (interactive, browsable docs): `http://127.0.0.1:9000/swagger-ui`
+- **Raw OpenAPI JSON spec**: `http://127.0.0.1:9000/api-docs/openapi.json`
+
+Both are unauthenticated endpoints (no Bearer token required), served alongside `/health` and `/ready`.
+
+The Swagger UI can be disabled (e.g. for production deployments) by setting `server.admin.swagger_ui_enabled: false` in your `config.yaml`. When disabled, only the raw `/api-docs/openapi.json` endpoint remains available and `/swagger-ui` is not mounted.
+
+On every `serve` startup, Foundry also writes the current spec to `openapi.json` in the working directory, which is convenient for generating client SDKs or importing into tools like Postman/Insomnia.
 
 #### Example: Creating an Offer via Admin API
 

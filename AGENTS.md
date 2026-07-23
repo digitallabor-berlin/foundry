@@ -31,9 +31,6 @@ When executing plans using subagents (e.g. via `superpowers:subagent-driven-deve
 | Plan / spec authoring | `architect` | Most capable |
 | Fix subagent | matching implementer | Matches original task tier |
 
-### Dispatch Rules & Model Overrides
-- **Model Overrides**: When instructed or when usage limits require, pass `model` explicitly on `Agent` calls (e.g. `model: "gemini-3.6-flash"`).
-- **Custom Agent Model Overrides**: Custom agent files in `~/.pi/agent/agents/` specify default models in frontmatter. If overriding a custom agent's model, update its frontmatter or dispatch `general-purpose` with explicit role instructions and model parameters.
 
 ---
 
@@ -70,3 +67,7 @@ To keep task progress in sync with the `pi-tasks` TUI widget:
 - Use `TaskCreate` to register tasks with `agentType` set for eligible subagents.
 - Use `TaskUpdate` to update status (`in_progress`, `completed`) as tasks start and finish.
 - Maintain `.superpowers/sdd/progress.md` as the durable, compaction-proof source of truth for execution history.
+
+## 5. Open API Specification
+
+Ensure that http enpoints of the applications are documented in the in the exposed Open API specification. Changes to those enpoint must be reflected in the specification.
