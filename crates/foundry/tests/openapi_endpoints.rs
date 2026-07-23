@@ -113,7 +113,7 @@ async fn swagger_ui_endpoint_returns_html_when_enabled() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/swagger-ui/")
+                .uri("/api-docs/")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -140,7 +140,7 @@ async fn swagger_ui_endpoint_returns_404_when_disabled() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/swagger-ui/")
+                .uri("/api-docs/")
                 .body(Body::empty())
                 .unwrap(),
         )

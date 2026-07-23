@@ -1,5 +1,6 @@
 use utoipa::OpenApi;
 
+/// Admin OpenAPI documentation
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -24,23 +25,32 @@ use utoipa::OpenApi;
         foundry_verifier::CheckResult,
     ))
 )]
-pub struct ApiDoc;
+pub struct AdminApiDoc;
 
-pub fn generate_openapi_spec() -> String {
-    ApiDoc::openapi().to_json().unwrap_or_default()
+/// Generate admin OpenAPI specification
+pub fn generate_admin_openapi_spec() -> String {
+    AdminApiDoc::openapi().to_json().unwrap_or_default()
+}
+
+/// Wallet OpenAPI documentation (scaffold for Task 5)
+#[derive(OpenApi)]
+#[openapi(paths(), components(schemas()))]
+pub struct WalletApiDoc;
+
+/// Generate wallet OpenAPI specification
+pub fn generate_wallet_openapi_spec() -> String {
+    WalletApiDoc::openapi().to_json().unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn openapi_spec_generates_valid_json() {
-        let spec_json = generate_openapi_spec();
+    fn assert_valid_v3_spec(spec_json: &str) {
         assert!(!spec_json.is_empty(), "OpenAPI spec should not be empty");
 
         let val: serde_json::Value =
-            serde_json::from_str(&spec_json).expect("OpenAPI spec should be valid JSON");
+            serde_json::from_str(spec_json).expect("OpenAPI spec should be valid JSON");
 
         let openapi_ver = val
             .get("openapi")
@@ -51,5 +61,15 @@ mod tests {
             openapi_ver.starts_with("3."),
             "Expected OpenAPI version 3.x, got '{openapi_ver}'"
         );
+    }
+
+    #[test]
+    fn admin_openapi_spec_generates_valid_json() {
+        assert_valid_v3_spec(&generate_admin_openapi_spec());
+    }
+
+    #[test]
+    fn wallet_openapi_spec_generates_valid_json() {
+        assert_valid_v3_spec(&generate_wallet_openapi_spec());
     }
 }
