@@ -192,6 +192,7 @@ async fn wallet_openapi_json_endpoint_returns_valid_spec() {
         "/credential",
         "/vp/request/{id}",
         "/vp/response/{id}",
+        "/statuslists/{id}",
     ] {
         assert!(
             paths.contains_key(expected),

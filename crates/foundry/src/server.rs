@@ -73,7 +73,8 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/nonce", post(nonce_handler))
         .route("/credential", post(credential_handler))
         .route("/vp/request/:id", get(get_request_object_handler))
-        .route("/vp/response/:id", post(post_response_handler));
+        .route("/vp/response/:id", post(post_response_handler))
+        .route("/statuslists/:id", get(status_list_handler));
 
     let router = if state.config.server.wallet_facing.swagger_ui_enabled {
         router.merge(utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
@@ -489,6 +490,83 @@ async fn post_response_handler(
         Ok(result) => Ok(Json(result)),
         Err(e) => Err(verifier_wallet_error_response(&e)),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/statuslists/{id}",
+    responses(
+        (status = 200, description = "Signed Status List Token JWT", content_type = "application/statuslist+jwt", body = String),
+        (status = 404)
+    )
+)]
+async fn status_list_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), StatusCode> {
+    if !state.config.issuer.status_list.enabled {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let persistent = foundry_core::status_list::load_status_list(state.storage.as_ref(), &id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let persistent = match persistent {
+        Some(p) => p,
+        None => return Err(StatusCode::NOT_FOUND),
+    };
+    let status_list = persistent
+        .to_status_list(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let key_name = state
+        .config
+        .issuer
+        .status_list
+        .signing_key
+        .as_deref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let key_entry = state
+        .config
+        .keys
+        .get(key_name)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let alg: foundry_core::crypto::SignatureAlgorithm = key_entry
+        .alg
+        .parse()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let base_url = state
+        .config
+        .issuer
+        .status_list
+        .public_base_url
+        .as_deref()
+        .unwrap_or(&state.config.issuer.credential_issuer);
+    let sub = format!("{}/{}", base_url.trim_end_matches('/'), id);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let token = foundry_core::status_list::sign_status_list_token(
+        &status_list,
+        sub,
+        now,
+        &key_entry.private_key,
+        alg,
+        key_entry.x5c.as_deref().map(std::path::Path::new),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/statuslist+jwt",
+        )],
+        token,
+    ))
 }
 
 pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::task::JoinHandle<()> {

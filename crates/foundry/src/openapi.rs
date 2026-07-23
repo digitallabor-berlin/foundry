@@ -43,6 +43,7 @@ pub fn generate_admin_openapi_spec() -> String {
         crate::server::credential_handler,
         crate::server::get_request_object_handler,
         crate::server::post_response_handler,
+        crate::server::status_list_handler,
     ),
     components(schemas(
         foundry_issuer::CredentialIssuerMetadata,
