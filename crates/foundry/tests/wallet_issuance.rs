@@ -110,11 +110,17 @@ fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
 
     let mut header = JwsHeader::new();
     header.set_token_type("openid4vci-proof+jwt");
-    header.set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap())).unwrap();
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
 
     let mut payload = JwtPayload::new();
-    payload.set_claim("aud", Some(serde_json::json!(issuer))).unwrap();
-    payload.set_claim("nonce", Some(serde_json::json!(c_nonce))).unwrap();
+    payload
+        .set_claim("aud", Some(serde_json::json!(issuer)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(c_nonce)))
+        .unwrap();
 
     let private_jwk = keypair.to_jwk_private_key();
     let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
@@ -164,18 +170,7 @@ async fn full_issuance_flow_end_to_end() {
         .as_str()
         .unwrap();
 
-    // 2. Call POST /nonce endpoint
-    let wallet_app = wallet_router(state.clone());
-    let nonce_req = Request::builder()
-        .method("POST")
-        .uri("/nonce")
-        .body(Body::empty())
-        .unwrap();
-
-    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
-    assert_eq!(nonce_res.status(), StatusCode::OK);
-
-    // 3. Exchange pre-authorized_code at POST /token
+    // 2. Exchange pre-authorized_code at POST /token
     let wallet_app = wallet_router(state.clone());
     let token_form_body = format!(
         "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={}",
@@ -198,7 +193,25 @@ async fn full_issuance_flow_end_to_end() {
     let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
 
     let access_token = token_json["access_token"].as_str().unwrap();
-    let c_nonce = token_json["c_nonce"].as_str().unwrap();
+
+    // 3. Call POST /nonce with the access_token to mint a fresh c_nonce, and prove
+    // that nonce is subsequently accepted by /credential.
+    let wallet_app = wallet_router(state.clone());
+    let nonce_req = Request::builder()
+        .method("POST")
+        .uri("/nonce")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+
+    let nonce_bytes = axum::body::to_bytes(nonce_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let nonce_json: serde_json::Value = serde_json::from_slice(&nonce_bytes).unwrap();
+    let c_nonce = nonce_json["c_nonce"].as_str().unwrap();
 
     // 4. Construct holder proof and request credential at POST /credential
     let (proof_json, _keypair) = create_proof(c_nonce, "https://issuer.example.com");

@@ -12,10 +12,10 @@ use foundry_issuer::{CreateOfferRequest, CreateOfferResponse};
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationTransaction,
 };
-use utoipa::OpenApi;
 use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use utoipa::OpenApi;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -87,15 +87,10 @@ async fn auth_server_metadata(
     ))
 }
 
-pub(crate) async fn openapi_json_handler() -> (
-    [(axum::http::header::HeaderName, &'static str); 1],
-    String,
-) {
+pub(crate) async fn openapi_json_handler(
+) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json",
-        )],
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
         crate::openapi::generate_openapi_spec(),
     )
 }
@@ -185,11 +180,15 @@ async fn token_handler(
 
     let req: foundry_issuer::TokenRequest = if content_type.contains("application/json") {
         serde_json::from_slice(&body_bytes).map_err(|e| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(e.to_string()))
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
+                e.to_string(),
+            ))
         })?
     } else {
         serde_html_form::from_bytes(&body_bytes).map_err(|e| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(e.to_string()))
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
+                e.to_string(),
+            ))
         })?
     };
 
@@ -214,12 +213,38 @@ async fn token_handler(
     .map_err(|e| wallet_error_response(&e))
 }
 
-async fn nonce_handler() -> Json<serde_json::Value> {
-    let c_nonce = format!("cn_{}", uuid::Uuid::new_v4().simple());
-    Json(serde_json::json!({
-        "c_nonce": c_nonce,
-        "c_nonce_expires_in": 600
-    }))
+async fn nonce_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
+                "missing authorization header".into(),
+            ))
+        })?;
+
+    let access_token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+        wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
+            "invalid bearer authorization header".into(),
+        ))
+    })?;
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let res = foundry_issuer::refresh_c_nonce(state.storage.as_ref(), access_token, now)
+        .await
+        .map_err(|e| wallet_error_response(&e))?;
+
+    Ok(Json(serde_json::json!({
+        "c_nonce": res.c_nonce,
+        "c_nonce_expires_in": res.c_nonce_expires_in
+    })))
 }
 
 async fn credential_handler(
@@ -278,7 +303,9 @@ fn verifier_wallet_error_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use foundry_verifier::VerificationError::*;
     let (status, code) = match e {
-        Decryption(_) | Failed(_) | Serialization(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        Decryption(_) | Failed(_) | Serialization(_) => {
+            (StatusCode::BAD_REQUEST, "invalid_request")
+        }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
     (
@@ -331,13 +358,7 @@ pub(crate) async fn get_verification_handler(
 async fn get_request_object_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<
-    (
-        [(axum::http::header::HeaderName, &'static str); 1],
-        String,
-    ),
-    StatusCode,
-> {
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), StatusCode> {
     let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -360,10 +381,7 @@ async fn post_response_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
     encrypted_jwe_str: String,
-) -> Result<
-    Json<foundry_verifier::VerificationResult>,
-    (StatusCode, Json<serde_json::Value>),
-> {
+) -> Result<Json<foundry_verifier::VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -384,7 +402,18 @@ async fn post_response_handler(
         }
     };
 
-    let verify_res = foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str);
+    if tx.state != foundry_verifier::VerificationState::Pending {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "verification response already submitted"
+            })),
+        ));
+    }
+
+    let verify_res =
+        foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str);
 
     let _ = foundry_verifier::save_verification_transaction(
         state.storage.as_ref(),
@@ -399,7 +428,6 @@ async fn post_response_handler(
         Err(e) => Err(verifier_wallet_error_response(&e)),
     }
 }
-
 
 pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
