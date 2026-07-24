@@ -231,11 +231,6 @@ fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
 /// An issued SD-JWT VC credential plus what later verification/revocation
 /// steps need from it: its status-list index/uri, and the holder signing key
 /// bound in its `cnf` claim (needed to build a matching KB-JWT later).
-///
-/// `status_idx`/`status_uri`/`holder_signer` are unused by this task's test
-/// body but are consumed by Task 5's verification/revocation steps; `allow`
-/// suppresses the interim dead_code lint until that task lands.
-#[allow(dead_code)]
 struct IssuedCredential {
     compact: String,
     status_idx: u64,
@@ -467,7 +462,19 @@ async fn run_verification(
         .expect("GET /admin/verification/requests/:id");
     assert_eq!(tx_res.status(), reqwest::StatusCode::OK);
     let tx: VerificationTransaction = tx_res.json().await.unwrap();
-    assert_eq!(tx.state, VerificationState::Verified);
+    // `VerificationState::Verified` means "a verification attempt completed"
+    // (state machine progress), not "passed" — the happy-path call lands in
+    // `Verified` and the revoked-credential call lands in `Failed`; the
+    // actual pass/fail signal is `VerificationResult.verified` and its
+    // `checks`, asserted separately by the caller.
+    assert!(
+        matches!(
+            tx.state,
+            VerificationState::Verified | VerificationState::Failed
+        ),
+        "unexpected transaction state: {:?}",
+        tx.state
+    );
 
     result
 }
@@ -475,7 +482,7 @@ async fn run_verification(
 #[tokio::test]
 #[ignore]
 async fn full_flow_issue_verify_revoke_reverify() {
-    let (guard, _dir, admin_port, wallet_port) = spawn_server().await;
+    let (guard, dir, admin_port, wallet_port) = spawn_server().await;
     let admin_base = format!("http://127.0.0.1:{admin_port}");
     let wallet_base = format!("http://127.0.0.1:{wallet_port}");
     let client = reqwest::Client::new();
@@ -495,5 +502,59 @@ async fn full_flow_issue_verify_revoke_reverify() {
             "check {} unexpectedly failed: {:?}",
             check.check, check.detail
         );
+    }
+
+    // Revoke: the status URI's final path segment is the storage-key `id`
+    // to revoke (today always the literal "1" — see credential.rs and the
+    // design doc's finding — derived here from the credential rather than
+    // hardcoded, so this stays correct if that ever changes).
+    let status_id = issued
+        .status_uri
+        .rsplit('/')
+        .next()
+        .expect("status uri has a path segment");
+    let db_path = dir.path().join("foundry.db");
+    let revoke_status = std::process::Command::new(env!("CARGO_BIN_EXE_foundry"))
+        .args([
+            "status-list",
+            "set",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--credential-type",
+            status_id,
+            "--index",
+            &issued.status_idx.to_string(),
+            "--status",
+            "revoked",
+        ])
+        .status()
+        .expect("spawn foundry status-list set");
+    assert!(revoke_status.success(), "foundry status-list set failed");
+
+    // Fresh verification request/response (responses can't be resubmitted —
+    // see wallet_verification.rs::resubmitting_a_verification_response_is_rejected).
+    let revoked = run_verification(&client, &admin_base, &wallet_base, &issued).await;
+    assert!(
+        !revoked.verified,
+        "revoked credential must not verify; checks={:?}",
+        revoked.checks
+    );
+    let status_check = revoked
+        .checks
+        .iter()
+        .find(|c| c.check == "status_check")
+        .expect("status_check present");
+    assert!(
+        !status_check.passed,
+        "status_check must fail after revocation"
+    );
+    for check in &revoked.checks {
+        if check.check != "status_check" {
+            assert!(
+                check.passed,
+                "unrelated check {} should still pass after revocation: {:?}",
+                check.check, check.detail
+            );
+        }
     }
 }
