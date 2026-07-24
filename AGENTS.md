@@ -14,6 +14,7 @@ Guidelines for AI agents working in the `foundry` repository (EUDI Wallet / Open
 - `crates/foundry-verifier`: OpenID4VP verification engine (request object builder, JWE ECDH-ES decryption, SD-JWT VC + mdoc verification, DCQL matching, and status revocation checking).
 - `crates/foundry-sd-jwt-vc`: SD-JWT VC builder and verifier with disclosure walking and KB-JWT binding.
 - `crates/foundry-mdoc`: mdoc (`mso_mdoc`) CBOR builder and DeviceAuth/IssuerAuth verifier.
+- `crates/foundry-wallet`: Debug EUDI wallet CLI/TUI for exercising and inspecting the OpenID4VCI issuance and OpenID4VP verification flows end-to-end (SD-JWT VC only in v1); stores credentials/keys/certs/event log as plain files for inspection, with real toggleable X.509 trust validation and unredacted HTTP logging. See the README's "Debug Wallet CLI/TUI" section.
 - `crates/oid4vci` & `crates/openid4vp`: Vendored protocol baseline models.
 
 ---
@@ -41,6 +42,7 @@ Every task and commit in `foundry` MUST comply with these global constraints:
 1. **No Panics or Unwraps in Request Paths**:
    - Production request-handling logic in `foundry-issuer`, `foundry-verifier`, and `foundry::server` MUST NOT use `.unwrap()`, `.expect()`, `panic!()`, or `unreachable!()`.
    - Always return typed `Result`s (`IssuanceError`, `VerificationError`, or Axum error responses). Unwraps are permitted strictly inside `#[cfg(test)]` code.
+   - Likewise, `foundry-wallet`'s `actions/`, `storage/`, `http/`, and `tui/` modules MUST NOT use `.unwrap()`, `.expect()`, `panic!()`, or `unreachable!()`; always return `WalletResult`/`WalletError`. Unwraps are permitted strictly inside `#[cfg(test)]` code and integration test files under `tests/`.
 
 2. **Honest Verification Verdicts (`verified` flag)**:
    - In `foundry-verifier`, `VerificationResult.verified` MUST equal `checks.iter().all(|c| c.passed)`.
