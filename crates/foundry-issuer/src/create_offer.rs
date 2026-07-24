@@ -23,7 +23,7 @@ pub struct CreateOfferRequest {
     pub tx_code_required: bool,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CreateOfferResponse {
     pub transaction_id: String,
     pub credential_offer: CredentialOffer,

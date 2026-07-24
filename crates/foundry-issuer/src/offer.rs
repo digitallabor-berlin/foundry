@@ -4,7 +4,7 @@ use crate::error::IssuanceError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use rand::RngCore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// 32 bytes of CSPRNG entropy, URL-safe base64 (unpadded). Same idiom as
 /// `foundry-sd-jwt-vc`'s `generate_salt`.
@@ -22,20 +22,20 @@ pub fn generate_tx_code(length: usize) -> String {
         .collect()
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CredentialOffer {
     pub credential_issuer: String,
     pub credential_configuration_ids: Vec<String>,
     pub grants: CredentialOfferGrants,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CredentialOfferGrants {
     #[serde(rename = "urn:ietf:params:oauth:grant-type:pre-authorized_code")]
     pub pre_authorized_code: PreAuthorizedCodeGrant,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct PreAuthorizedCodeGrant {
     #[serde(rename = "pre-authorized_code")]
     pub pre_authorized_code: String,
@@ -43,7 +43,7 @@ pub struct PreAuthorizedCodeGrant {
     pub tx_code: Option<TxCodeDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TxCodeDefinition {
     pub input_mode: String,
     pub length: usize,
@@ -99,5 +99,29 @@ mod tests {
         // The raw JSON must not appear verbatim (braces/quotes are percent-encoded).
         assert!(!uri.contains('{'));
         assert!(!uri.contains('"'));
+    }
+
+    #[test]
+    fn credential_offer_round_trips_through_json() {
+        let offer = CredentialOffer {
+            credential_issuer: "https://issuer.example.com".to_string(),
+            credential_configuration_ids: vec!["pid".to_string()],
+            grants: CredentialOfferGrants {
+                pre_authorized_code: PreAuthorizedCodeGrant {
+                    pre_authorized_code: "abc123".to_string(),
+                    tx_code: Some(TxCodeDefinition {
+                        input_mode: "numeric".to_string(),
+                        length: 4,
+                    }),
+                },
+            },
+        };
+        let json = serde_json::to_string(&offer).unwrap();
+        let round_tripped: CredentialOffer = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.credential_issuer, offer.credential_issuer);
+        assert_eq!(
+            round_tripped.grants.pre_authorized_code.pre_authorized_code,
+            "abc123"
+        );
     }
 }
