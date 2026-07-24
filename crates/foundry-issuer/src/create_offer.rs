@@ -10,6 +10,7 @@ use crate::offer::{
 use crate::status_index::allocate_status_index;
 use crate::transaction::{save_transaction_with_indices, IssuanceState, IssuanceTransaction};
 use foundry_core::config::Config;
+use foundry_core::status_list::{load_status_list, save_status_list, PersistentStatusList};
 use foundry_core::storage::Storage;
 use serde::{Deserialize, Serialize};
 
@@ -74,6 +75,16 @@ pub async fn create_offer(
 
     let status_list_index = if cfg.issuer.status_list.enabled {
         let list_size = cfg.issuer.status_list.list_size.unwrap_or(1_048_576);
+        // The embedded status URI is always ".../1" (see credential.rs) regardless
+        // of credential_type_id — ensure the backing PersistentStatusList exists
+        // under that same literal key "1" before any credential can reference it.
+        // TODO(concurrency): this check-then-create is not atomic, matching the
+        // same class of race already documented in allocate_status_index below;
+        // acceptable for this phase's single-process dev deployment.
+        if load_status_list(storage, "1").await?.is_none() {
+            let fresh = PersistentStatusList::new("1", list_size, 2);
+            save_status_list(storage, &fresh).await?;
+        }
         Some(allocate_status_index(storage, &ct.id, list_size).await?)
     } else {
         None
@@ -268,6 +279,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::ClaimValidation(_)));
+    }
+
+    #[tokio::test]
+    async fn creates_the_backing_status_list_when_missing() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+
+        assert!(load_status_list(&storage, "1").await.unwrap().is_none());
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+        let req = CreateOfferRequest {
+            credential_type_id: "pid".to_string(),
+            claims,
+            tx_code_required: false,
+        };
+        create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let list = load_status_list(&storage, "1").await.unwrap();
+        assert!(
+            list.is_some(),
+            "PersistentStatusList for key \"1\" should now exist"
+        );
     }
 
     #[tokio::test]
