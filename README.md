@@ -159,6 +159,23 @@ cargo run -p foundry -- cert issue \
 
 ---
 
+### End-to-End Test
+
+A full end-to-end test spawns the real `foundry` binary (`quickstart` then
+`serve`, on dynamically-selected free ports) and drives it purely over HTTP:
+creates a credential offer, issues an SD-JWT VC `pid` credential, verifies it
+via OpenID4VP (happy path), revokes it via `foundry status-list set`, and
+re-verifies to confirm `verified: false` with `status_check` failing. It is
+excluded from the default `cargo test --workspace` run (slower, binds real OS
+ports) — run it explicitly:
+
+```bash
+cargo test -p foundry --test e2e_full_flow -- --ignored
+```
+
+See `docs/superpowers/specs/2026-07-23-foundry-e2e-full-flow-design.md` for
+the design rationale.
+
 ## Testing
 
 Run all unit and integration tests across the workspace:
