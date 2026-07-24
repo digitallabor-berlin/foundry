@@ -14,10 +14,15 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
+use foundry_sd_jwt_vc::builder::attach_kb_jwt;
+use foundry_verifier::{
+    CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
+};
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
 use josekit::jws::{JwsHeader, ES256};
 use josekit::jwt::{self, JwtPayload};
+use openid4vp::core::jwe::JweBuilder;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
@@ -373,6 +378,100 @@ async fn create_offer_and_issue_credential(
     }
 }
 
+/// Create a verification request via the admin API (DCQL matching the
+/// issued `pid` credential's vct and claims), then respond as the wallet:
+/// attach a KB-JWT (signed by the same holder key bound in the credential's
+/// `cnf` claim) to the already-issued credential, encrypt it into a JWE, and
+/// submit it. Returns the decoded `VerificationResult`. Cross-checks the
+/// admin-facing transaction record too. Ported (request/response shapes,
+/// KB-JWT/JWE construction) from
+/// `crates/foundry/tests/wallet_verification.rs::full_verification_flow_end_to_end`.
+async fn run_verification(
+    client: &reqwest::Client,
+    admin_base: &str,
+    wallet_base: &str,
+    issued: &IssuedCredential,
+) -> VerificationResult {
+    let create_res = client
+        .post(format!("{admin_base}/admin/verification/requests"))
+        .bearer_auth("dev-admin-key")
+        .json(&serde_json::json!({
+            "dcql_query": {
+                "credentials": [{
+                    "id": "c1",
+                    "format": "dc+sd-jwt",
+                    "meta": { "vct_values": ["https://localhost:8443/vct/pid"] },
+                    "claims": [
+                        { "path": ["given_name"] },
+                        { "path": ["birthdate"] }
+                    ]
+                }]
+            },
+            "transport": "request_uri"
+        }))
+        .send()
+        .await
+        .expect("POST /admin/verification/requests");
+    assert_eq!(create_res.status(), reqwest::StatusCode::OK);
+    let create_resp: CreateVerificationResponse = create_res.json().await.unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_res = client
+        .get(format!("{wallet_base}/vp/request/{verification_id}"))
+        .send()
+        .await
+        .expect("GET /vp/request/:id");
+    assert_eq!(get_res.status(), reqwest::StatusCode::OK);
+    let jws_str = get_res.text().await.unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    assert_eq!(parts.len(), 3);
+    let request_object: serde_json::Value =
+        serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    let presentation = attach_kb_jwt(
+        issued.compact.clone(),
+        &issued.holder_signer,
+        &client_id,
+        &nonce,
+    )
+    .expect("attach_kb_jwt");
+    let jwe_str = JweBuilder::new()
+        .payload(serde_json::json!({ "vp_token": presentation }))
+        .recipient_key_json(&ephem_public_jwk)
+        .unwrap()
+        .alg("ECDH-ES")
+        .enc("A128GCM")
+        .build()
+        .unwrap();
+
+    let post_res = client
+        .post(format!("{wallet_base}/vp/response/{verification_id}"))
+        .header("content-type", "text/plain")
+        .body(jwe_str)
+        .send()
+        .await
+        .expect("POST /vp/response/:id");
+    assert_eq!(post_res.status(), reqwest::StatusCode::OK);
+    let result: VerificationResult = post_res.json().await.unwrap();
+
+    let tx_res = client
+        .get(format!(
+            "{admin_base}/admin/verification/requests/{verification_id}"
+        ))
+        .bearer_auth("dev-admin-key")
+        .send()
+        .await
+        .expect("GET /admin/verification/requests/:id");
+    assert_eq!(tx_res.status(), reqwest::StatusCode::OK);
+    let tx: VerificationTransaction = tx_res.json().await.unwrap();
+    assert_eq!(tx.state, VerificationState::Verified);
+
+    result
+}
+
 #[tokio::test]
 #[ignore]
 async fn full_flow_issue_verify_revoke_reverify() {
@@ -382,5 +481,19 @@ async fn full_flow_issue_verify_revoke_reverify() {
     let client = reqwest::Client::new();
 
     let issued = create_offer_and_issue_credential(&client, &admin_base, &wallet_base).await;
-    assert!(!issued.compact.is_empty(), "logs:\n{}", guard.dump_logs());
+
+    let happy = run_verification(&client, &admin_base, &wallet_base, &issued).await;
+    assert!(
+        happy.verified,
+        "happy-path checks={:?} logs={}",
+        happy.checks,
+        guard.dump_logs()
+    );
+    for check in &happy.checks {
+        assert!(
+            check.passed,
+            "check {} unexpectedly failed: {:?}",
+            check.check, check.detail
+        );
+    }
 }
