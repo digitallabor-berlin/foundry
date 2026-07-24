@@ -242,8 +242,11 @@ mod tests {
             .join("")
     }
 
-    fn test_config(ca_pem: &str) -> Config {
-        Config {
+    fn test_config(ca_pem: &str) -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("root.pem");
+        std::fs::write(&cert_path, ca_pem).unwrap();
+        let config = Config {
             server: ServerConfig {
                 wallet_facing: WalletFacingConfig {
                     public_base_url: "https://localhost:8443".to_string(),
@@ -264,7 +267,7 @@ mod tests {
             keys: Default::default(),
             trust_anchors: vec![TrustAnchor {
                 name: "test_ca".to_string(),
-                certs: ca_pem.to_string(),
+                certs: cert_path.to_str().unwrap().to_string(),
             }],
             issuer: IssuerConfig {
                 credential_issuer: "https://localhost:8443".to_string(),
@@ -290,7 +293,8 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
             },
-        }
+        };
+        (config, dir)
     }
 
     fn sample_tx() -> (VerificationTransaction, Jwk) {
@@ -323,7 +327,7 @@ mod tests {
     async fn test_verify_vp_response_sd_jwt_vc() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
 
         let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
         let (holder_signer, holder_pub) = holder();
@@ -389,7 +393,7 @@ mod tests {
     async fn test_verify_vp_response_missing_vp_token() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
         let jwe_str = JweBuilder::new()
@@ -413,7 +417,7 @@ mod tests {
     async fn test_verify_vp_response_invalid_jwe() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
         let resolver = MockResolver { token: None };
@@ -428,7 +432,7 @@ mod tests {
     async fn test_verify_vp_response_kb_nonce_mismatch() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
 
         let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
         let (holder_signer, holder_pub) = holder();
@@ -482,7 +486,7 @@ mod tests {
     async fn test_verify_vp_response_dcql_vct_mismatch_is_not_verified() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
 
         let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
         let (holder_signer, holder_pub) = holder();
@@ -554,7 +558,7 @@ mod tests {
     async fn test_verify_vp_response_mdoc_presentation() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
-        let config = test_config(&ca_str);
+        let (config, _trust_dir) = test_config(&ca_str);
 
         let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
 

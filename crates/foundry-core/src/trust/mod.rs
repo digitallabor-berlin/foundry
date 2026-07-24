@@ -100,7 +100,12 @@ impl TrustStore {
     pub fn from_config(anchors: &[crate::config::TrustAnchor]) -> Result<Self, TrustError> {
         let mut pems = Vec::new();
         for anchor in anchors {
-            for block in anchor.certs.split("-----BEGIN CERTIFICATE-----") {
+            let content =
+                std::fs::read_to_string(&anchor.certs).map_err(|e| TrustError::CertRead {
+                    path: anchor.certs.clone(),
+                    source: e,
+                })?;
+            for block in content.split("-----BEGIN CERTIFICATE-----") {
                 let trimmed = block.trim();
                 if !trimmed.is_empty() {
                     let pem = format!("-----BEGIN CERTIFICATE-----\n{}", trimmed);
@@ -360,6 +365,21 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         .unwrap();
         assert!(match_san_dns(leaf.cert_pem.as_bytes(), "issuer.dev.local").unwrap());
         assert!(!match_san_dns(leaf.cert_pem.as_bytes(), "attacker.example.com").unwrap());
+    }
+
+    #[test]
+    fn from_config_reads_certs_as_a_file_path_not_literal_pem() {
+        let dir = tempfile::tempdir().unwrap();
+        let cert_path = dir.path().join("root.pem");
+        std::fs::write(&cert_path, CA_CERT_PEM).unwrap();
+
+        let anchors = vec![crate::config::TrustAnchor {
+            name: "test_ca".to_string(),
+            certs: cert_path.to_str().unwrap().to_string(),
+        }];
+
+        let store = TrustStore::from_config(&anchors).unwrap();
+        assert!(!store.is_empty());
     }
 
     #[test]

@@ -95,6 +95,9 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
     std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
     std::fs::write(&verifier_key_path, &verifier_leaf.key_pem).unwrap();
 
+    let trust_root_path = dir.path().join("trust_root.pem");
+    std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
+
     let storage = SqliteStorage::connect(db_path.to_str().unwrap())
         .await
         .unwrap();
@@ -138,7 +141,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         keys,
         trust_anchors: vec![TrustAnchor {
             name: "test_ca".to_string(),
-            certs: root.cert_pem.clone(),
+            certs: trust_root_path.to_str().unwrap().to_string(),
         }],
         issuer: IssuerConfig {
             credential_issuer: "https://localhost:8443".to_string(),
