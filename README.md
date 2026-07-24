@@ -159,7 +159,7 @@ cargo run -p foundry -- cert issue \
 
 ---
 
-### End-to-End Test
+### End-to-End Test (real subprocess, issue → verify → revoke → re-verify)
 
 A full end-to-end test spawns the real `foundry` binary (`quickstart` then
 `serve`, on dynamically-selected free ports) and drives it purely over HTTP:
