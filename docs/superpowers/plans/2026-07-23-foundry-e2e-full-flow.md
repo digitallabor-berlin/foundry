@@ -1429,6 +1429,15 @@ git commit -m "docs: document running the e2e full-flow test"
 
 ---
 
+## Post-Implementation Addendum: two unplanned production bug fixes (2026-07-23)
+
+Running the real e2e test for the first time surfaced two genuine production bugs, each fixed as its own reviewed commit before Tasks 5/6 could be completed. Full root-cause/fix/blast-radius writeups live in the design spec's section 10a (`docs/superpowers/specs/2026-07-23-foundry-e2e-full-flow-design.md`). Summary:
+
+1. **`TrustStore::from_config`** (`crates/foundry-core/src/trust/mod.rs`) treated `trust_anchors.certs` as literal PEM text instead of a file path, so any real YAML-loaded config failed every verification at runtime. Fixed to read it as a file path (commit `ececbe0`), consistent with sibling conventions elsewhere in this codebase.
+2. **`create_offer`** (`crates/foundry-issuer/src/create_offer.rs`) never provisioned the backing `PersistentStatusList` bitset that this plan's new `/statuslists/:id` route (Task 2) reads, so real verification's status-check always 404'd. Fixed by having `create_offer` provision it (all-Valid) if missing, before allocating an index (commit `52c4380`).
+
+Both fixes were dispatched, reviewed, and approved using the same subagent-driven-development process as the plan's numbered tasks, and are covered by their own TDD tests. Neither fix expanded this plan's scope beyond what was needed to make the e2e test's happy path and revocation path genuinely pass against real production code.
+
 ## Self-Review Notes
 
 - **Spec coverage:** Task 1-2 cover design §4 (status-list route + shared helper, with the corrected `:id` naming and `"1"` behavior). Task 3 covers §5.1-5.2 (process spawning, probe-and-release port discovery, the corrected status-list-reachable config rewrite, the logging fix, RAII teardown, log-draining). Tasks 4-6 cover §6 steps 1-5 (offer, issuance, happy-path verification, revoke, re-verify). Task 7 covers §8 (CI/invocation documentation). §7 (error diagnostics) is covered by `ServerGuard::dump_logs()` used in every assertion message throughout Tasks 3-6.

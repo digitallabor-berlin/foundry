@@ -272,6 +272,26 @@ Response includes a credential offer (pre-authorized_code grant) per
 - `crates/foundry/Cargo.toml` — add `reqwest` (with `json` feature) as a dev-dependency.
 - `README.md` — document how to run the e2e test.
 
+## 10a. Addendum: production bugs discovered during implementation (2026-07-23)
+
+Running the e2e test for the first time against a real subprocess surfaced two genuine, previously-undiscovered production bugs -- neither was a test artifact; both are real defects that any real `foundry serve` deployment loaded from real YAML config would hit. Both were fixed as their own reviewed commits before the plan's Task 5/6 could be completed.
+
+### Bug 1: `TrustStore::from_config` treated `trust_anchors.certs` as literal PEM text
+
+`crates/foundry-core/src/trust/mod.rs::TrustStore::from_config` split `anchor.certs` directly on `-----BEGIN CERTIFICATE-----`, treating the config field as embedded PEM text. But `Config::validate_key_material` (`crates/foundry-core/src/config/validate.rs`) treats the same field as a file path (`base_dir.join(&anchor.certs)`, then reads the file) -- matching the `quickstart`-generated and README-documented config format (`certs: ./trust/root.pem`). A real `foundry serve` process loaded from real YAML passed startup validation cleanly, then failed every real verification at runtime with a cryptic PEM parse error, because it tried to parse the literal path string as PEM content. No existing test caught this because every prior in-process test hand-constructed a `Config` in Rust with `certs: <literal PEM string>` rather than loading real YAML from disk -- this e2e test was the first thing to route a YAML-loaded, quickstart-shaped config through the real verification path.
+
+Fix: `from_config` now reads `anchor.certs` via `std::fs::read_to_string` (a raw path, relative to CWD -- matching the established convention elsewhere in this codebase at request-serving time, e.g. `foundry-issuer/src/credential.rs` and `foundry-verifier/src/request.rs`, which use `FileSigner::from_pem_file(&key_entry.private_key, ...)` with no `base_dir` join), mapping IO errors to the pre-existing `TrustError::CertRead` variant, then splits the file's content exactly as before. TDD test: `from_config_reads_certs_as_a_file_path_not_literal_pem`.
+
+### Bug 2: nothing in the issuance path ever provisioned the backing `PersistentStatusList`
+
+With Bug 1 fixed, verification's `status_check` step still failed -- with `502 Bad Gateway` / `status_unavailable`, because `GET /statuslists/1` (added by this plan's Task 2) legitimately 404'd. Root cause: `crates/foundry-issuer/src/status_index.rs::allocate_status_index` only tracks "used index" bookkeeping in a separate storage namespace (keyed by `credential_type_id`) to avoid handing out the same index twice -- it never creates the actual bit-packed `PersistentStatusList` object in the `status_lists` namespace that `/statuslists/:id` (and the CLI's `status-list get`/`set`/`token` commands) read. Every credential's embedded status URI is always `.../1` (a pre-existing, deliberately-unchanged hardcoded literal in `credential.rs` -- see section 4 above), so nothing had ever created the bitset backing that literal key before this e2e test exercised the full issue-then-verify path against a real, persistent SQLite database.
+
+Fix: `crates/foundry-issuer/src/create_offer.rs::create_offer`, inside the existing `if cfg.issuer.status_list.enabled` branch (right where `allocate_status_index` is already called), now checks `load_status_list(storage, "1")` and, if `None`, creates `PersistentStatusList::new("1", list_size, 2)` (all-Valid) and persists it via `save_status_list` before allocating an index. The check-then-create is intentionally non-atomic, consistent with `allocate_status_index`'s own already-documented tolerance for the same class of race in this phase's single-process dev deployment target. TDD test: `creates_the_backing_status_list_when_missing`.
+
+### Interaction and blast radius
+
+The two fixes are independent and additive -- fixing Bug 1 alone would have let `from_config` parse certs correctly but verification would still 502 on Bug 2's 404; fixing Bug 2 alone would have let `/statuslists/1` serve a token but the verifier's own `TrustStore::from_config` call (used to validate the credential's issuer chain, not the status list) would still 500 first. Both are necessary and neither masks the other. Neither fix touches any code path outside what they each individually describe: Bug 1's fix only changes how `trust_anchors.certs` is interpreted (any existing deployment already using a real path -- the only format the `quickstart`/README-documented convention ever produced -- is unaffected in behavior, only in error class if the path happens to be missing); Bug 2's fix only adds a one-time, idempotent provisioning step gated behind `issuer.status_list.enabled`, with no effect when that flag is `false` or once the list already exists.
+
 ## 10. Open considerations for the implementation plan
 
 - Exact placement of the extracted status-list-token-building helper (foundry-core vs
