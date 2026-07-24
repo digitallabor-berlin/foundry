@@ -18,6 +18,7 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 | `oid4vci` | `crates/oid4vci` | Vendored OpenID4VCI protocol models and proof verifier. |
 | `openid4vp` | `crates/openid4vp` | Vendored OpenID4VP protocol types and verifier engine. |
 | `openid4vp-frontend` | `crates/openid4vp-frontend` | Frontend helpers for presentation flows. |
+| `foundry-wallet` | `crates/foundry-wallet` | Debug EUDI wallet CLI/TUI for exercising and inspecting `foundry`'s OpenID4VCI issuance and OpenID4VP verification flows end-to-end. See [Debug Wallet CLI/TUI](#debug-wallet-clitui-foundry-wallet) below. |
 
 ---
 
@@ -156,6 +157,99 @@ cargo run -p foundry -- cert issue \
   --out-key leaf-key.pem \
   --days 365
 ```
+
+---
+
+## Debug Wallet CLI/TUI (`foundry-wallet`)
+
+`foundry-wallet` is a debug EUDI wallet used to drive and inspect `foundry`'s
+OpenID4VCI issuance and OpenID4VP verification flows end-to-end, either
+interactively (a `ratatui` terminal UI) or headlessly (JSON-in/JSON-out CLI
+subcommands, suitable for scripts and AI agents). v1 scope is SD-JWT VC only
+(mdoc support is future work), with coarse accept/decline consent (no
+fine-grained claim selection yet).
+
+All credentials, keys, certificates, and an append-only event log are stored
+as plain files under a configurable `wallet-data/` directory so they can be
+inspected directly while debugging:
+
+```
+wallet-data/
+├── keys/                          # unbound/global keys
+├── credentials/
+│   └── <credential_id>/
+│       ├── credential.sdjwt       # compact SD-JWT VC
+│       ├── payload.json           # decoded header/payload/disclosed claims
+│       ├── holder_key.pem         # key bound to this credential
+│       └── metadata.json          # vct, issuer, trust_valid, ...
+├── trust/                         # trust anchor certs
+└── log/
+    └── events.jsonl                # append-only log of every step taken
+```
+
+### Configuration
+
+`foundry-wallet` is configured entirely via a YAML file; `--config` is
+required on every invocation (there is no default path):
+
+```bash
+cargo run -p foundry-wallet -- --config wallet.yaml <subcommand>
+```
+
+The config declares the issuer/verifier admin & wallet-facing base URLs,
+named issuance/verification presets (for one-command "create and offer" /
+"create and request" flows against the admin API), and trust validation
+settings — including a toggle to disable X.509 trust validation entirely
+(useful when deliberately debugging an untrusted issuer/verifier; when
+disabled, a warning is logged and the flow proceeds anyway).
+
+Trust validation, when enabled, is deliberately **asymmetric**: a failed
+check on an *issuer's* credential never blocks storage (the credential is
+still saved with `trust_valid: false` recorded, so a broken issuer's output
+can still be inspected), but a failed check on a *verifier's* signed request
+object **does** block the whole flow (there's no artifact worth keeping if
+the request itself can't be trusted).
+
+All HTTP requests and responses — including bearer tokens and full bodies —
+are logged verbatim to `log/events.jsonl` with **no redaction**; this is a
+deliberate debugging feature, not an oversight.
+
+### Interactive TUI
+
+```bash
+cargo run -p foundry-wallet -- --config wallet.yaml tui
+# or simply omit the subcommand:
+cargo run -p foundry-wallet -- --config wallet.yaml
+```
+
+Navigate the main menu (Trigger Issuance / Trigger Verification / Browse
+Credentials / Event Log / Quit) with the arrow keys and Enter; on the
+verification preset screen, `a` accepts and `d` declines the request.
+
+### Headless CLI
+
+Every subcommand prints machine-readable JSON to stdout and exits `0` on
+success, or `{"error": ..., "kind": ...}` to stderr and exits `1` on
+failure:
+
+```bash
+# Issue a credential from a named preset (or --offer-uri <deep-link>)
+cargo run -p foundry-wallet -- --config wallet.yaml issue --preset pid
+
+# Respond to a verification request from a named preset (or --request-uri)
+cargo run -p foundry-wallet -- --config wallet.yaml verify --preset dcql1 --consent accept
+
+# Inspect stored credentials
+cargo run -p foundry-wallet -- --config wallet.yaml credentials list
+cargo run -p foundry-wallet -- --config wallet.yaml credentials show --id <credential_id>
+
+# Tail the event log
+cargo run -p foundry-wallet -- --config wallet.yaml events tail --n 20
+```
+
+See `docs/superpowers/specs/2026-07-24-foundry-wallet-cli-design.md` for the
+full design rationale and `docs/superpowers/plans/2026-07-24-foundry-wallet-cli.md`
+for the implementation plan.
 
 ---
 
