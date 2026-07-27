@@ -56,6 +56,7 @@ mod tests {
             api_key: api_key.map(str::to_string),
             api_key_env: api_key_env.map(str::to_string),
             swagger_ui_enabled: true,
+            console_enabled: true,
         }
     }
 

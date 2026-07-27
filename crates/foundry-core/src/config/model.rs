@@ -38,6 +38,8 @@ pub struct AdminConfig {
     pub api_key_env: Option<String>,
     #[serde(default = "default_true")]
     pub swagger_ui_enabled: bool,
+    #[serde(default = "default_true")]
+    pub console_enabled: bool,
 }
 
 fn default_true() -> bool {
