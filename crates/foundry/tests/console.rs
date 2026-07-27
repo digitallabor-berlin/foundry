@@ -117,3 +117,50 @@ async fn console_endpoint_returns_404_when_disabled() {
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn console_qr_svg_css_sets_explicit_dimensions() {
+    // Regression test for a Safari-only bug: the vendored QR library's
+    // createSvgTag({ scalable: true }) omits width/height attributes on the
+    // generated <svg>, relying only on its viewBox. Chrome falls back to a
+    // usable default size for a viewBox-only SVG; Safari's replaced-element
+    // sizing algorithm collapses it to near-zero ("a little white box")
+    // unless the page's own CSS sets an explicit width/height. This test
+    // ensures `.qr-wrap svg` always carries that explicit sizing.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState { storage, config }, AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    let selector = ".qr-wrap svg {";
+    let selector_start = html
+        .find(selector)
+        .expect("console.html should style `.qr-wrap svg`");
+    let rule_start = selector_start + selector.len();
+    let rule_end = html[rule_start..]
+        .find('}')
+        .map(|i| rule_start + i)
+        .expect("`.qr-wrap svg` CSS rule should be closed with `}`");
+    let rule_body = &html[rule_start..rule_end];
+
+    assert!(
+        rule_body.contains("width") && rule_body.contains("height"),
+        "`.qr-wrap svg` must set explicit width/height (or aspect-ratio-based \
+         sizing) so Safari doesn't collapse the QR SVG to near-zero size; \
+         rule body was: {rule_body:?}"
+    );
+}
