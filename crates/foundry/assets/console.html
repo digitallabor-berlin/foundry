@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Foundry Admin Test Console</title>
+<style>
+  :root {
+    --bg: #0f1420;
+    --panel: #161c2c;
+    --panel-border: #262f45;
+    --text: #e6e9f2;
+    --muted: #8b93a7;
+    --accent: #5b8cff;
+    --accent-dark: #3f6fe0;
+    --amber: #e0a83f;
+    --green: #35c07a;
+    --red: #e05656;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    padding: 32px;
+  }
+  header { max-width: 1100px; margin: 0 auto 24px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  header p.sub { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
+  .key-bar {
+    display: flex; gap: 8px; align-items: center;
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 10px; padding: 12px 16px;
+  }
+  .key-bar label { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .key-bar input {
+    flex: 1; background: #0c101a; border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: var(--mono); font-size: 13px;
+  }
+  .key-bar .remembered { font-size: 12px; color: var(--green); white-space: nowrap; }
+  main {
+    max-width: 1100px; margin: 0 auto;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card p.hint { margin: 0 0 16px; color: var(--muted); font-size: 12.5px; }
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+  .field input[type=text], .field textarea, .field select {
+    width: 100%; background: #0c101a; border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: var(--mono); font-size: 13px;
+  }
+  .field textarea { min-height: 90px; resize: vertical; }
+  .field.checkbox { display: flex; align-items: center; gap: 8px; }
+  .field.checkbox label { margin: 0; }
+  .radio-group { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+  .radio-group label { display: flex; align-items: center; gap: 6px; color: var(--text); }
+  button.primary {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button.primary:hover { background: var(--accent-dark); }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .copy-btn {
+    background: transparent; border: 1px solid var(--panel-border); color: var(--muted);
+    border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; margin-left: 8px;
+  }
+  .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  .result { margin-top: 18px; border-top: 1px solid var(--panel-border); padding-top: 16px; }
+  .result.hidden { display: none; }
+  .uri-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .uri-text {
+    flex: 1; font-family: var(--mono); font-size: 12px; word-break: break-all;
+    background: #0c101a; border: 1px solid var(--panel-border); border-radius: 6px; padding: 8px 10px;
+  }
+  .qr-wrap { display: flex; justify-content: center; margin: 12px 0; }
+  .qr-wrap svg { background: #fff; padding: 10px; border-radius: 8px; }
+  pre.json {
+    background: #0c101a; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 10px; font-size: 12px; overflow-x: auto; max-height: 220px; margin: 0;
+  }
+  pre.json.hidden { display: none; }
+  .badge {
+    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  }
+  .badge.pending { background: rgba(224,168,63,0.18); color: var(--amber); }
+  .badge.verified { background: rgba(53,192,122,0.18); color: var(--green); }
+  .badge.failed { background: rgba(224,86,86,0.18); color: var(--red); }
+  .checks { list-style: none; padding: 0; margin: 10px 0; }
+  .checks.hidden { display: none; }
+  .checks li { font-size: 13px; padding: 4px 0; display: flex; gap: 8px; align-items: baseline; }
+  .checks li .mark { font-weight: 700; }
+  .checks li.pass .mark { color: var(--green); }
+  .checks li.fail .mark { color: var(--red); }
+  .error-banner {
+    background: rgba(224,86,86,0.12); border: 1px solid var(--red); color: #ffb3b3;
+    border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px;
+  }
+  .error-banner.hidden { display: none; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Foundry Admin Test Console</h1>
+  <p class="sub">Trigger OpenID4VCI issuance and OpenID4VP verification flows against this server. Scan the QR with a real wallet, or copy the link.</p>
+  <div class="key-bar">
+    <label for="api-key">Admin API key</label>
+    <input type="text" id="api-key" placeholder="Bearer token for /admin/* endpoints" autocomplete="off">
+    <span class="remembered hidden" id="remembered-indicator">remembered</span>
+  </div>
+</header>
+<main>
+  <section class="card" id="issuance-card">
+    <h2>Issuance</h2>
+    <p class="hint">POST /admin/issuance/offers</p>
+    <div class="field">
+      <label for="cred-type-id">credential_type_id</label>
+      <input type="text" id="cred-type-id" value="pid">
+    </div>
+    <div class="field">
+      <label for="claims-json">claims (JSON)</label>
+      <textarea id="claims-json">{
+  "given_name": "Alice",
+  "birthdate": "1990-01-01"
+}</textarea>
+    </div>
+    <div class="field checkbox">
+      <input type="checkbox" id="tx-code-required">
+      <label for="tx-code-required">tx_code_required</label>
+    </div>
+    <button class="primary" id="create-offer-btn">Create Offer</button>
+    <div class="error-banner hidden" id="issuance-error"></div>
+    <div class="result hidden" id="issuance-result">
+      <div class="uri-row">
+        <span class="uri-text" id="offer-uri"></span>
+        <button class="copy-btn" data-copy-target="offer-uri">Copy</button>
+      </div>
+      <div class="qr-wrap" id="offer-qr"></div>
+      <pre class="json" id="offer-json"></pre>
+    </div>
+  </section>
+
+  <section class="card" id="verification-card">
+    <h2>Verification</h2>
+    <p class="hint">POST /admin/verification/requests</p>
+    <div class="radio-group">
+      <label><input type="radio" name="dcql-mode" value="named" checked> Named query</label>
+      <label><input type="radio" name="dcql-mode" value="raw"> Raw DCQL</label>
+    </div>
+    <div class="field" id="named-query-field">
+      <label for="named-query-ref">named_query_ref</label>
+      <input type="text" id="named-query-ref" placeholder="e.g. dcql1">
+    </div>
+    <div class="field hidden" id="raw-dcql-field">
+      <label for="dcql-json">dcql_query (JSON)</label>
+      <textarea id="dcql-json">{}</textarea>
+    </div>
+    <div class="field">
+      <label for="transport">transport</label>
+      <input type="text" id="transport" value="request_uri">
+    </div>
+    <button class="primary" id="create-verification-btn">Create Verification Request</button>
+    <div class="error-banner hidden" id="verification-error"></div>
+    <div class="result hidden" id="verification-result">
+      <div class="uri-row">
+        <span class="uri-text" id="verification-uri"></span>
+        <button class="copy-btn" data-copy-target="verification-uri">Copy</button>
+      </div>
+      <div class="qr-wrap" id="verification-qr"></div>
+      <p>Status: <span class="badge pending" id="verification-status">pending</span></p>
+      <ul class="checks hidden" id="verification-checks"></ul>
+      <pre class="json hidden" id="verification-claims"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+/* __VENDORED_QRCODE_JS__ */
+</script>
+<script>
+(function () {
+  'use strict';
+
+  const KEY_STORAGE_KEY = 'foundry_console_admin_api_key';
+
+  function getApiKey() {
+    return document.getElementById('api-key').value.trim();
+  }
+
+  function initApiKey() {
+    const input = document.getElementById('api-key');
+    const remembered = document.getElementById('remembered-indicator');
+    const saved = window.localStorage.getItem(KEY_STORAGE_KEY);
+    if (saved) {
+      input.value = saved;
+      remembered.classList.remove('hidden');
+    }
+    input.addEventListener('input', function () {
+      const v = input.value.trim();
+      if (v) {
+        window.localStorage.setItem(KEY_STORAGE_KEY, v);
+        remembered.classList.remove('hidden');
+      } else {
+        window.localStorage.removeItem(KEY_STORAGE_KEY);
+        remembered.classList.add('hidden');
+      }
+    });
+  }
+
+  async function adminFetch(path, options) {
+    const key = getApiKey();
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, (options && options.headers) || {});
+    if (key) {
+      headers['Authorization'] = 'Bearer ' + key;
+    }
+    const resp = await fetch(path, Object.assign({}, options, { headers: headers }));
+    const text = await resp.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch (e) {
+      body = text;
+    }
+    if (!resp.ok) {
+      const err = new Error('Request to ' + path + ' failed with status ' + resp.status);
+      err.status = resp.status;
+      err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  function showError(el, err) {
+    let message;
+    if (err && err.status === 401) {
+      message = 'Unauthorized (401). Check your Admin API key.';
+    } else if (err && err.status) {
+      const detail = (err.body && (err.body.error || JSON.stringify(err.body))) || '';
+      message = 'Request failed (' + err.status + '). ' + detail;
+    } else {
+      message = (err && err.message) || String(err);
+    }
+    el.textContent = message;
+    el.classList.remove('hidden');
+  }
+
+  function clearError(el) {
+    el.textContent = '';
+    el.classList.add('hidden');
+  }
+
+  function renderQr(container, text) {
+    container.innerHTML = '';
+    const qr = qrcode(0, 'M');
+    qr.addData(text);
+    qr.make();
+    container.innerHTML = qr.createSvgTag({ scalable: true });
+  }
+
+  function setupCopyButtons() {
+    document.querySelectorAll('.copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const targetId = btn.getAttribute('data-copy-target');
+        const el = document.getElementById(targetId);
+        const text = el.textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text);
+        }
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = original; }, 1200);
+      });
+    });
+  }
+
+  // --- Issuance ---
+  function initIssuance() {
+    const btn = document.getElementById('create-offer-btn');
+    const errorEl = document.getElementById('issuance-error');
+    const resultEl = document.getElementById('issuance-result');
+
+    btn.addEventListener('click', async function () {
+      clearError(errorEl);
+      resultEl.classList.add('hidden');
+
+      const credentialTypeId = document.getElementById('cred-type-id').value.trim();
+      const claimsRaw = document.getElementById('claims-json').value;
+      const txCodeRequired = document.getElementById('tx-code-required').checked;
+
+      let claims;
+      try {
+        claims = claimsRaw.trim() ? JSON.parse(claimsRaw) : {};
+      } catch (e) {
+        showError(errorEl, new Error('claims is not valid JSON: ' + e.message));
+        return;
+      }
+
+      btn.disabled = true;
+      try {
+        const body = await adminFetch('/admin/issuance/offers', {
+          method: 'POST',
+          body: JSON.stringify({
+            credential_type_id: credentialTypeId,
+            claims: claims,
+            tx_code_required: txCodeRequired
+          })
+        });
+
+        document.getElementById('offer-uri').textContent = body.credential_offer_uri;
+        document.getElementById('offer-json').textContent = JSON.stringify(body.credential_offer, null, 2);
+        renderQr(document.getElementById('offer-qr'), body.credential_offer_uri);
+        resultEl.classList.remove('hidden');
+      } catch (err) {
+        showError(errorEl, err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  // --- Verification ---
+  let pollTimer = null;
+  let pollFailures = 0;
+  const MAX_POLL_FAILURES = 10;
+  const POLL_INTERVAL_MS = 2000;
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function renderVerificationResult(tx) {
+    const statusEl = document.getElementById('verification-status');
+    const checksEl = document.getElementById('verification-checks');
+    const claimsEl = document.getElementById('verification-claims');
+
+    statusEl.textContent = tx.state;
+    statusEl.className = 'badge ' + tx.state;
+
+    if (tx.result) {
+      checksEl.innerHTML = '';
+      tx.result.checks.forEach(function (check) {
+        const li = document.createElement('li');
+        li.className = check.passed ? 'pass' : 'fail';
+        li.innerHTML = '<span class="mark">' + (check.passed ? '\u2713' : '\u2717') + '</span> ' +
+          check.check + (check.detail ? ' \u2014 ' + check.detail : '');
+        checksEl.appendChild(li);
+      });
+      checksEl.classList.remove('hidden');
+
+      claimsEl.textContent = JSON.stringify(tx.result.claims, null, 2);
+      claimsEl.classList.remove('hidden');
+    }
+  }
+
+  function pollVerification(id, errorEl) {
+    stopPolling();
+    pollFailures = 0;
+
+    function tick() {
+      adminFetch('/admin/verification/requests/' + encodeURIComponent(id), { method: 'GET' })
+        .then(function (tx) {
+          pollFailures = 0;
+          renderVerificationResult(tx);
+          if (tx.state === 'pending') {
+            pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(function (err) {
+          if (err && err.status) {
+            // Hard error (404/500/...): stop polling, surface it.
+            showError(errorEl, err);
+            return;
+          }
+          pollFailures += 1;
+          if (pollFailures >= MAX_POLL_FAILURES) {
+            showError(errorEl, new Error('Gave up polling verification status after ' + MAX_POLL_FAILURES + ' failed attempts.'));
+            return;
+          }
+          pollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+        });
+    }
+
+    tick();
+  }
+
+  function initVerificationModeToggle() {
+    const radios = document.querySelectorAll('input[name="dcql-mode"]');
+    const namedField = document.getElementById('named-query-field');
+    const rawField = document.getElementById('raw-dcql-field');
+    radios.forEach(function (radio) {
+      radio.addEventListener('change', function () {
+        if (radio.value === 'named' && radio.checked) {
+          namedField.classList.remove('hidden');
+          rawField.classList.add('hidden');
+        } else if (radio.value === 'raw' && radio.checked) {
+          namedField.classList.add('hidden');
+          rawField.classList.remove('hidden');
+        }
+      });
+    });
+  }
+
+  function initVerification() {
+    initVerificationModeToggle();
+    const btn = document.getElementById('create-verification-btn');
+    const errorEl = document.getElementById('verification-error');
+    const resultEl = document.getElementById('verification-result');
+
+    btn.addEventListener('click', async function () {
+      clearError(errorEl);
+      resultEl.classList.add('hidden');
+      stopPolling();
+
+      const mode = document.querySelector('input[name="dcql-mode"]:checked').value;
+      const transport = document.getElementById('transport').value.trim() || 'request_uri';
+
+      const payload = { transport: transport };
+      if (mode === 'named') {
+        const ref = document.getElementById('named-query-ref').value.trim();
+        if (!ref) {
+          showError(errorEl, new Error('named_query_ref is required in "Named query" mode.'));
+          return;
+        }
+        payload.named_query_ref = ref;
+      } else {
+        const raw = document.getElementById('dcql-json').value;
+        try {
+          payload.dcql_query = raw.trim() ? JSON.parse(raw) : {};
+        } catch (e) {
+          showError(errorEl, new Error('dcql_query is not valid JSON: ' + e.message));
+          return;
+        }
+      }
+
+      btn.disabled = true;
+      try {
+        const body = await adminFetch('/admin/verification/requests', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+
+        const uri = body.openid4vp_uri || body.request_uri || '';
+        const uriEl = document.getElementById('verification-uri');
+        const qrEl = document.getElementById('verification-qr');
+        qrEl.innerHTML = '';
+        if (uri) {
+          uriEl.textContent = uri;
+          renderQr(qrEl, uri);
+        } else if (body.dc_api_request) {
+          uriEl.textContent = '(dc_api transport has no scannable URI; use the Digital Credentials API request object returned by the admin endpoint directly)';
+        } else {
+          uriEl.textContent = '';
+        }
+
+        document.getElementById('verification-status').textContent = 'pending';
+        document.getElementById('verification-status').className = 'badge pending';
+        document.getElementById('verification-checks').classList.add('hidden');
+        document.getElementById('verification-claims').classList.add('hidden');
+        resultEl.classList.remove('hidden');
+
+        pollVerification(body.verification_id, errorEl);
+      } catch (err) {
+        showError(errorEl, err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    initApiKey();
+    initIssuance();
+    initVerification();
+    setupCopyButtons();
+  });
+})();
+</script>
+</body>
+</html>
