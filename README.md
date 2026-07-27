@@ -94,6 +94,7 @@ cargo run -p foundry -- serve --config config.yaml
 - `GET /ready` — Readiness check endpoint (verifies storage connectivity)
 - `GET /api-docs` — Interactive OpenAPI/Swagger UI (enabled by default; see [API Documentation](#api-documentation-openapi--swagger-ui) below)
 - `GET /api-docs/openapi.json` — Raw OpenAPI 3.x spec (JSON)
+- `GET /console` — Embedded HTML/JS test console for triggering issuance/verification flows (enabled by default; see [Admin Test Console](#admin-test-console) below)
 - `POST /admin/issuance/offers` — Create credential offers (requires Bearer token if `admin.api_key` is set)
 
 #### API Documentation (OpenAPI / Swagger UI)
@@ -131,6 +132,31 @@ curl -X POST http://127.0.0.1:9000/admin/issuance/offers \
     "tx_code_required": false
   }'
 ```
+
+#### Admin Test Console
+
+`foundry` serves a self-contained HTML/JS test console at `GET /console` on
+the Admin listener (`http://127.0.0.1:9000/console` by default) — no build
+step, no external dependencies (a small QR-code library is vendored inline).
+It lets you trigger the two admin flows from a browser instead of hand-rolling
+`curl` calls, and produces a QR code a real wallet app can scan:
+
+- **Issuance**: enter a `credential_type_id` and `claims` JSON, click
+  "Create Offer" — get back the `credential_offer_uri` as copyable text and
+  as a QR code. Scan it with a real wallet (or feed it to `foundry-wallet
+  issue --offer-uri <uri>`) to complete the flow.
+- **Verification**: pick a named query (`named_query_ref`) or paste raw
+  `dcql_query` JSON, click "Create Verification Request" — get back the
+  `openid4vp_uri`/`request_uri` as copyable text and as a QR code. The page
+  auto-polls the request's status and shows `verified`, each check's
+  pass/fail, and the disclosed claims once the wallet responds.
+
+The console only calls the existing Admin API (same endpoints as the `curl`
+example above) — paste your Admin API key into the field at the top of the
+page; it is remembered in the browser's `localStorage` for convenience,
+since the Admin listener is loopback-only by default. Disable it entirely
+with `server.admin.console_enabled: false` if you don't want it exposed;
+like Swagger UI, this only affects the Admin listener.
 
 ### 4. Key & Certificate Management CLI
 
