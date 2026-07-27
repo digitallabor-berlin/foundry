@@ -2657,8 +2657,15 @@ var qrcode = function() {
       tx.result.checks.forEach(function (check) {
         const li = document.createElement('li');
         li.className = check.passed ? 'pass' : 'fail';
-        li.innerHTML = '<span class="mark">' + (check.passed ? '\u2713' : '\u2717') + '</span> ' +
-          check.check + (check.detail ? ' \u2014 ' + check.detail : '');
+
+        const mark = document.createElement('span');
+        mark.className = 'mark';
+        mark.textContent = check.passed ? '\u2713' : '\u2717';
+        li.appendChild(mark);
+
+        const label = check.detail ? check.check + ' \u2014 ' + check.detail : check.check;
+        li.appendChild(document.createTextNode(' ' + label));
+
         checksEl.appendChild(li);
       });
       checksEl.classList.remove('hidden');
