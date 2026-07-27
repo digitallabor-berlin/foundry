@@ -271,6 +271,7 @@ mod tests {
                     api_key: None,
                     api_key_env: None,
                     swagger_ui_enabled: true,
+                    console_enabled: true,
                 },
             },
             storage: StorageConfig {

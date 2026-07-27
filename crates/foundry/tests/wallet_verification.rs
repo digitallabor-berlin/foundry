@@ -132,6 +132,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
                 api_key: Some("test-admin-key".to_string()),
                 api_key_env: None,
                 swagger_ui_enabled: true,
+                console_enabled: true,
             },
         },
         storage: StorageConfig {

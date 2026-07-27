@@ -24,6 +24,7 @@ fn test_config(status_list_enabled: bool) -> Config {
                 api_key: Some("test-admin-key".to_string()),
                 api_key_env: None,
                 swagger_ui_enabled: true,
+                console_enabled: true,
             },
         },
         storage: StorageConfig {

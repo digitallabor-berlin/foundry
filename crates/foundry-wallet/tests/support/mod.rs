@@ -100,6 +100,7 @@ pub async fn spawn_test_server() -> TestServer {
                 api_key: Some(ADMIN_API_KEY.to_string()),
                 api_key_env: None,
                 swagger_ui_enabled: false,
+                console_enabled: true,
             },
         },
         storage: StorageConfig {

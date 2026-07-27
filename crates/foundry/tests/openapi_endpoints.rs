@@ -24,6 +24,7 @@ fn test_config(swagger_ui_enabled: bool) -> Config {
                 api_key: None,
                 api_key_env: None,
                 swagger_ui_enabled,
+                console_enabled: true,
             },
         },
         storage: StorageConfig {
