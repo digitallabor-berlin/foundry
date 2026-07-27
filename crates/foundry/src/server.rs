@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     middleware,
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -39,6 +40,12 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
         ))
     } else {
         unauthenticated.route("/api-docs/openapi.json", get(openapi_json_handler))
+    };
+
+    let unauthenticated = if state.config.server.admin.console_enabled {
+        unauthenticated.route("/console", get(console_handler))
+    } else {
+        unauthenticated
     };
 
     let unauthenticated = unauthenticated.with_state(state.clone());
@@ -137,6 +144,16 @@ pub(crate) async fn ready(State(state): State<AppState>) -> Result<&'static str,
         Ok(_) => Ok("ready"),
         Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
+}
+
+// Embedded static Admin Test Console — trigger UI for the admin issuance
+// and verification endpoints (see docs/superpowers/specs/2026-07-27-admin-test-console-design.md).
+// Deliberately NOT a #[utoipa::path] handler: it returns static HTML, not a
+// JSON API resource, exactly like the /api-docs Swagger UI route itself.
+const CONSOLE_HTML: &str = include_str!("../assets/console.html");
+
+pub(crate) async fn console_handler() -> Html<&'static str> {
+    Html(CONSOLE_HTML)
 }
 
 #[utoipa::path(
