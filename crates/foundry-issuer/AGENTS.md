@@ -1,0 +1,137 @@
+# AGENTS.md — `crates/foundry-issuer`
+
+## Purpose
+
+The **OpenID4VCI issuance engine**: credential offers with pre-authorized codes,
+token exchange, `c_nonce` refresh, holder-proof verification, and credential
+issuance (SD-JWT VC and mdoc), plus issuer/authorization-server metadata
+construction and status-list index allocation.
+
+**Not** in scope here: HTTP routing and Axum wiring (that is `crates/foundry`),
+credential format encoding/signing (`foundry-sd-jwt-vc`, `foundry-mdoc`),
+OpenID4VP verification (`foundry-verifier`), and storage/crypto/config
+primitives (`foundry-core`).
+
+## Position in the Dependency Graph
+
+- **Depends on:** `foundry-core`, `foundry-sd-jwt-vc`, `foundry-mdoc`.
+- **Consumed by:** `crates/foundry` (HTTP handlers), `crates/foundry-wallet`.
+- **Must never depend on:** `foundry-verifier`, `crates/foundry`, or
+  `crates/foundry-wallet`.
+
+Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
+
+## Module Map
+
+| File | Responsibility |
+|---|---|
+| `lib.rs` | Module declarations and the `pub use` surface (see below) |
+| `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()` |
+| `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
+| `token.rs` | `POST /token` logic (pre-authorized-code grant → access token + `c_nonce`) and `POST /nonce` (`refresh_c_nonce`) |
+| `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
+| `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
+| `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk`, `aud`, `c_nonce`, expiry) |
+| `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode` |
+| `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config` |
+| `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
+| `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
+
+## Key Public Types & Entry Points
+
+Entry point → the endpoint that drives it (routes defined in
+`crates/foundry/src/server.rs`):
+
+| Entry point | Endpoint | Listener |
+|---|---|---|
+| `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
+| `handle_token_request(TokenRequest) -> TokenResponse` | `POST /token` | wallet-facing |
+| `refresh_c_nonce(..) -> NonceResponse` | `POST /nonce` | wallet-facing |
+| `handle_credential_request(CredentialRequest) -> CredentialResponse` | `POST /credential` | wallet-facing |
+| `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
+| `build_authorization_server_metadata(&Config) -> AuthorizationServerMetadata` | `GET /.well-known/oauth-authorization-server` | wallet-facing |
+
+Other public surface:
+
+- **Offer:** `CredentialOffer`, `CredentialOfferGrants`, `PreAuthorizedCodeGrant`,
+  `TxCodeDefinition`, `build_offer_uri`, `generate_pre_authorized_code`,
+  `generate_tx_code`.
+- **Transaction:** `IssuanceTransaction`, `IssuanceState` (`Offered` | `Issued`),
+  `save_transaction`, `save_transaction_with_indices`, `load_transaction`,
+  `load_transaction_by_pre_auth_code`, `load_transaction_by_access_token`.
+- **Proof:** `verify_holder_proof`, `ProofObject`, `VerifiedProof`.
+- **Metadata:** `CredentialConfigurationSupported`, `ProofTypeSupported`.
+- **Status:** `allocate_status_index(&dyn Storage, credential_type_id, list_size) -> Result<u64, IssuanceError>`.
+- **Errors:** `IssuanceError` — `InvalidRequest`, `InvalidGrant`, `InvalidProof`,
+  `UnknownCredentialType`, `ClaimValidation`, `StatusListExhausted`, plus
+  transparent wraps of `StorageError` / `CryptoError` / `TrustError`, and
+  `Serialization` / `Deserialization`.
+
+## Binding Invariants
+
+- **No `.unwrap()` / `.expect()` / `panic!()` / `unreachable!()`** anywhere
+  outside `#[cfg(test)]` — this crate is named explicitly in the rule; always
+  return `IssuanceError` — full rule: root [AGENTS.md](../../AGENTS.md) §4.1.
+- **Error → HTTP status classification lives in `crates/foundry`, not here.**
+  Return the semantically correct `IssuanceError` variant and let the handler
+  map it; do not smuggle status codes into error strings — full rule: root
+  [AGENTS.md](../../AGENTS.md) §4.3.
+- **Endpoint shape changes must be mirrored in `openapi.json`.** Request/response
+  structs here carry `utoipa::ToSchema`; changing a field changes the spec —
+  full rule: root [AGENTS.md](../../AGENTS.md) §6.
+- **No upward or sideways dependencies** (never `foundry-verifier` or
+  `crates/foundry`) — full rule: root [AGENTS.md](../../AGENTS.md) §3.
+- **Gates before completion:** `cargo test --workspace`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo fmt --check` — root
+  [AGENTS.md](../../AGENTS.md) §5.
+
+## Tests
+
+This crate has **no `tests/` directory**.
+
+- **Unit coverage:** inline `#[cfg(test)]` modules in every module —
+  `attestation.rs`, `create_offer.rs`, `credential.rs`, `error.rs`,
+  `metadata.rs`, `offer.rs`, `proof.rs`, `status_index.rs`, `token.rs`,
+  `transaction.rs`.
+- **Flow coverage** lives in `crates/foundry/tests/` — see
+  [`../foundry/tests/AGENTS.md`](../foundry/tests/AGENTS.md). Most relevant:
+  `issuer_offers.rs` (offer creation via the admin API), `wallet_issuance.rs`
+  (token → credential), `e2e_full_flow.rs` (issue → verify → revoke →
+  re-verify), `wallet_metadata.rs` (metadata endpoints).
+
+```bash
+cargo test -p foundry-issuer                      # fast unit loop
+cargo test -p foundry --test wallet_issuance      # issuance flow
+```
+
+## Gotchas
+
+- **Offers are single-use, enforced by transaction state.**
+  `handle_credential_request` rejects anything whose `IssuanceState` is not
+  `Offered` with `InvalidGrant("credential offer has already been claimed")`.
+  A retry after a successful issuance is a failure, not an idempotent replay.
+- **Status-index allocation is not atomic — there is a known `TODO(concurrency)`
+  in `status_index.rs`.** It does a CSPRNG draw plus a get-then-put check-and-set
+  against the `status_index_used` namespace, so concurrent allocators can race
+  on the same index. Do not assume uniqueness under real concurrency, and do not
+  "fix" it locally without adding a compare-and-swap primitive to
+  `foundry_core::storage::Storage`.
+- **Allocated status indices are never released** — the "used" marker is written
+  with no TTL. Exhaustion after `MAX_ATTEMPTS` draws yields
+  `StatusListExhausted`, so a small configured `list_size` will start failing
+  long before the list is genuinely full.
+- **`DefaultAttestationVerifier` only checks presence, not validity.** With
+  `Mode::Required` it errors when the attestation header/data is absent, and
+  otherwise returns `Ok(())`. It does **not** cryptographically verify anything —
+  do not treat a passing attestation check as a security guarantee.
+- **Only the pre-authorized-code grant is supported.** `handle_token_request`
+  rejects any `grant_type` other than
+  `urn:ietf:params:oauth:grant-type:pre-authorized_code` with
+  `InvalidGrant("unsupported_grant_type")`.
+- **`c_nonce` binding is transaction-scoped.** The proof is verified against the
+  `c_nonce` and `c_nonce_expires_at` stored on the transaction, not against a
+  global nonce store; a transaction missing either field fails with
+  `InvalidProof`, so any code path that writes a transaction must populate both.
+- **The `pre-authorized_code` field is serde-renamed** (hyphen, not underscore)
+  in `TokenRequest`. Renaming the Rust field without preserving `#[serde(rename)]`
+  silently breaks wallet compatibility.
