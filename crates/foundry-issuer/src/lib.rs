@@ -17,8 +17,8 @@ pub use metadata::{
     CredentialConfigurationSupported, CredentialIssuerMetadata, ProofTypeSupported,
 };
 pub use offer::{
-    build_offer_uri, generate_pre_authorized_code, generate_tx_code, CredentialOffer,
-    CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
+    build_offer_uri, generate_pre_authorized_code, generate_tx_code, AuthorizationCodeGrant,
+    CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
 };
 pub use proof::{verify_holder_proof, ProofObject, VerifiedProof};
 pub use status_index::allocate_status_index;

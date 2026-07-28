@@ -76,10 +76,11 @@ mod tests {
             credential_issuer: "https://issuer.example.com".to_string(),
             credential_configuration_ids: vec!["pid".to_string()],
             grants: CredentialOfferGrants {
-                pre_authorized_code: PreAuthorizedCodeGrant {
+                pre_authorized_code: Some(PreAuthorizedCodeGrant {
                     pre_authorized_code: "abc123".to_string(),
                     tx_code: None,
-                },
+                }),
+                authorization_code: None,
             },
         }
     }
@@ -91,7 +92,11 @@ mod tests {
             OfferSource::Inline(offer) => {
                 assert_eq!(offer.credential_issuer, "https://issuer.example.com");
                 assert_eq!(
-                    offer.grants.pre_authorized_code.pre_authorized_code,
+                    offer
+                        .grants
+                        .pre_authorized_code
+                        .unwrap()
+                        .pre_authorized_code,
                     "abc123"
                 );
             }

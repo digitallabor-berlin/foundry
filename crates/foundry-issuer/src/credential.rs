@@ -343,7 +343,7 @@ mod tests {
             transaction_id: "tx-cred-1".to_string(),
             credential_type_id: "pid".to_string(),
             claims,
-            pre_authorized_code: "code-123".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
             tx_code: None,
             status_list_index: None,
             access_token: Some("at_secret_123".to_string()),
@@ -351,6 +351,11 @@ mod tests {
             c_nonce_expires_at: Some(1_700_000_600),
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await

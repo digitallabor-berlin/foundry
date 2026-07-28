@@ -16,6 +16,7 @@ use utoipa::OpenApi;
         foundry_issuer::CredentialOffer,
         foundry_issuer::CredentialOfferGrants,
         foundry_issuer::PreAuthorizedCodeGrant,
+        foundry_issuer::AuthorizationCodeGrant,
         foundry_issuer::TxCodeDefinition,
         foundry_verifier::request::CreateVerificationRequest,
         foundry_verifier::request::CreateVerificationResponse,

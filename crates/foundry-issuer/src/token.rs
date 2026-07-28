@@ -151,7 +151,7 @@ mod tests {
             transaction_id: id.to_string(),
             credential_type_id: "pid".to_string(),
             claims,
-            pre_authorized_code: "code-123".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
             tx_code: Some("4242".to_string()),
             status_list_index: Some(7),
             access_token: None,
@@ -159,6 +159,11 @@ mod tests {
             c_nonce_expires_at: None,
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
         }
     }
 

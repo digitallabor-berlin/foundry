@@ -31,8 +31,27 @@ pub struct CredentialOffer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CredentialOfferGrants {
-    #[serde(rename = "urn:ietf:params:oauth:grant-type:pre-authorized_code")]
-    pub pre_authorized_code: PreAuthorizedCodeGrant,
+    #[serde(
+        rename = "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub pre_authorized_code: Option<PreAuthorizedCodeGrant>,
+    #[serde(
+        rename = "authorization_code",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub authorization_code: Option<AuthorizationCodeGrant>,
+}
+
+/// The `authorization_code` grant member of a `CredentialOffer`'s `grants`
+/// object. `issuer_state` lets the wallet round-trip an opaque value back to
+/// `/authorize`, which resolves it to the pre-created `IssuanceTransaction`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AuthorizationCodeGrant {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_state: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -79,21 +98,39 @@ mod tests {
         assert!(code.chars().all(|c| c.is_ascii_digit()));
     }
 
-    #[test]
-    fn build_offer_uri_percent_encodes_and_uses_the_correct_scheme() {
-        let offer = CredentialOffer {
+    fn pre_auth_offer() -> CredentialOffer {
+        CredentialOffer {
             credential_issuer: "https://issuer.example.com".to_string(),
             credential_configuration_ids: vec!["pid".to_string()],
             grants: CredentialOfferGrants {
-                pre_authorized_code: PreAuthorizedCodeGrant {
+                pre_authorized_code: Some(PreAuthorizedCodeGrant {
                     pre_authorized_code: "abc123".to_string(),
                     tx_code: Some(TxCodeDefinition {
                         input_mode: "numeric".to_string(),
                         length: 4,
                     }),
-                },
+                }),
+                authorization_code: None,
             },
-        };
+        }
+    }
+
+    fn authorization_code_offer() -> CredentialOffer {
+        CredentialOffer {
+            credential_issuer: "https://issuer.example.com".to_string(),
+            credential_configuration_ids: vec!["pid".to_string()],
+            grants: CredentialOfferGrants {
+                pre_authorized_code: None,
+                authorization_code: Some(AuthorizationCodeGrant {
+                    issuer_state: Some("issuer-state-abc".to_string()),
+                }),
+            },
+        }
+    }
+
+    #[test]
+    fn build_offer_uri_percent_encodes_and_uses_the_correct_scheme() {
+        let offer = pre_auth_offer();
         let uri = build_offer_uri(&offer).unwrap();
         assert!(uri.starts_with("openid-credential-offer://?credential_offer="));
         // The raw JSON must not appear verbatim (braces/quotes are percent-encoded).
@@ -102,26 +139,58 @@ mod tests {
     }
 
     #[test]
+    fn build_offer_uri_percent_encodes_authorization_code_offers_too() {
+        let offer = authorization_code_offer();
+        let uri = build_offer_uri(&offer).unwrap();
+        assert!(uri.starts_with("openid-credential-offer://?credential_offer="));
+    }
+
+    #[test]
     fn credential_offer_round_trips_through_json() {
-        let offer = CredentialOffer {
-            credential_issuer: "https://issuer.example.com".to_string(),
-            credential_configuration_ids: vec!["pid".to_string()],
-            grants: CredentialOfferGrants {
-                pre_authorized_code: PreAuthorizedCodeGrant {
-                    pre_authorized_code: "abc123".to_string(),
-                    tx_code: Some(TxCodeDefinition {
-                        input_mode: "numeric".to_string(),
-                        length: 4,
-                    }),
-                },
-            },
-        };
+        let offer = pre_auth_offer();
         let json = serde_json::to_string(&offer).unwrap();
         let round_tripped: CredentialOffer = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.credential_issuer, offer.credential_issuer);
         assert_eq!(
-            round_tripped.grants.pre_authorized_code.pre_authorized_code,
+            round_tripped
+                .grants
+                .pre_authorized_code
+                .unwrap()
+                .pre_authorized_code,
             "abc123"
         );
+    }
+
+    #[test]
+    fn pre_auth_offer_serializes_with_only_the_pre_authorized_code_grant_member() {
+        let offer = pre_auth_offer();
+        let json = serde_json::to_value(&offer).unwrap();
+        let grants = json.get("grants").unwrap().as_object().unwrap();
+        assert!(grants.contains_key("urn:ietf:params:oauth:grant-type:pre-authorized_code"));
+        assert!(!grants.contains_key("authorization_code"));
+    }
+
+    #[test]
+    fn authorization_code_offer_serializes_with_only_the_authorization_code_grant_member() {
+        let offer = authorization_code_offer();
+        let json = serde_json::to_value(&offer).unwrap();
+        let grants = json.get("grants").unwrap().as_object().unwrap();
+        assert!(!grants.contains_key("urn:ietf:params:oauth:grant-type:pre-authorized_code"));
+        assert!(grants.contains_key("authorization_code"));
+        assert_eq!(
+            grants["authorization_code"]["issuer_state"],
+            serde_json::json!("issuer-state-abc")
+        );
+    }
+
+    #[test]
+    fn authorization_code_grant_round_trips_through_json() {
+        let grant = AuthorizationCodeGrant {
+            issuer_state: Some("abc".to_string()),
+        };
+        let json = serde_json::to_string(&grant).unwrap();
+        assert_eq!(json, r#"{"issuer_state":"abc"}"#);
+        let round_tripped: AuthorizationCodeGrant = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.issuer_state, Some("abc".to_string()));
     }
 }

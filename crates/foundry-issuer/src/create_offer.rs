@@ -94,7 +94,7 @@ pub async fn create_offer(
         transaction_id: transaction_id.clone(),
         credential_type_id: ct.id.clone(),
         claims: req.claims,
-        pre_authorized_code: pre_authorized_code.clone(),
+        pre_authorized_code: Some(pre_authorized_code.clone()),
         tx_code: tx_code.clone(),
         status_list_index,
         access_token: None,
@@ -102,6 +102,11 @@ pub async fn create_offer(
         c_nonce_expires_at: None,
         state: IssuanceState::Offered,
         created_at: now_unix,
+        redirect_uri: None,
+        issuer_state: None,
+        authorization_code: None,
+        code_challenge: None,
+        code_challenge_method: None,
     };
     save_transaction_with_indices(storage, &tx, cfg.storage.transaction_ttl_secs, now_unix).await?;
 
@@ -113,13 +118,14 @@ pub async fn create_offer(
             .to_string(),
         credential_configuration_ids: vec![ct.id.clone()],
         grants: CredentialOfferGrants {
-            pre_authorized_code: PreAuthorizedCodeGrant {
+            pre_authorized_code: Some(PreAuthorizedCodeGrant {
                 pre_authorized_code,
                 tx_code: tx_code.map(|_| TxCodeDefinition {
                     input_mode: "numeric".to_string(),
                     length: DEFAULT_TX_CODE_LENGTH,
                 }),
-            },
+            }),
+            authorization_code: None,
         },
     };
     let credential_offer_uri = build_offer_uri(&offer)?;

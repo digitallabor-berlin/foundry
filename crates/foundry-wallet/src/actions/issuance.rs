@@ -64,7 +64,12 @@ pub async fn run_issuance(
     };
 
     // Step 2: token.
-    let grant = &offer.grants.pre_authorized_code;
+    let grant = offer.grants.pre_authorized_code.as_ref().ok_or_else(|| {
+        WalletError::MalformedOffer(
+            "offer has no pre-authorized_code grant; this debug wallet only supports the pre-authorized_code flow"
+                .to_string(),
+        )
+    })?;
     let mut form = format!(
         "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={}",
         grant.pre_authorized_code
