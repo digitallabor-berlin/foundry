@@ -86,11 +86,11 @@ same `TokenResponse` output — rather than a new subsystem.
 
 **Verify:** `cargo test -p foundry-issuer transaction:: offer::`
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
 
 ---
 
@@ -308,3 +308,12 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
 ## Progress Log
 
 (Append one line per completed task: date, task, commit SHA.)
+
+- 2026-07-28 — Task 1 (data model) — commit `890d0e9`. Also mechanically
+  registered `AuthorizationCodeGrant` in `AdminApiDoc`'s OpenAPI schema list
+  and regenerated `openapi.json` (discovered coupling: `CredentialOfferGrants`
+  now references the new type, so `utoipa`'s ref-resolution test failed until
+  this was added — not deferred to Task 6 since leaving the workspace test
+  suite red between task commits would break resumability). `cargo test
+  --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
+  both clean.
