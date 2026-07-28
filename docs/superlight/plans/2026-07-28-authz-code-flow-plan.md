@@ -186,11 +186,19 @@ style as `create_offer.rs`'s test module):
 
 **Verify:** `cargo test -p foundry-issuer authorize::`
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
+
+> **Deviation from plan:** `handle_authorize_request` takes an explicit
+> `tx_ttl_secs: u64` 4th parameter (before `now_unix`), not the 3-arg
+> signature originally specified above. The `Storage` trait doesn't expose
+> a stored row's original `expires_at`, so re-saving the transaction with
+> the minted `authorization_code` needs the TTL supplied again — exactly
+> the same pattern `create_offer`/`token.rs` already use. `server.rs` passes
+> `cfg.storage.transaction_ttl_secs`.
 
 ---
 
@@ -321,3 +329,9 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
   Regenerated `openapi.json` (`CreateOfferRequest` gained `redirect_uri`).
   `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D
   warnings` both clean.
+- 2026-07-28 — Task 3 (`GET /authorize` handler) — commit `4f3a90e`.
+  Signature deviation: `handle_authorize_request` takes an extra
+  `tx_ttl_secs: u64` param (see note under Task 3 above). Added `sha2` to
+  `foundry-issuer` (ahead of Task 4) and `serde`/`percent-encoding` as
+  direct `foundry` dependencies. `cargo test --workspace`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean.
