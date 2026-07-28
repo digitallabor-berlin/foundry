@@ -4,8 +4,8 @@
 
 use crate::error::IssuanceError;
 use crate::offer::{
-    build_offer_uri, generate_pre_authorized_code, generate_tx_code, CredentialOffer,
-    CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
+    build_offer_uri, generate_pre_authorized_code, generate_tx_code, AuthorizationCodeGrant,
+    CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
 };
 use crate::status_index::allocate_status_index;
 use crate::transaction::{save_transaction_with_indices, IssuanceState, IssuanceTransaction};
@@ -21,6 +21,12 @@ pub struct CreateOfferRequest {
     pub claims: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub tx_code_required: bool,
+    /// When set, requests an `authorization_code` grant offer (mutually
+    /// exclusive with `tx_code_required`) bound to this exact redirect URI.
+    /// When `None` (default), the existing `pre-authorized_code` grant is
+    /// used, unchanged.
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -39,6 +45,12 @@ pub async fn create_offer(
     req: CreateOfferRequest,
     now_unix: i64,
 ) -> Result<CreateOfferResponse, IssuanceError> {
+    if req.redirect_uri.is_some() && req.tx_code_required {
+        return Err(IssuanceError::InvalidRequest(
+            "tx_code_required is only valid for the pre-authorized_code grant".to_string(),
+        ));
+    }
+
     let ct = cfg
         .credential_types
         .iter()
@@ -66,12 +78,6 @@ pub async fn create_offer(
     }
 
     let transaction_id = generate_pre_authorized_code();
-    let pre_authorized_code = generate_pre_authorized_code();
-    let tx_code = if req.tx_code_required {
-        Some(generate_tx_code(DEFAULT_TX_CODE_LENGTH))
-    } else {
-        None
-    };
 
     let status_list_index = if cfg.issuer.status_list.enabled {
         let list_size = cfg.issuer.status_list.list_size.unwrap_or(1_048_576);
@@ -90,23 +96,69 @@ pub async fn create_offer(
         None
     };
 
-    let tx = IssuanceTransaction {
-        transaction_id: transaction_id.clone(),
-        credential_type_id: ct.id.clone(),
-        claims: req.claims,
-        pre_authorized_code: Some(pre_authorized_code.clone()),
-        tx_code: tx_code.clone(),
-        status_list_index,
-        access_token: None,
-        c_nonce: None,
-        c_nonce_expires_at: None,
-        state: IssuanceState::Offered,
-        created_at: now_unix,
-        redirect_uri: None,
-        issuer_state: None,
-        authorization_code: None,
-        code_challenge: None,
-        code_challenge_method: None,
+    let (tx, grants) = if let Some(redirect_uri) = req.redirect_uri {
+        let issuer_state = generate_pre_authorized_code();
+        let tx = IssuanceTransaction {
+            transaction_id: transaction_id.clone(),
+            credential_type_id: ct.id.clone(),
+            claims: req.claims,
+            pre_authorized_code: None,
+            tx_code: None,
+            status_list_index,
+            access_token: None,
+            c_nonce: None,
+            c_nonce_expires_at: None,
+            state: IssuanceState::Offered,
+            created_at: now_unix,
+            redirect_uri: Some(redirect_uri),
+            issuer_state: Some(issuer_state.clone()),
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+        };
+        let grants = CredentialOfferGrants {
+            pre_authorized_code: None,
+            authorization_code: Some(AuthorizationCodeGrant {
+                issuer_state: Some(issuer_state),
+            }),
+        };
+        (tx, grants)
+    } else {
+        let pre_authorized_code = generate_pre_authorized_code();
+        let tx_code = if req.tx_code_required {
+            Some(generate_tx_code(DEFAULT_TX_CODE_LENGTH))
+        } else {
+            None
+        };
+        let tx = IssuanceTransaction {
+            transaction_id: transaction_id.clone(),
+            credential_type_id: ct.id.clone(),
+            claims: req.claims,
+            pre_authorized_code: Some(pre_authorized_code.clone()),
+            tx_code: tx_code.clone(),
+            status_list_index,
+            access_token: None,
+            c_nonce: None,
+            c_nonce_expires_at: None,
+            state: IssuanceState::Offered,
+            created_at: now_unix,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+        };
+        let grants = CredentialOfferGrants {
+            pre_authorized_code: Some(PreAuthorizedCodeGrant {
+                pre_authorized_code,
+                tx_code: tx_code.map(|_| TxCodeDefinition {
+                    input_mode: "numeric".to_string(),
+                    length: DEFAULT_TX_CODE_LENGTH,
+                }),
+            }),
+            authorization_code: None,
+        };
+        (tx, grants)
     };
     save_transaction_with_indices(storage, &tx, cfg.storage.transaction_ttl_secs, now_unix).await?;
 
@@ -117,16 +169,7 @@ pub async fn create_offer(
             .trim_end_matches('/')
             .to_string(),
         credential_configuration_ids: vec![ct.id.clone()],
-        grants: CredentialOfferGrants {
-            pre_authorized_code: Some(PreAuthorizedCodeGrant {
-                pre_authorized_code,
-                tx_code: tx_code.map(|_| TxCodeDefinition {
-                    input_mode: "numeric".to_string(),
-                    length: DEFAULT_TX_CODE_LENGTH,
-                }),
-            }),
-            authorization_code: None,
-        },
+        grants,
     };
     let credential_offer_uri = build_offer_uri(&offer)?;
 
@@ -234,6 +277,7 @@ mod tests {
             credential_type_id: "pid".to_string(),
             claims,
             tx_code_required: true,
+            redirect_uri: None,
         };
         let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
             .await
@@ -265,6 +309,7 @@ mod tests {
             credential_type_id: "does-not-exist".to_string(),
             claims: serde_json::Map::new(),
             tx_code_required: false,
+            redirect_uri: None,
         };
         let err = create_offer(&cfg, &storage, req, 1_700_000_000)
             .await
@@ -281,6 +326,7 @@ mod tests {
             credential_type_id: "pid".to_string(),
             claims: serde_json::Map::new(),
             tx_code_required: false,
+            redirect_uri: None,
         };
         let err = create_offer(&cfg, &storage, req, 1_700_000_000)
             .await
@@ -301,6 +347,7 @@ mod tests {
             credential_type_id: "pid".to_string(),
             claims,
             tx_code_required: false,
+            redirect_uri: None,
         };
         create_offer(&cfg, &storage, req, 1_700_000_000)
             .await
@@ -324,6 +371,7 @@ mod tests {
             credential_type_id: "pid".to_string(),
             claims,
             tx_code_required: false,
+            redirect_uri: None,
         };
         let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
             .await
@@ -334,5 +382,76 @@ mod tests {
             .unwrap();
         assert!(tx.status_list_index.is_none());
         assert!(tx.tx_code.is_none());
+    }
+
+    fn req_with_redirect_uri(redirect_uri: &str) -> CreateOfferRequest {
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+        CreateOfferRequest {
+            credential_type_id: "pid".to_string(),
+            claims,
+            tx_code_required: false,
+            redirect_uri: Some(redirect_uri.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn redirect_uri_produces_an_authorization_code_grant_offer() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+        let req = req_with_redirect_uri("eudi-openid4ci://authorize");
+
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert!(resp.credential_offer.grants.pre_authorized_code.is_none());
+        let grant = resp
+            .credential_offer
+            .grants
+            .authorization_code
+            .as_ref()
+            .expect("authorization_code grant must be present");
+        assert!(grant.issuer_state.is_some());
+
+        let tx = load_transaction(&storage, &resp.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            tx.redirect_uri,
+            Some("eudi-openid4ci://authorize".to_string())
+        );
+        assert_eq!(tx.issuer_state, grant.issuer_state);
+        assert!(tx.pre_authorized_code.is_none());
+        assert!(tx.tx_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn redirect_uri_offer_uri_still_uses_the_credential_offer_scheme() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+        let req = req_with_redirect_uri("eudi-openid4ci://authorize");
+
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        assert!(resp
+            .credential_offer_uri
+            .starts_with("openid-credential-offer://"));
+    }
+
+    #[tokio::test]
+    async fn rejects_redirect_uri_combined_with_tx_code_required() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+        let mut req = req_with_redirect_uri("eudi-openid4ci://authorize");
+        req.tx_code_required = true;
+
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
     }
 }
