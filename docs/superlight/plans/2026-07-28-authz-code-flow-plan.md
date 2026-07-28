@@ -120,11 +120,11 @@ same `TokenResponse` output — rather than a new subsystem.
 
 **Verify:** `cargo test -p foundry-issuer create_offer::`
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
 
 ---
 
@@ -317,3 +317,7 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
   suite red between task commits would break resumability). `cargo test
   --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
   both clean.
+- 2026-07-28 — Task 2 (create_offer redirect_uri branch) — commit `bf43f5f`.
+  Regenerated `openapi.json` (`CreateOfferRequest` gained `redirect_uri`).
+  `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D
+  warnings` both clean.
