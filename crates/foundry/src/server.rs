@@ -77,6 +77,7 @@ pub fn wallet_router(state: AppState) -> Router {
             get(auth_server_metadata),
         )
         .route("/token", post(token_handler))
+        .route("/authorize", get(authorize_handler))
         .route("/nonce", post(nonce_handler))
         .route("/credential", post(credential_handler))
         .route("/vp/request/:id", get(get_request_object_handler))
@@ -212,6 +213,111 @@ fn wallet_error_response(
             "error_description": e.to_string(),
         })),
     )
+}
+
+/// Query parameters for `GET /authorize`. All fields are optional at the
+/// wire level (missing ones surface as a proper OAuth `invalid_request`
+/// error via `handle_authorize_request`, not an axum 422 rejection).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AuthorizeQuery {
+    #[serde(default)]
+    response_type: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    redirect_uri: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    code_challenge: Option<String>,
+    #[serde(default)]
+    code_challenge_method: Option<String>,
+    #[serde(default)]
+    issuer_state: Option<String>,
+}
+
+/// Percent-encode `params` (and `state`, if present) onto `base` as a query
+/// string. `base` may be a bare custom-scheme URI (e.g.
+/// `eudi-openid4ci://authorize`) with no existing query string.
+fn append_query(base: &str, params: &[(&str, &str)], state: Option<&str>) -> String {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let mut pairs: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
+        .collect();
+    if let Some(s) = state {
+        pairs.push(format!(
+            "state={}",
+            utf8_percent_encode(s, NON_ALPHANUMERIC)
+        ));
+    }
+    format!("{base}?{}", pairs.join("&"))
+}
+
+#[utoipa::path(
+    get,
+    path = "/authorize",
+    responses(
+        (status = 302, description = "Redirect to redirect_uri with `code` or `error`"),
+        (status = 400, description = "invalid_request (untrusted redirect_uri/issuer_state)")
+    )
+)]
+async fn authorize_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<AuthorizeQuery>,
+) -> Result<axum::response::Redirect, (StatusCode, Json<serde_json::Value>)> {
+    let redirect_uri = q.redirect_uri.clone().ok_or_else(|| {
+        wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
+            "missing redirect_uri".to_string(),
+        ))
+    })?;
+    let issuer_state = q.issuer_state.clone().ok_or_else(|| {
+        wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
+            "missing issuer_state".to_string(),
+        ))
+    })?;
+
+    let params = foundry_issuer::AuthorizeParams {
+        response_type: q.response_type.unwrap_or_default(),
+        client_id: q.client_id.unwrap_or_default(),
+        redirect_uri,
+        state: q.state,
+        code_challenge: q.code_challenge.unwrap_or_default(),
+        code_challenge_method: q.code_challenge_method.unwrap_or_default(),
+        issuer_state,
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let tx_ttl_secs = state.config.storage.transaction_ttl_secs;
+
+    let outcome =
+        foundry_issuer::handle_authorize_request(state.storage.as_ref(), &params, tx_ttl_secs, now)
+            .await;
+
+    match outcome {
+        foundry_issuer::AuthorizeOutcome::Success {
+            redirect_uri,
+            code,
+            state: wallet_state,
+        } => Ok(axum::response::Redirect::to(&append_query(
+            &redirect_uri,
+            &[("code", code.as_str())],
+            wallet_state.as_deref(),
+        ))),
+        foundry_issuer::AuthorizeOutcome::ErrorRedirect {
+            redirect_uri,
+            error,
+            state: wallet_state,
+        } => Ok(axum::response::Redirect::to(&append_query(
+            &redirect_uri,
+            &[("error", error.as_str())],
+            wallet_state.as_deref(),
+        ))),
+        foundry_issuer::AuthorizeOutcome::DirectError(e) => Err(wallet_error_response(&e)),
+    }
 }
 
 #[utoipa::path(

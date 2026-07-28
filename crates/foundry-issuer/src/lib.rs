@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod authorize;
 pub mod create_offer;
 pub mod credential;
 pub mod error;
@@ -9,6 +10,9 @@ pub mod status_index;
 pub mod token;
 pub mod transaction;
 
+pub use authorize::{
+    handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
+};
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{handle_credential_request, CredentialRequest, CredentialResponse};
 pub use error::IssuanceError;
