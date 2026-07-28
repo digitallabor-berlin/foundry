@@ -51,6 +51,44 @@ cargo build -p foundry
 
 ---
 
+## Docker
+
+A multi-stage `Dockerfile` at the repo root builds and packages the `foundry` server binary. The builder stage uses `rust:1.97-slim-bookworm` (matching `rust-toolchain.toml`) with `pkg-config`/`libssl-dev` installed, since `josekit` depends on a dynamically linked `openssl-sys`. The runtime stage is `debian:bookworm-slim` with `ca-certificates`/`libssl3` and runs as a non-root `foundry` user.
+
+### Building the image
+
+```bash
+docker build -t foundry:latest .
+```
+
+(Podman works as a drop-in replacement: `podman build -t foundry:latest .`)
+
+### Running the image
+
+The image expects `config.yaml`, the key material, and trust anchors it references to be bind-mounted rather than baked in (they're config-driven via paths relative to the config file, and already gitignored). The default entrypoint runs `foundry`, with `CMD` set to `serve --config /app/config.yaml`:
+
+```bash
+docker run --rm \
+  -v $PWD/config.yaml:/app/config.yaml \
+  -v $PWD/keys:/app/keys \
+  -v $PWD/trust:/app/trust \
+  -v $PWD/foundry.db:/app/foundry.db \
+  -p 8443:8443 -p 9000:9000 \
+  foundry:latest
+```
+
+The wallet-facing (`8443`) and admin (`9000`) listeners are both plain HTTP inside the container — TLS is expected to be terminated externally (e.g. a reverse proxy), same as when running the binary directly.
+
+Other CLI subcommands work the same way by overriding the default command, e.g. to run `quickstart` against a mounted output directory:
+
+```bash
+docker run --rm -v $PWD/dev:/app/dev foundry:latest quickstart --dir /app/dev --out-config /app/dev/config.yaml
+```
+
+*Note: the image runs as a fixed non-root user (uid 999). If a bind-mounted host directory isn't writable by that uid, pass `--user "$(id -u):$(id -g)"` to run as your own user instead.*
+
+---
+
 ## Running the Project
 
 Foundry includes CLI commands for setting up a development environment, managing keys and certificates, validating configuration files, and running the HTTP service.
