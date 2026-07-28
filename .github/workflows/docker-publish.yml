@@ -1,0 +1,104 @@
+name: Docker build & push
+
+# Builds and publishes the `foundry` server image to
+# containers.digitallabor.dev/foundry/foundry.
+#
+# Runs on GitHub's hosted `ubuntu-latest` runner (amd64) rather than any
+# developer machine. This matters: this repo's build has previously segfaulted
+# under `docker buildx build --platform linux/amd64` on Apple Silicon, because
+# that flag does not cross-compile — it runs the *entire* amd64 toolchain,
+# including rustc/LLVM, under QEMU CPU emulation, which crashes rustc on
+# M-series Macs (see README.md #Docker for the upstream issue links). Building
+# natively on an amd64 runner avoids emulation altogether, so this workflow
+# intentionally does NOT use docker/setup-qemu-action — do not add it back in
+# without re-reading that section first.
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: containers.digitallabor.dev/foundry/foundry
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test / clippy / fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # josekit -> openssl-sys links dynamically against the system OpenSSL,
+      # same reason the Dockerfile's builder stage needs these.
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
+
+      # rust-toolchain.toml pins 1.97.0; the rustup shims already on
+      # ubuntu-latest resolve it transparently for every cargo/rustc
+      # invocation below. This step forces (and verifies) that resolution
+      # up front rather than relying on it lazily inside `cargo test`.
+      - name: Resolve pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  build-and-push:
+    name: Build & push image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Log in to containers.digitallabor.dev
+        uses: docker/login-action@v4
+        with:
+          registry: containers.digitallabor.dev
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Tag scheme:
+      #   push to main       -> :latest, :sha-<short-sha>
+      #   push tag v1.2.3    -> :v1.2.3, :1.2, :1, :sha-<short-sha>
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # Single platform, matching the cluster (dl-infra-k8s/foundry). No
+          # QEMU involved: the runner IS linux/amd64, so this is a native
+          # build, not an emulated one.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
