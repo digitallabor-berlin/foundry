@@ -233,11 +233,22 @@ style as `create_offer.rs`'s test module):
 
 **Verify:** `cargo test -p foundry-issuer token::`
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
+
+> **Process note:** red and green were combined in this task (tests and
+> implementation written together, then run once and found immediately
+> green) rather than the usual write-tests-see-them-fail-then-implement
+> sequence. All plan-listed behaviors are covered.
+
+> **Deviation from plan:** `invalidate_authorization_code` is only called
+> after a full pass of `redirect_uri`/`code_verifier` validation, not
+> unconditionally on every exchange attempt — an attacker probing a valid
+> code with a wrong `code_verifier` must not be able to burn the
+> legitimate holder's code.
 
 ---
 
@@ -335,3 +346,9 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
   `foundry-issuer` (ahead of Task 4) and `serde`/`percent-encoding` as
   direct `foundry` dependencies. `cargo test --workspace`, `cargo clippy
   --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean.
+- 2026-07-28 — Task 4 (`/token` authorization_code grant, PKCE S256) —
+  commit `4ef0cd1`. Regenerated `openapi-wallet.json` (`TokenRequest`
+  gained `code`/`redirect_uri`/`client_id`/`code_verifier`); `openapi.json`
+  (Admin API) unaffected since `/token` is wallet-facing only. `cargo test
+  --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo fmt --check` all clean.
