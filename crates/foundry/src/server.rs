@@ -258,7 +258,7 @@ fn append_query(base: &str, params: &[(&str, &str)], state: Option<&str>) -> Str
     get,
     path = "/authorize",
     responses(
-        (status = 302, description = "Redirect to redirect_uri with `code` or `error`"),
+        (status = 303, description = "Redirect (axum::response::Redirect::to, See Other) to redirect_uri with `code` or `error`"),
         (status = 400, description = "invalid_request (untrusted redirect_uri/issuer_state)")
     )
 )]
