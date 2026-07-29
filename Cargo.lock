@@ -2046,6 +2046,7 @@ dependencies = [
  "serde",
  "serde_html_form 0.2.8",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tower",

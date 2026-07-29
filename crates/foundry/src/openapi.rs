@@ -39,6 +39,7 @@ pub fn generate_admin_openapi_spec() -> String {
     paths(
         crate::server::issuer_metadata,
         crate::server::auth_server_metadata,
+        crate::server::authorize_handler,
         crate::server::token_handler,
         crate::server::nonce_handler,
         crate::server::credential_handler,
@@ -97,5 +98,23 @@ mod tests {
     #[test]
     fn wallet_openapi_spec_generates_valid_json() {
         assert_valid_v3_spec(&generate_wallet_openapi_spec());
+    }
+
+    #[test]
+    fn admin_openapi_spec_includes_authorization_code_grant_schema() {
+        let spec = generate_admin_openapi_spec();
+        assert!(
+            spec.contains("AuthorizationCodeGrant"),
+            "admin OpenAPI spec should document the AuthorizationCodeGrant schema"
+        );
+    }
+
+    #[test]
+    fn wallet_openapi_spec_includes_authorize_path() {
+        let spec = generate_wallet_openapi_spec();
+        assert!(
+            spec.contains("/authorize"),
+            "wallet OpenAPI spec should document the /authorize path"
+        );
     }
 }
