@@ -316,11 +316,20 @@ style as `create_offer.rs`'s test module):
 **Verify:** `cargo test -p foundry && cargo test -p foundry-issuer`, then the
 full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`.
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
+
+> **Clarification vs. plan wording:** `/authorize`'s redirect responses
+> (`Success`/`ErrorRedirect`) use `axum::response::Redirect::to`, which
+> sends **303 See Other**, not literally "302" as the plan's behavior
+> description said informally. Verified against axum 0.7.9 source
+> (`Redirect::to` hardcodes `StatusCode::SEE_OTHER`). The integration test
+> asserts the actual `StatusCode::SEE_OTHER` the implementation sends;
+> this is a valid 3xx redirect per RFC 6749 §4.1.2, which does not mandate
+> a specific redirect status code.
 
 ---
 
@@ -359,5 +368,18 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
   `AuthorizationServerClient.init` no longer throws "Invalid authorization
   endpoint" even for issuers that only previously supported pre-auth.
   Regenerated `openapi-wallet.json`; `openapi.json` unaffected. `cargo test
+  --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo fmt --check` all clean.
+- 2026-07-28 — Task 6 (end-to-end wiring, OpenAPI regen, integration
+  test) — commit `ec93876`. **All 6 tasks complete; plan finished.**
+  Registered `authorize_handler` in `WalletApiDoc`; regenerated
+  `openapi-wallet.json` (gained `/authorize`); `openapi.json` unaffected.
+  New `crates/foundry/tests/authorization_code_flow.rs` exercises the full
+  HTTP round trip (offer creation -> /authorize with real PKCE -> /token)
+  through the real axum routers, plus a dedicated test for the untrusted-
+  redirect-uri 400 path reaching the HTTP layer. Clarification: redirect
+  responses are 303 See Other (axum's `Redirect::to`), not literally 302
+  as the plan's prose said informally — see note under Task 6 above.
+  `cargo test -p foundry`, `cargo test -p foundry-issuer`, `cargo test
   --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo fmt --check` all clean.
