@@ -46,10 +46,13 @@ pub struct ProofTypeSupported {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AuthorizationServerMetadata {
     pub issuer: String,
+    pub authorization_endpoint: String,
     pub token_endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce_endpoint: Option<String>,
     pub grant_types_supported: Vec<String>,
+    pub response_types_supported: Vec<String>,
+    pub code_challenge_methods_supported: Vec<String>,
     #[serde(rename = "pre-authorized_grant_anonymous_access_supported")]
     pub pre_authorized_grant_anonymous_access_supported: bool,
 }
@@ -110,11 +113,15 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
     let base = cfg.issuer.credential_issuer.trim_end_matches('/');
     AuthorizationServerMetadata {
         issuer: base.to_string(),
+        authorization_endpoint: format!("{base}/authorize"),
         token_endpoint: format!("{base}/token"),
         nonce_endpoint: Some(format!("{base}/nonce")),
         grant_types_supported: vec![
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string()
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            "authorization_code".to_string(),
         ],
+        response_types_supported: vec!["code".to_string()],
+        code_challenge_methods_supported: vec!["S256".to_string()],
         pre_authorized_grant_anonymous_access_supported: true,
     }
 }
@@ -234,8 +241,20 @@ mod tests {
         assert_eq!(meta.token_endpoint, "https://issuer.example.com/token");
         assert!(meta.pre_authorized_grant_anonymous_access_supported);
         assert_eq!(
+            meta.authorization_endpoint,
+            "https://issuer.example.com/authorize"
+        );
+        assert_eq!(meta.response_types_supported, vec!["code".to_string()]);
+        assert_eq!(
+            meta.code_challenge_methods_supported,
+            vec!["S256".to_string()]
+        );
+        assert_eq!(
             meta.grant_types_supported,
-            vec!["urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string()]
+            vec![
+                "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+                "authorization_code".to_string(),
+            ]
         );
     }
 }
