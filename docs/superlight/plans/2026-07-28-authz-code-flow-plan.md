@@ -275,11 +275,11 @@ style as `create_offer.rs`'s test module):
 
 **Verify:** `cargo test -p foundry-issuer metadata::`
 
-- [ ] Red
-- [ ] Green
-- [ ] Refactor
-- [ ] Verify
-- [ ] Commit
+- [x] Red
+- [x] Green
+- [x] Refactor
+- [x] Verify
+- [x] Commit
 
 ---
 
@@ -350,5 +350,14 @@ full workspace gate: `cargo test --workspace && cargo clippy --workspace --all-t
   commit `4ef0cd1`. Regenerated `openapi-wallet.json` (`TokenRequest`
   gained `code`/`redirect_uri`/`client_id`/`code_verifier`); `openapi.json`
   (Admin API) unaffected since `/token` is wallet-facing only. `cargo test
+  --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo fmt --check` all clean.
+- 2026-07-28 — Task 5 (Authorization Server Metadata fields) — commit
+  `f79ef86`. This is the change that actually resolves the original
+  interop bug: `authorization_endpoint` is now always present in AS
+  metadata, so `eudi-lib-ios-openid4vci-swift`'s
+  `AuthorizationServerClient.init` no longer throws "Invalid authorization
+  endpoint" even for issuers that only previously supported pre-auth.
+  Regenerated `openapi-wallet.json`; `openapi.json` unaffected. `cargo test
   --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo fmt --check` all clean.
