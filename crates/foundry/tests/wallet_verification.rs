@@ -1235,6 +1235,23 @@ async fn form_encoded_response_parameter_is_accepted() {
     let result: VerificationResult = serde_json::from_str(&body).unwrap();
     assert!(result.verified, "expected a verified result, got: {body}");
     assert_eq!(result.claims["given_name"], "Alice");
+
+    // Assert the named checks, not just `verified`. Per root AGENTS.md §4.2 an
+    // omitted CheckResult silently drops out of `all(passed)` and can turn a
+    // failure into a pass, so `verified: true` alone cannot detect a lost check.
+    let names: Vec<&str> = result.checks.iter().map(|c| c.check.as_str()).collect();
+    for expected in [
+        "jwe_decryption",
+        "sd_jwt_vc_signature_and_kb_jwt",
+        "dcql_match",
+        "status_check",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing check '{expected}' in {names:?}"
+        );
+    }
+    assert!(result.checks.iter().all(|c| c.passed));
 }
 
 /// The pre-fix convention — a bare JWE as the whole request body — is no longer
