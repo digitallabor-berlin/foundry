@@ -27,7 +27,7 @@ Measured facts establishing the problem (all verified via `cargo metadata`,
 
    | Item | Upstream module size | Consumers |
    |---|---|---|
-   | `core::jwe::JweBuilder` | 484 lines | production: `crates/foundry-wallet/src/actions/verification.rs:156`; tests: `crates/foundry-verifier/src/verify.rs` (×3), `crates/foundry/tests/e2e_full_flow.rs`, `crates/foundry/tests/wallet_verification.rs` |
+   | `core::jwe::JweBuilder` | 484 lines | **13 call sites.** Production ×1: `crates/foundry-wallet/src/actions/verification.rs:156`. Tests ×12: `crates/foundry-verifier/src/verify.rs` lines 368, 402, 471, 536, 639; `crates/foundry/tests/wallet_verification.rs` lines 286, 437, 661, 783, 906, 1062; `crates/foundry/tests/e2e_full_flow.rs` line 436 |
    | `core::credential_format::ClaimFormatDesignation` | 277 lines | `crates/foundry-verifier/src/dcql.rs` — two variants only (`DcSdJwt`, `MsoMDoc`) |
    | `core::dcql_query::{DcqlQuery, DcqlCredentialQuery, DcqlCredentialClaimsQueryPath, DcqlCredentialClaimsQueryValue}` | 738 lines | `crates/foundry-verifier/src/dcql.rs` (248 lines) |
 
@@ -128,9 +128,11 @@ pub fn encrypt_compact(
 ) -> Result<String, CryptoError>
 ```
 
-A free function, not a builder: there is one production call site and five test
-call sites, all of which pass all four inputs. A builder would exist only to
-mirror a general-purpose library's ergonomics.
+A free function, not a builder: all 13 call sites (1 production, 12 test) pass
+the same four inputs in the same order — `payload`, recipient JWK, `"ECDH-ES"`,
+`"A128GCM"`. A builder would exist only to mirror a general-purpose library's
+ergonomics, and would make the 13 mechanical rewrites longer rather than
+shorter.
 
 Implementation uses `josekit` directly:
 `josekit::jwe::ECDH_ES.encrypter_from_jwk(&jwk)` plus
@@ -338,12 +340,22 @@ the sequence, and the check names are identical.
   `josekit::jwe::ECDH_ES.decrypter_from_jwk` + `jwt::decode_with_decrypter`;
   assert the payload survives. Plus: unsupported `alg`/`enc` returns `Err`, not
   a panic; malformed recipient JWK returns `Err`.
-- **JWE integration guard (existing).** The three tests in
-  `crates/foundry-verifier/src/verify.rs` and the two workspace tests in
-  `crates/foundry/tests/{e2e_full_flow,wallet_verification}.rs` currently
-  construct JWEs with the vendored builder. They are switched to
-  `encrypt_compact` and MUST otherwise pass **unmodified** — no assertion
-  relaxation. This is the real proof of wire compatibility.
+- **JWE integration guard (existing).** All **12 test call sites** currently
+  construct JWEs with the vendored builder:
+  `crates/foundry-verifier/src/verify.rs` (5: lines 368, 402, 471, 536, 639),
+  `crates/foundry/tests/wallet_verification.rs` (6: lines 286, 437, 661, 783,
+  906, 1062), `crates/foundry/tests/e2e_full_flow.rs` (1: line 436). Every one
+  is switched to `encrypt_compact`; each MUST otherwise pass **unmodified** —
+  no assertion relaxation, no changed expectations. This is the real proof of
+  wire compatibility, and its breadth is why it is the guard rather than the
+  new unit test.
+- **The e2e call site is `#[ignore]`d and needs an explicit run.**
+  `crates/foundry/tests/e2e_full_flow.rs:483` is the only `#[ignore]`d test in
+  the workspace, so `cargo test --workspace` never executes the JWE call site
+  at line 436. Verification MUST additionally run
+  `cargo test -p foundry --test e2e_full_flow -- --ignored`, or 1 of the 13
+  migrated sites is unproven. If that test cannot run in the environment, that
+  is a blocker to report, not a step to skip.
 - **DCQL conformance guard (existing).** The `#[cfg(test)] mod tests` block in
   `crates/foundry-verifier/src/dcql.rs` (lines 175-248) exercises real DCQL
   JSON. It MUST pass **unmodified** against the rewritten model. If any of
@@ -360,7 +372,11 @@ the sequence, and the check names are identical.
   below 743; `grep -rn 'oid4vci\|openid4vp' --include='*.rs' crates/` must
   return no hits outside `openid4vp://` URI string literals.
 - **Full gates** as listed in Global Constraints, run and observed before any
-  completion claim.
+  completion claim — plus the `--ignored` e2e run noted above.
+- **Expected post-deletion total:** 420 − 24 (`oid4vci`) − 86 (`openid4vp`) − 3
+  (`openid4vp` doc-tests) = **307 passed**. The stronger invariant is that no
+  `foundry*` test target's count changes; the plan carries the per-target
+  baseline table for that comparison.
 
 ## Open Questions
 
