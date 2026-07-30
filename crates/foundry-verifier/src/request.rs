@@ -26,6 +26,16 @@ fn default_transport() -> String {
     "request_uri".to_string()
 }
 
+/// The only `response_type` defined for an OpenID4VP presentation request
+/// (OpenID4VP v1.0 §5, where the parameter is REQUIRED).
+///
+/// Wallets enforce this strictly and early: the EUDI reference iOS wallet aborts
+/// request resolution unless `response_type` is both present and parseable into
+/// its `ResponseType` enum, which happens *before* the DCQL query is inspected —
+/// so omitting it surfaces as a misleading DCQL error rather than a missing
+/// parameter. It must be emitted on every transport.
+const RESPONSE_TYPE_VP_TOKEN: &str = "vp_token";
+
 /// Response-encryption parameters advertised to wallets, sourced from
 /// `verifier.response_encryption`. Defaults match OpenID4VP v1.0 §8.3.
 fn response_encryption_params(config: &Config) -> (String, String) {
@@ -190,6 +200,7 @@ pub async fn create_verification_request(
 
     if transport_str == "dc_api" {
         let dc_api_obj = serde_json::json!({
+            "response_type": RESPONSE_TYPE_VP_TOKEN,
             "response_mode": "dc_api.jwt",
             "dcql_query": dcql,
             "nonce": nonce,
@@ -260,6 +271,10 @@ pub fn build_signed_request_object(
     let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
     let mut payload_map = serde_json::Map::new();
+    payload_map.insert(
+        "response_type".to_string(),
+        serde_json::json!(RESPONSE_TYPE_VP_TOKEN),
+    );
     payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     payload_map.insert("response_uri".to_string(), serde_json::json!(response_uri));
     payload_map.insert(
@@ -734,6 +749,76 @@ mod tests {
         assert_eq!(
             payload["client_metadata"]["vp_formats_supported"], expected,
             "signed request object client_metadata must advertise vp_formats_supported"
+        );
+    }
+
+    /// OpenID4VP v1.0 §5 makes `response_type` a REQUIRED Authorization Request
+    /// parameter, and `vp_token` is the only value defined for a presentation
+    /// request. Wallets treat it as a hard gate: the EUDI reference iOS wallet
+    /// resolves the request object into an `UnvalidatedRequestObject` and then
+    /// requires both that `response_type` is present and that it parses into its
+    /// `ResponseType` enum, otherwise resolution is abandoned before the DCQL
+    /// query is ever looked at.
+    #[tokio::test]
+    async fn test_authorization_request_advertises_response_type_vp_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        // dc_api transport: the request object is returned inline.
+        let dc_res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "dc_api".to_string(),
+                transaction_data: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dc_res.dc_api_request.unwrap()["response_type"],
+            serde_json::json!("vp_token"),
+            "dc_api request must advertise response_type=vp_token"
+        );
+
+        // request_uri transport: the request object is the signed JWS payload.
+        let res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let jws_str = build_signed_request_object(&config, &tx).unwrap();
+        let parts: Vec<&str> = jws_str.split('.').collect();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(
+            payload["response_type"],
+            serde_json::json!("vp_token"),
+            "signed request object must advertise response_type=vp_token"
         );
     }
 
