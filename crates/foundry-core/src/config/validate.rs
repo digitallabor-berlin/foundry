@@ -230,10 +230,13 @@ mod tests {
                 alg: "ES256".to_string(),
             },
         );
-        cfg.issuer.key_attestation.trusted_anchors.push(TrustAnchor {
-            name: "wallet-provider-ca".to_string(),
-            certs: "does-not-exist.pem".to_string(),
-        });
+        cfg.issuer
+            .key_attestation
+            .trusted_anchors
+            .push(TrustAnchor {
+                name: "wallet-provider-ca".to_string(),
+                certs: "does-not-exist.pem".to_string(),
+            });
 
         let err = cfg.validate_key_material(dir.path()).unwrap_err();
         let msg = err.to_string();
@@ -263,10 +266,13 @@ mod tests {
                 alg: "ES256".to_string(),
             },
         );
-        cfg.issuer.key_attestation.trusted_anchors.push(TrustAnchor {
-            name: "wallet-provider-ca".to_string(),
-            certs: "wallet-provider-ca.pem".to_string(),
-        });
+        cfg.issuer
+            .key_attestation
+            .trusted_anchors
+            .push(TrustAnchor {
+                name: "wallet-provider-ca".to_string(),
+                certs: "wallet-provider-ca.pem".to_string(),
+            });
 
         cfg.validate_key_material(dir.path()).unwrap();
     }
