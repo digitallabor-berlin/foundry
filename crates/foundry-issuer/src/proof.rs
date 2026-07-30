@@ -137,7 +137,20 @@ pub fn verify_holder_proof(
         ));
     };
 
-    let verifier = ES256.verifier_from_jwk(&jwk).map_err(|e| {
+    // josekit's `verifier_from_jwk` copies the JWK's own `kid` member into the
+    // verifier's `key_id`, which then makes `decode_with_verifier` require a
+    // matching `kid` *header* claim on the JWS itself. For an OpenID4VCI proof
+    // JWT the key is embedded inline (via `jwk` or resolved from
+    // `key_attestation`), so the outer JWS header legitimately has no `kid` —
+    // a `kid` on the JWK is just key metadata, not a signature requirement.
+    // Strip it before building the verifier so a wallet-supplied JWK `kid`
+    // doesn't spuriously fail proof verification.
+    let mut verifier_jwk = jwk.clone();
+    verifier_jwk.set_parameter("kid", None).map_err(|e| {
+        IssuanceError::InvalidProof(format!("unable to normalize jwk for verification: {e}"))
+    })?;
+
+    let verifier = ES256.verifier_from_jwk(&verifier_jwk).map_err(|e| {
         IssuanceError::InvalidProof(format!("unable to create verifier from jwk: {e}"))
     })?;
 
@@ -272,6 +285,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(res.holder_jwk.key_type(), "EC");
+    }
+
+    #[test]
+    fn verifies_valid_proof_jwt_when_embedded_jwk_has_its_own_kid() {
+        // Regression test: some wallets (e.g. eudi-lib-jvm-openid4vci-kt-based
+        // clients) set a `kid` member on the embedded `jwk` itself (typically a
+        // thumbprint), with no `kid` header on the outer JWS. josekit's
+        // `verifier_from_jwk` used to propagate that JWK-level `kid` into the
+        // verifier's key_id, which then made signature verification fail with
+        // "the JWS kid header claim is required" even though the proof is
+        // otherwise perfectly valid.
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut public_jwk = keypair.to_jwk_public_key();
+        public_jwk.set_algorithm("ES256");
+        public_jwk.set_key_id("some-thumbprint-or-key-id");
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header
+            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+            .unwrap();
+
+        let mut payload = JwtPayload::new();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .unwrap();
+
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
+        let res = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            "nonce-123",
+            1_700_000_100,
+            1_700_000_000,
+            Mode::Optional,
+            &empty_store,
+        )
+        .unwrap();
+
+        assert_eq!(res.holder_jwk.key_type(), "EC");
+        // The original jwk's kid is preserved on the returned holder_jwk even
+        // though it was stripped for verification purposes.
+        assert_eq!(res.holder_jwk.key_id(), Some("some-thumbprint-or-key-id"));
     }
 
     #[test]
