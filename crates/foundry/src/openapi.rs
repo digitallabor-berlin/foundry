@@ -57,7 +57,8 @@ pub fn generate_admin_openapi_spec() -> String {
         foundry_issuer::NonceResponse,
         foundry_issuer::CredentialRequest,
         foundry_issuer::CredentialResponse,
-        foundry_issuer::ProofObject,
+        foundry_issuer::IssuedCredential,
+        foundry_issuer::ProofsRequest,
         foundry_verifier::VerificationResult,
         foundry_verifier::CheckResult,
     ))
