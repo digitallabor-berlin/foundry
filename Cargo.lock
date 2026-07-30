@@ -2055,6 +2055,7 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+ "x509-cert 0.3.0",
 ]
 
 [[package]]

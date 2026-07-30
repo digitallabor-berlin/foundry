@@ -567,3 +567,118 @@ async fn second_credential_request_with_same_access_token_is_rejected() {
     let cred_json_2: serde_json::Value = serde_json::from_slice(&cred_bytes_2).unwrap();
     assert_eq!(cred_json_2["error"], "invalid_grant");
 }
+
+#[tokio::test]
+async fn full_issuance_flow_with_kid_key_attestation_proof() {
+    use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
+    use base64::Engine as _;
+    use foundry_core::pki::{issue_leaf, new_ca};
+    use foundry_core::trust::parse_cert_pem;
+
+    let (mut state, dir) = setup_test_app().await;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    // Configure a Wallet Provider trust anchor and require key attestation.
+    let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let ca_path = dir.path().join("wallet-provider-ca.pem");
+    std::fs::write(&ca_path, &ca.cert_pem).unwrap();
+
+    let mut config = (*state.config).clone();
+    config.issuer.key_attestation.mode = foundry_core::config::Mode::Required;
+    config.issuer.key_attestation.trusted_anchors = vec![foundry_core::config::TrustAnchor {
+        name: "wallet-provider-ca".to_string(),
+        certs: ca_path.to_str().unwrap().to_string(),
+    }];
+    state.config = Arc::new(config);
+
+    let access_token = issue_offer_and_get_access_token(&state).await;
+    let c_nonce = mint_c_nonce(&state, &access_token).await;
+
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut holder_pub = keypair.to_jwk_public_key();
+    holder_pub.set_algorithm("ES256");
+
+    let leaf_der = {
+        let cert = parse_cert_pem(leaf.cert_pem.as_bytes()).unwrap();
+        use x509_cert::der::Encode;
+        cert.to_der().unwrap()
+    };
+    let x5c = vec![B64STD.encode(&leaf_der)];
+    let attestation_header =
+        serde_json::json!({"typ": "key-attestation+jwt", "alg": "ES256", "x5c": x5c});
+    let attestation_payload = serde_json::json!({
+        "iss": "https://wallet-provider.example.com",
+        "iat": now,
+        "exp": now + 100_000,
+        "nonce": c_nonce,
+        "attested_keys": [serde_json::to_value(&holder_pub).unwrap()],
+    });
+    let h_b64 = B64URL.encode(serde_json::to_vec(&attestation_header).unwrap());
+    let p_b64 = B64URL.encode(serde_json::to_vec(&attestation_payload).unwrap());
+    let signing_input = format!("{h_b64}.{p_b64}");
+    let leaf_signer = foundry_core::crypto::FileSigner::from_pem(
+        leaf.key_pem.as_bytes(),
+        foundry_core::crypto::SignatureAlgorithm::Es256,
+    )
+    .unwrap();
+    let sig_b64 = B64URL.encode(
+        foundry_core::crypto::Signer::sign(&leaf_signer, signing_input.as_bytes()).unwrap(),
+    );
+    let attestation_jwt = format!("{signing_input}.{sig_b64}");
+
+    let mut proof_header = JwsHeader::new();
+    proof_header.set_token_type("openid4vci-proof+jwt");
+    proof_header
+        .set_claim("kid", Some(serde_json::json!("0")))
+        .unwrap();
+    proof_header
+        .set_claim("key_attestation", Some(serde_json::json!(attestation_jwt)))
+        .unwrap();
+    let mut proof_payload = JwtPayload::new();
+    proof_payload
+        .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+        .unwrap();
+    proof_payload
+        .set_claim("nonce", Some(serde_json::json!(c_nonce)))
+        .unwrap();
+    let private_jwk = keypair.to_jwk_private_key();
+    let proof_signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    let proof_jwt = jwt::encode_with_signer(&proof_payload, &proof_header, &proof_signer).unwrap();
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [proof_jwt] },
+    });
+
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::OK);
+
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
+    assert!(!credential_str.is_empty());
+}
