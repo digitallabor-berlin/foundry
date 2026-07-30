@@ -295,8 +295,8 @@ async fn full_verification_flow_end_to_end() {
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
 
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
@@ -445,8 +445,8 @@ async fn resubmitting_a_verification_response_is_rejected() {
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str.clone()))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
 
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
@@ -463,8 +463,8 @@ async fn resubmitting_a_verification_response_is_rejected() {
     let replay_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
 
     let replay_res = wallet_app.clone().oneshot(replay_req).await.unwrap();
@@ -534,8 +534,8 @@ async fn tampered_jwe_body_is_rejected_cleanly() {
     let garbage_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from("this-is-not-a-jwe-at-all"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("response=this-is-not-a-jwe-at-all"))
         .unwrap();
 
     let garbage_res = wallet_app.clone().oneshot(garbage_req).await.unwrap();
@@ -667,8 +667,8 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
 
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
@@ -691,8 +691,8 @@ async fn response_for_unknown_transaction_id_returns_404() {
     let req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{unknown_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from("irrelevant-body"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("response=irrelevant-body"))
         .unwrap();
 
     let res = wallet_app.clone().oneshot(req).await.unwrap();
@@ -788,8 +788,8 @@ async fn dcql_vct_mismatch_is_rejected() {
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
     assert_eq!(post_resp_res.status(), StatusCode::OK);
@@ -910,8 +910,8 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
     assert_eq!(post_resp_res.status(), StatusCode::OK);
@@ -1065,8 +1065,8 @@ async fn mdoc_presentation_is_accepted() {
     let post_resp_req = Request::builder()
         .method("POST")
         .uri(format!("/vp/response/{verification_id}"))
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(jwe_str))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
         .unwrap();
     let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
     assert_eq!(post_resp_res.status(), StatusCode::OK);
@@ -1084,4 +1084,233 @@ async fn mdoc_presentation_is_accepted() {
         .checks
         .iter()
         .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
+}
+
+// ---------------------------------------------------------------------------
+// OpenID4VP `direct_post.jwt` response shape
+//
+// foundry advertises `response_mode: direct_post.jwt`, which per OpenID4VP 1.0
+// §8.2/§8.3 obliges the wallet to POST `application/x-www-form-urlencoded` with
+// the JWE carried in a `response` parameter. These tests pin that wire format.
+// ---------------------------------------------------------------------------
+
+/// Drive a verification to the point where a wallet holds a valid JWE: create
+/// the request, fetch and parse the request object, issue an SD-JWT VC to a
+/// fresh holder key, attach the KB-JWT, and encrypt to the verifier's ephemeral
+/// key. Returns the wallet router, the verification id, the JWE compact
+/// serialization, and the `TempDir` (which the caller must keep alive — dropping
+/// it deletes the SQLite file out from under the running app).
+async fn pending_verification_with_jwe() -> (axum::Router, String, String, tempfile::TempDir) {
+    let (state, dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "request_uri"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    assert_eq!(parts.len(), 3);
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    (wallet_app, verification_id, jwe_str, dir)
+}
+
+/// Read a response's status and body together, so a failing assertion can show
+/// the error payload instead of only a bare status code.
+async fn status_and_body(res: axum::response::Response) -> (StatusCode, String) {
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// The conformant OpenID4VP shape. This is the regression test for the defect
+/// reported against the eudi-pal wallet, which failed with
+/// `Invalid JWE format: Invalid symbol 61, offset 8` — the `=` at index 8 of
+/// the literal `response=` parameter name, fed to a base64url decoder.
+#[tokio::test]
+async fn form_encoded_response_parameter_is_accepted() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_jwe().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "conformant direct_post.jwt response was rejected: {body}"
+    );
+
+    let result: VerificationResult = serde_json::from_str(&body).unwrap();
+    assert!(result.verified, "expected a verified result, got: {body}");
+    assert_eq!(result.claims["given_name"], "Alice");
+}
+
+/// The pre-fix convention — a bare JWE as the whole request body — is no longer
+/// accepted. Keeping it working would preserve exactly the client/server
+/// symmetry that let the defect hide behind a green suite.
+#[tokio::test]
+async fn raw_jwe_request_body_is_rejected() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_jwe().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(jwe_str))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a bare JWE body must be rejected, got: {body}"
+    );
+
+    let err: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(err["error"], "invalid_request");
+}
+
+/// A syntactically valid form body that omits `response`. The assertion targets
+/// the parse-failure description rather than the bare status: before the fix
+/// this path also returned 400, but via the decryption error, so a status-only
+/// assertion would pass for the wrong reason.
+#[tokio::test]
+async fn form_body_without_response_parameter_is_rejected() {
+    let (wallet_app, verification_id, _jwe_str, _dir) = pending_verification_with_jwe().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("state=abc"))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+
+    let err: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(err["error"], "invalid_request");
+    let description = err["error_description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("response"),
+        "error must name the missing `response` parameter, not report a decryption \
+         failure; got: {description}"
+    );
+}
+
+/// OpenID4VP permits additional members in the response. Rejecting them would
+/// break conformant wallets, so the form struct must not use
+/// `deny_unknown_fields`.
+#[tokio::test]
+async fn extra_form_parameters_are_tolerated() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_jwe().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}&state=abc")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unknown `state` parameter must be ignored, not rejected: {body}"
+    );
+
+    let result: VerificationResult = serde_json::from_str(&body).unwrap();
+    assert!(result.verified);
 }

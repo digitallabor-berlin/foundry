@@ -172,7 +172,12 @@ pub async fn run_verification(
             WalletError::MalformedRequestObject("request url has no path segment".to_string())
         })?
     );
-    let (status, resp_body) = http.post_text(&response_url, &jwe_str).await?;
+    // OpenID4VP 1.0 §8.2/§8.3: a `direct_post.jwt` response is form-encoded with
+    // the JWE in a `response` parameter. No percent-encoding is needed for the
+    // value — a JWE compact serialization is base64url (`A-Z a-z 0-9 - _`) plus
+    // `.` separators, every one of which is RFC 3986 unreserved.
+    let form = format!("response={jwe_str}");
+    let (status, resp_body) = http.post_form(&response_url, None, &form).await?;
     ensure_2xx(status, &response_url, &resp_body)?;
     let result: VerificationResult = serde_json::from_str(&resp_body)?;
     Ok(VerificationOutcome::Verified(result))

@@ -110,23 +110,6 @@ impl LoggingHttpClient {
         self.finish(resp).await
     }
 
-    pub async fn post_text(&self, url: &str, text_body: &str) -> WalletResult<(u16, String)> {
-        self.log_request(
-            "POST",
-            url,
-            &serde_json::json!({"content-type": "text/plain"}),
-            text_body,
-        )?;
-        let resp = self
-            .client
-            .post(url)
-            .header("content-type", "text/plain")
-            .body(text_body.to_string())
-            .send()
-            .await?;
-        self.finish(resp).await
-    }
-
     pub async fn post_empty(&self, url: &str, bearer: Option<&str>) -> WalletResult<(u16, String)> {
         let mut req = self.client.post(url);
         if let Some(token) = bearer {

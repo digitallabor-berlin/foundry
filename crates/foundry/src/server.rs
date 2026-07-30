@@ -567,6 +567,21 @@ async fn get_request_object_handler(
     ))
 }
 
+/// The OpenID4VP `direct_post.jwt` authorization response body.
+///
+/// The verifier advertises `response_mode: direct_post.jwt`, so per OpenID4VP
+/// 1.0 §8.2/§8.3 the wallet POSTs `application/x-www-form-urlencoded` with the
+/// JWE compact serialization in a `response` parameter.
+///
+/// Deliberately **not** `deny_unknown_fields`: §8 permits additional members
+/// (wallets commonly echo `state`), and rejecting them would break conformant
+/// wallets.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct VpResponseForm {
+    /// JWE compact serialization of the VP Token response.
+    response: String,
+}
+
 #[utoipa::path(
     post,
     path = "/vp/response/{id}",
@@ -576,8 +591,25 @@ async fn get_request_object_handler(
 async fn post_response_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    encrypted_jwe_str: String,
+    body_bytes: axum::body::Bytes,
 ) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
+    // Parse before touching storage: a malformed body is malformed regardless of
+    // whether the transaction exists, so rejecting it first keeps the 400
+    // deterministic instead of returning 400 or 404 depending on the id.
+    let form: VpResponseForm = serde_html_form::from_bytes(&body_bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": format!(
+                    "expected an application/x-www-form-urlencoded body with a `response` parameter \
+                     carrying the JWE (OpenID4VP direct_post.jwt): {e}"
+                )
+            })),
+        )
+    })?;
+    let encrypted_jwe_str = form.response;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

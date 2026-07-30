@@ -443,8 +443,8 @@ async fn run_verification(
 
     let post_res = client
         .post(format!("{wallet_base}/vp/response/{verification_id}"))
-        .header("content-type", "text/plain")
-        .body(jwe_str)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("response={jwe_str}"))
         .send()
         .await
         .expect("POST /vp/response/:id");
