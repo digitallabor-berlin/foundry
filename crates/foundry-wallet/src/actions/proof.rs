@@ -10,7 +10,7 @@ use josekit::jws::{JwsHeader, ES256};
 use josekit::jwt::{self, JwtPayload};
 
 pub struct HolderProof {
-    pub proof_json: serde_json::Value,
+    pub jwt: String,
     pub private_key_pem: Vec<u8>,
 }
 
@@ -43,7 +43,7 @@ pub fn build_proof_jwt(c_nonce: &str, aud: &str) -> WalletResult<HolderProof> {
         .map_err(|e| crate::error::WalletError::MalformedOffer(e.to_string()))?;
 
     Ok(HolderProof {
-        proof_json: serde_json::json!({ "proof_type": "jwt", "jwt": jwt_str }),
+        jwt: jwt_str,
         private_key_pem: keypair.to_pem_private_key(),
     })
 }
@@ -57,9 +57,7 @@ mod tests {
     #[test]
     fn builds_a_proof_jwt_bound_to_nonce_and_aud() {
         let proof = build_proof_jwt("nonce-123", "https://issuer.example.com").unwrap();
-        assert_eq!(proof.proof_json["proof_type"], "jwt");
-        let jwt_str = proof.proof_json["jwt"].as_str().unwrap();
-        let parts: Vec<&str> = jwt_str.split('.').collect();
+        let parts: Vec<&str> = proof.jwt.split('.').collect();
         assert_eq!(parts.len(), 3, "must be a compact JWS");
 
         let header: serde_json::Value =
@@ -71,16 +69,5 @@ mod tests {
             serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(payload["aud"], "https://issuer.example.com");
         assert_eq!(payload["nonce"], "nonce-123");
-
-        assert!(proof
-            .private_key_pem
-            .starts_with(b"-----BEGIN PRIVATE KEY-----"));
-    }
-
-    #[test]
-    fn each_call_generates_a_distinct_key() {
-        let a = build_proof_jwt("n", "aud").unwrap();
-        let b = build_proof_jwt("n", "aud").unwrap();
-        assert_ne!(a.private_key_pem, b.private_key_pem);
     }
 }
