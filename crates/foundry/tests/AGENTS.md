@@ -56,8 +56,9 @@ Two distinct styles are in use:
    for a log line before proceeding.
 
 Dev-dependencies available here: `tempfile`, `tower` (`util`), `reqwest`,
-`josekit`, `base64`, `coset`, plus the format crates and vendored `openid4vp`
-for constructing credentials and Status List Tokens by hand.
+`josekit`, `base64`, `coset`, plus the format crates, for constructing
+credentials and Status List Tokens by hand. Encrypted OpenID4VP responses are
+built with `foundry_core::crypto::jwe::encrypt_compact`.
 
 ## When Adding a Test
 

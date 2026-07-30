@@ -15,9 +15,6 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 | `foundry-issuer` | `crates/foundry-issuer` | Framework-agnostic OpenID4VCI business logic: metadata builders, transaction lifecycle, CSPRNG status-list index allocation, and offer creation. |
 | `foundry-sd-jwt-vc` | `crates/foundry-sd-jwt-vc` | SD-JWT VC issuing, disclosure calculation, holder binding (KB-JWT), and verification. |
 | `foundry-mdoc` | `crates/foundry-mdoc` | ISO/IEC 18013-5 mdoc / CBOR / COSE IssuerAuth builder and DeviceAuth verifier. |
-| `oid4vci` | `crates/oid4vci` | Vendored OpenID4VCI protocol models and proof verifier. |
-| `openid4vp` | `crates/openid4vp` | Vendored OpenID4VP protocol types and verifier engine. |
-| `openid4vp-frontend` | `crates/openid4vp-frontend` | Frontend helpers for presentation flows. |
 | `foundry-wallet` | `crates/foundry-wallet` | Debug EUDI wallet CLI/TUI for exercising and inspecting `foundry`'s OpenID4VCI issuance and OpenID4VP verification flows end-to-end. See [Debug Wallet CLI/TUI](#debug-wallet-clitui-foundry-wallet) below. |
 
 ---

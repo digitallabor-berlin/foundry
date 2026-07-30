@@ -17,8 +17,7 @@ restated here.
 ## Position in the Dependency Graph
 
 - **Depends on:** `foundry-core`, `foundry-issuer`, `foundry-verifier`,
-  `foundry-sd-jwt-vc`, `foundry-mdoc`, vendored `openid4vp`, plus `axum`,
-  `tokio`, `clap`, `utoipa`.
+  `foundry-sd-jwt-vc`, `foundry-mdoc`, plus `axum`, `tokio`, `clap`, `utoipa`.
 - **Consumed by:** `foundry-wallet` — for real-subprocess E2E tests only.
 - **Must never be depended on** by any engine or format crate.
 

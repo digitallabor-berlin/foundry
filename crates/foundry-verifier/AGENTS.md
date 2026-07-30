@@ -14,8 +14,9 @@ is computed from named `CheckResult` records.
 
 ## Position in the Dependency Graph
 
-- **Depends on:** `foundry-core`, `foundry-sd-jwt-vc`, `foundry-mdoc`, vendored
-  `openid4vp` (for `DcqlQuery` / `ClaimFormatDesignation`).
+- **Depends on:** `foundry-core`, `foundry-sd-jwt-vc`, `foundry-mdoc`. The DCQL
+  wire model is foundry-owned (`dcql_model.rs`) — there is no protocol-library
+  dependency.
 - **Consumed by:** `crates/foundry` (HTTP handlers), `crates/foundry-wallet`.
 - **Must never depend on:** `foundry-issuer` or `crates/foundry`.
 
@@ -29,6 +30,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_san_dns:<host>` from `server.wallet_facing.public_base_url` |
 | `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
+| `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Three spec non-empty constraints are enforced at deserialization (`credentials`, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
 | `transaction.rs` | `VerificationTransaction`, `VerificationState`, `CheckResult`, `VerificationResult`, and `Storage`-backed persistence (namespace `verification_tx`) — **note: the result/check types live here, not in `error.rs`** |
 | `error.rs` | The `VerificationError` enum only |

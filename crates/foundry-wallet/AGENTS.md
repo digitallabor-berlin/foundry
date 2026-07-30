@@ -19,7 +19,7 @@ Usage, config reference, and TUI walkthrough: [`README.md`](../../README.md)
 ## Position in the Dependency Graph
 
 - **Depends on:** `foundry-core`, `foundry-issuer`, `foundry-verifier`,
-  `foundry-sd-jwt-vc`, vendored `openid4vp`, **and `crates/foundry` itself** —
+  `foundry-sd-jwt-vc`, **and `crates/foundry` itself** —
   the latter because the integration tests boot the real `admin_router` /
   `wallet_router` in-process (see Tests).
 - **Top of the stack: nothing depends on this crate.** No `foundry-*` crate may

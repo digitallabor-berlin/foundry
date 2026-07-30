@@ -32,9 +32,6 @@ see **[`README.md`](README.md)** — this file does not restate it.
 | `crates/foundry` | Binary: CLI, Axum dual-listener HTTP server, OpenAPI, admin auth | [`crates/foundry/AGENTS.md`](crates/foundry/AGENTS.md) |
 | `crates/foundry/tests` | Workspace-level integration tests (which file covers what) | [`crates/foundry/tests/AGENTS.md`](crates/foundry/tests/AGENTS.md) |
 | `crates/foundry-wallet` | Debug EUDI wallet CLI/TUI for exercising issuance + verification end-to-end | [`crates/foundry-wallet/AGENTS.md`](crates/foundry-wallet/AGENTS.md) |
-| `crates/oid4vci` | **Vendored** protocol baseline — do not restructure | [`crates/oid4vci/AGENTS.md`](crates/oid4vci/AGENTS.md) |
-| `crates/openid4vp` | **Vendored** protocol baseline — do not restructure | [`crates/openid4vp/AGENTS.md`](crates/openid4vp/AGENTS.md) |
-| `crates/openid4vp-frontend` | **Vendored** path-dependency of `openid4vp` (tiny). Same rules as the vendored crates above; see [`docs/VENDORING.md`](docs/VENDORING.md). | — |
 
 ---
 
@@ -60,8 +57,11 @@ foundry-wallet                            (debug client; depends on foundry for 
 engines. If you need shared behaviour between two crates at the same layer, it
 belongs in `foundry-core`.
 
-Vendored crates (`oid4vci`, `openid4vp`, `openid4vp-frontend`) sit outside this
-hierarchy and must never depend on any `foundry-*` crate.
+The workspace contains **no vendored third-party crates**. Every protocol model
+foundry relies on is foundry-owned: OpenID4VCI metadata and proof types in
+`foundry-issuer`, the DCQL wire model in `foundry-verifier` (`dcql_model.rs`),
+and JOSE/JWE primitives in `foundry-core` (`crypto/`). Prefer extending those
+over introducing a protocol dependency.
 
 ---
 

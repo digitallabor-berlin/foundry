@@ -1,6 +1,6 @@
 //! OpenID4VCI Credential Issuer Metadata and OAuth Authorization Server
-//! Metadata, hand-rolled (see plan header for the documented divergence
-//! from the vendored `oid4vci` crate's generic types).
+//! Metadata, defined directly against the specification rather than derived
+//! from a generic protocol library's types.
 
 use foundry_core::config::Config;
 use serde::Serialize;

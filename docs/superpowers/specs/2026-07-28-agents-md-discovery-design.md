@@ -1,8 +1,16 @@
 # Design: Hierarchical AGENTS.md for Agent Discovery
 
 **Date:** 2026-07-28
-**Status:** Approved
+**Status:** Approved — **partially superseded 2026-07-30**
 **Scope:** Documentation only — no source or build changes.
+
+> **Superseding note (2026-07-30).** The vendored `oid4vci`, `openid4vp` and
+> `openid4vp-frontend` crates were removed from the workspace (see
+> `docs/superlight/changes/2026-07-30-remove-vendored-crates.md`). Consequently
+> the "vendor guard" rows below, `crates/oid4vci/AGENTS.md`,
+> `crates/openid4vp/AGENTS.md` and `docs/VENDORING.md` no longer exist. The
+> hierarchical-AGENTS.md design this document describes is otherwise unchanged
+> and still in force; only the vendored-crate portions are historical.
 
 ---
 

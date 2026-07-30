@@ -31,6 +31,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
 | `crypto/signer.rs` | `FileSigner` — PEM-file-backed `Signer` implementation |
+| `crypto/jwe.rs` | `encrypt_compact(payload, recipient_public_jwk, alg, enc)` — ECDH-ES JWE compact serialization over `josekit`, the encrypt counterpart to `foundry-verifier`'s decrypt path. Rejects any `alg` other than `ECDH-ES` rather than emitting a header that misdescribes the ciphertext |
 | `error.rs` | All error enums plus the `CoreError` umbrella and `CoreResult<T>` alias |
 | `pki/mod.rs` | **Dev-only** PKI: `KeyMaterial`, `CertMaterial`, `generate_ec_key`, `new_ca`, `issue_leaf` |
 | `status_list/mod.rs` | Token Status List (IETF `draft-ietf-oauth-status-list-14`): status packing, zlib compression, `StatusList`, signed Status List Token build/sign/verify, and `Storage`-backed persistence |
