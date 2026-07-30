@@ -5,6 +5,7 @@
 **Track:** C (investigate) → B (spec + plan)
 **Branch:** superlight/2026-07-30-vp-token-envelope-parsing
 **Predecessor:** docs/superlight/changes/2026-07-30-vp-response-form-parsing.md
+**Revised:** 2026-07-30 — scope expanded at the Phase 3 gate; see §12.
 
 ---
 
@@ -90,8 +91,6 @@ known limitations:
   jwkThumbprint, responseUri])))]]` (`Openid4VpUtils.swift:48-53`). Different
   member order, no label, no hash, and no JWK thumbprint — which is mandatory
   under `direct_post.jwt`. Real mdoc device signatures cannot verify.
-- Validating `dcql_query` at transaction-creation time (see §7 D3).
-- Tightening `dcql_match` to the specifically answered query id (see §7 D4).
 - The response body shape (`VerificationResult` vs `{"redirect_uri": …}`),
   already recorded as a follow-up by the predecessor change.
 
@@ -159,15 +158,20 @@ Algorithm:
      `device_signature` → existing `verify_mdoc` call, unchanged.
    - A type mismatch here is a structural error naming both the declared format
      and the received JSON type.
-6. The resulting `PresentedFormat` is passed to `check_dcql_match` exactly as
-   today.
+6. The `PresentedFormat` **and the matched query id** are passed to
+   `check_dcql_match`, which now requires that specific query to be satisfied
+   (D4).
 
 Note on step 6: deriving the format from the DCQL query makes
-`check_dcql_match`'s own format-matching arm non-discriminating **for the
-matched query**. The protection is not lost — it moves to step 5, earlier and
-with a clearer error — and the arm still filters when several credential
-queries of differing formats exist. This is a deliberate relocation, not a
-removal.
+`check_dcql_match`'s old format-matching arm non-discriminating, because the
+format now comes from the very query being checked. Rather than leave a
+vestigial check, D4 replaces "any query of this format" with "this query, by
+id" — strictly stronger, and the shape protection remains at step 5 where it
+produces a clearer error.
+
+`check_dcql_match` is `pub` and also called by the debug wallet's
+`match_credentials`, which already tracks `query_id` per entry
+(`MatchedCredential.query_id`); that call site is updated in the same change.
 
 ## 7. Decisions
 
@@ -178,19 +182,33 @@ removal.
 - **D2 — Validate the key against DCQL ids.** Rather than accepting whatever
   single entry arrives. Required to determine the format anyway, and it binds
   the response to the request.
-- **D3 — Unparseable `dcql_query` is a structural error.** Today that yields
-  `200 verified:false` through `check_dcql_match` (`dcql.rs:52`), because
-  `create_verification_request` stores `dcql_query` as an opaque
-  `serde_json::Value` without validating it (`request.rs:208-273`). We cannot
-  determine which format to verify, and *inferring it from shape is precisely
-  the bug class being removed*. **Honest consequence:** the "not a valid DCQL
-  query" branch of `check_dcql_match` remains unit-tested but becomes
-  unreachable from the request path. The real fix — validating at creation time
-  — is a follow-up, not this run.
-- **D4 — `dcql_match` semantics unchanged.** It still requires *some* credential
-  query of the presented format to be satisfied, rather than specifically the
-  answered query id. Tightening it is a genuine improvement and explicit scope
-  creep; deferred.
+- **D3 — Unparseable `dcql_query` is a structural error at verification, and is
+  now also rejected at creation.** `create_verification_request` stores
+  `dcql_query` as an opaque `serde_json::Value` without validating it
+  (`request.rs:208-273`), so today a broken query reaches the wallet and only
+  surfaces as `200 verified:false` via `check_dcql_match` (`dcql.rs:52`).
+  Verification keeps the hard error — we cannot know which format to verify, and
+  *inferring it from shape is precisely the bug class being removed* — and
+  creation-time validation makes that error unreachable in practice by failing
+  the operator's request instead of the wallet's presentation. **Blast radius,
+  accepted deliberately:** `DcqlQuery` requires non-empty `credentials`
+  (`dcql_model.rs:65`), so two existing artifacts become invalid and are fixed
+  as part of this change — the shipped `over18` named query in `config.yaml`
+  (`credentials: []`) and `test_create_verification_request_dc_api`
+  (`request.rs:580-596`), which currently asserts that an empty query *succeeds*.
+  Both are latent defects: an empty DCQL query asks for nothing, and a wallet
+  receiving one cannot present anything.
+- **D4 — `dcql_match` is tightened to the answered query id.** The wallet states
+  which credential query each presentation answers; matching "any query of the
+  presented format" discards that. `check_dcql_match` gains an
+  `answered_query_id` parameter and requires *that* query to be satisfied. This
+  also removes the need for `select_presentation` to hide its query id, so the
+  two changes are implemented together (see §12).
+- **D5 — OpenAPI specs get a drift test.** Inherited gap from the predecessor
+  change: nothing asserted that the committed `openapi.json` /
+  `openapi-wallet.json` match generator output.
+  `generate_admin_openapi_spec()` and `generate_wallet_openapi_spec()`
+  (`openapi.rs:32,70`) are already public, so the test is a direct comparison.
 
 ## 8. Error Taxonomy
 
@@ -226,6 +244,29 @@ which needs no JWE:
 - `dc+sd-jwt` query answered with an object, and `mso_mdoc` answered with a
   string → both rejected, message names the declared format
 - unparseable `dcql_query` → rejected
+
+**Unit — D4 (`foundry-verifier/src/dcql.rs`)**
+
+- a presentation answering query `a` that satisfies only query `b` now **fails**,
+  where it previously passed by matching `b`. This is the behaviour change D4
+  buys and must be asserted directly.
+- an `answered_query_id` absent from the query → failed check (fail-closed),
+  since the wallet-side caller can pass an arbitrary id.
+
+**Unit — D3 (`foundry-verifier/src/request.rs`)**
+
+- `create_verification_request` rejects a malformed `dcql_query`.
+- it rejects `{"credentials": []}` — the case `test_create_verification_request_dc_api`
+  currently asserts succeeds; that test is rewritten around a valid query.
+- a valid query still succeeds, for every transport.
+
+**Drift — D5 (`foundry/tests/`)**
+
+- committed `openapi.json` equals `generate_admin_openapi_spec()`.
+- committed `openapi-wallet.json` equals `generate_wallet_openapi_spec()`.
+- Compared as parsed JSON so the assertion tracks *content* drift rather than
+  serializer whitespace, and the failure message must name the regeneration
+  command.
 
 **Integration (`foundry/tests/wallet_verification.rs`)**
 
@@ -265,3 +306,39 @@ test that proves client and server agree.
 3. The bespoke shapes are rejected with actionable messages.
 4. mdoc's remaining non-conformance (§4) is documented in code and
    `AGENTS.md` — not left implicit behind a green test.
+5. A malformed or empty `dcql_query` fails the operator's create request (D3).
+6. `dcql_match` binds to the answered query id (D4).
+7. OpenAPI drift is caught by a test (D5).
+
+---
+
+## 12. Revision — Scope Expansion
+
+The original spec deferred four known limitations. At the Phase 3 gate the human
+partner asked whether they could be fixed in this run. Assessment:
+
+| Limitation | Decision | Reason |
+|---|---|---|
+| OpenAPI drift test | **in scope** (D5) | generators already public; ~20 lines, near-zero risk |
+| `dcql_match` any-query matching | **in scope** (D4) | strictly stronger, and *simplifies* the design — folded into the same task as the parser since it changes `select_presentation`'s signature |
+| `dcql_query` unvalidated at creation | **in scope** (D3) | closes the hole properly; surfaces two further latent defects, fixed here |
+| mdoc payload + SessionTranscript (defects 2–3) | **still deferred** | see below |
+
+**Why mdoc interop stays out.** Not difficulty — unverifiability. Two facts:
+
+1. No RFC 7638 JWK thumbprint implementation exists anywhere in the workspace
+   (`grep -rn 'thumbprint\|7638'` finds only unrelated literals in
+   `foundry-issuer/src/proof.rs`), so byte-exact canonicalisation would be
+   written from scratch.
+2. `foundry-wallet` has **no** mdoc support at all (`grep 'mso_mdoc\|mdoc'`
+   across the crate returns nothing), so no in-repo client can produce a real
+   `DeviceResponse`.
+
+Any test would therefore have foundry generating the `DeviceResponse` *and*
+verifying it, against one author's reading of the spec on both sides — the exact
+self-consistency trap that produced defects 1, 2, and 3. A green test would
+manufacture false confidence, which is worse than a documented limitation.
+
+**Unblocking condition:** one captured real mdoc presentation from eudi-pal, or
+an official ISO/OpenID test vector, committed as a fixture. With that it becomes
+a normal TDD task.
