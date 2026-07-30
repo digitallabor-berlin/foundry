@@ -445,7 +445,7 @@ All other doc-test targets contribute 0.
 
 Append one line per completed task: date, task, commit SHA.
 
-- 2026-07-30 — Task 1 (`foundry-core` JWE helper) — commit `262c7f4`.
+- 2026-07-30 — Task 1 (`foundry-core` JWE helper) — commit `ba50ebb`.
   Added `CryptoError::Jwe(String)` and `foundry_core::crypto::jwe::encrypt_compact`
   (7 new tests). **The feared `kid` asymmetry is a non-issue:** encrypting to
   the annotated public JWK (with `kid`/`use`/`alg`) and decrypting with the bare
