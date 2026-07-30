@@ -117,6 +117,17 @@ cargo test -p foundry --test wallet_verification
 - **`check_dcql_match` never returns `Err`** — it always yields a `CheckResult`
   and is deliberately fail-closed (an unparseable `dcql_query` becomes
   `passed: false` with a reason). Do not convert it to a `Result`.
+- **`check_dcql_match` is bound to the credential query the presentation
+  ANSWERS**, via its `answered_query_id` argument — not to "any credential query
+  of the presented format". A presentation must satisfy the query it was keyed
+  under, so it cannot be credited to a different query it happens to satisfy.
+  An `answered_query_id` absent from the query is a failed check, never an error.
+- **`dcql_query` is validated when the request is CREATED**, in
+  `create_verification_request`, before the transaction is persisted. An
+  unusable query is the operator's `VerificationError::Dcql` (HTTP 400) rather
+  than a wallet-visible presentation failure. The fail-closed branch inside
+  `check_dcql_match` therefore stays as defence in depth but is not normally
+  reachable via the request path.
 - **Single-use enforcement is in the HTTP handler, not this crate.**
   `post_response_handler` rejects any transaction whose state is not `Pending`
   with 400 `invalid_request`. `verify_vp_response` itself does not check prior
@@ -131,11 +142,24 @@ cargo test -p foundry --test wallet_verification
 - **`client_id` is derived, not configured:** `x509_san_dns:<dns-host-of-public_base_url>`.
   A mismatch between the configured `public_base_url` and the certificate's
   dNSName SAN breaks audience binding for both formats.
-- **The mdoc `vp_token` is an envelope object**, `{ "mdoc": <b64url CBOR>,
-  "device_signature": <b64url COSE_Sign1> }`, whereas an SD-JWT VC `vp_token`
-  is a bare JSON string. That string-vs-object distinction is what selects the
-  format branch — a wrongly-typed `vp_token` yields
-  `Failed("unsupported vp_token format")`, not a failed check.
+- **`vp_token` is an OpenID4VP 1.0 §8.1 object keyed by DCQL credential query id,
+  with ARRAY values** — `{ "<query id>": [ <presentation> ] }` — and that is the
+  same shape for **both** credential formats. The credential format comes from
+  the `format` **declared by the answered credential query**, never from the JSON
+  type of the payload. `select_presentation` (in `verify.rs`) performs the
+  selection and returns an already-destructured payload, so no verification arm
+  can re-derive the format.
+  Never restore type-sniffing (`vp_token.as_str()` ⇒ SD-JWT, `as_object()` ⇒
+  mdoc): because a conformant SD-JWT VC envelope is *also* an object, that logic
+  routed real SD-JWT presentations into the mdoc branch and reported the
+  misleading `mdoc vp_token missing 'mdoc'`. A bare-string `vp_token` was
+  foundry's own pre-fix shape and no conformant wallet sends it.
+  Per-format payloads: `dc+sd-jwt` → the SD-JWT VC string; `mso_mdoc` →
+  `{ "mdoc": <b64url CBOR>, "device_signature": <b64url COSE_Sign1> }`, which is
+  **bespoke and NOT interoperable** — see `crates/foundry-mdoc/AGENTS.md`.
+  A credential query whose `format` this verifier does not implement
+  (`CredentialFormat::Other`) is a structural 400 once answered, even though it
+  parses fine so it can simply fail to match inside a multi-credential query.
 - **`PresentedFormat::MsoMdoc`** is the variant name (not `Mdoc`), matching
   `dcql_model::CredentialFormat::MsoMdoc` (note: lower-case `d` in `Mdoc` —
   the removed vendored type spelled it `MsoMDoc`).

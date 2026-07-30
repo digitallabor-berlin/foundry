@@ -143,10 +143,17 @@ cargo test -p foundry --test e2e_full_flow
   therefore mutates two tracked files. This — not the CLI — is what actually
   keeps the specs current, and it is why a stale spec shows up as a spurious
   diff after any local `serve` or E2E test run.
-- **The `openapi` CLI subcommand writes only the ADMIN spec.**
-  `foundry openapi --out <path>` calls `generate_admin_openapi_spec` alone; it
-  does not emit `openapi-wallet.json`. To refresh both, run `serve` (or write
-  the wallet spec explicitly).
+- **The `openapi` CLI subcommand defaults to the ADMIN spec; pass `--wallet` for
+  the wallet-facing one.** `foundry openapi --out openapi.json` calls
+  `generate_admin_openapi_spec`; `foundry openapi --wallet --out
+  openapi-wallet.json` calls `generate_wallet_openapi_spec`. Both are verified to
+  reproduce the committed files byte-identically.
+- **Both committed specs are drift-tested.**
+  `tests/openapi_endpoints.rs` compares `openapi.json` and `openapi-wallet.json`
+  against generator output as parsed JSON, and the failure message names the
+  regeneration command. A change to any `#[utoipa::path]` annotation that is not
+  accompanied by regenerated specs now fails the suite instead of drifting
+  silently.
 - **The sweeper IS a background daemon.** `serve` calls
   `spawn_sweeper(storage, 60)`, so expired rows are purged every 60 seconds for
   the process lifetime. `/ready` additionally calls `purge_expired(0)`. Its

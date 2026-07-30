@@ -73,3 +73,22 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 - **CBOR canonical encoding**: IssuerSignedItem serialization uses `ciborium::into_writer()` with no special tag wrapping. MSO and outer mdoc use BTreeMap for deterministic key ordering. **Not yet tag-24 embedded** per TODOs in types.rs.
 - **Device key extraction**: COSE_Key labels `iana::Ec2KeyParameter::X` (int label) and `Y` are read from the MSO device_key_info; if either is missing, device binding fails with `InvalidStructure`.
 - **SessionTranscript for device binding**: simplified format (not ISO 18013-7 hashed OID4VPHandover). Verifier passes client_id, response_uri, nonce; transcript is CBOR [null, null, [client_id?, response_uri?, nonce]] or [null, null, [nonce]].
+- **mdoc presentation is NOT interoperable with real wallets, and a green mdoc
+  test proves only self-consistency.** Two independent divergences, both
+  deliberately unfixed and both mdoc-only (SD-JWT VC is unaffected):
+  1. **Payload shape.** `verify_mdoc` takes the device signature as a *separate*
+     argument and never reads `deviceSigned` from the document — it looks up only
+     `issuerSigned` → `nameSpaces`/`issuerAuth`. OpenID4VP Annex B requires a
+     base64url ISO 18013-5 `DeviceResponse` with
+     `deviceSigned.deviceAuth.deviceSignature` nested inside each document.
+     Nothing in this workspace parses a `DeviceResponse`.
+  2. **Handover.** The transcript above is not the spec `OpenID4VPHandover`,
+     which is `["OpenID4VPHandover", bstr(SHA-256(cbor([clientId, nonce,
+     jwkThumbprint, responseUri])))]`. Different member order, no label, no hash,
+     and no JWK thumbprint — which is mandatory under `direct_post.jwt`. No
+     RFC 7638 thumbprint implementation exists in this workspace.
+  The `vp_token` *envelope* is OpenID4VP-conformant (see
+  `crates/foundry-verifier/AGENTS.md`); the mdoc *payload* inside it is not.
+  Fixing this needs a captured real mdoc presentation or an official test vector
+  as a fixture — writing both sides from one reading of the spec is what let
+  these diverge unnoticed in the first place.
