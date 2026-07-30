@@ -26,6 +26,47 @@ fn default_transport() -> String {
     "request_uri".to_string()
 }
 
+/// Response-encryption parameters advertised to wallets, sourced from
+/// `verifier.response_encryption`. Defaults match OpenID4VP v1.0 §8.3.
+fn response_encryption_params(config: &Config) -> (String, String) {
+    let configured = config.verifier.response_encryption.as_ref();
+    let alg = configured
+        .and_then(|v| v.get("alg"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("ECDH-ES")
+        .to_string();
+    let enc = configured
+        .and_then(|v| v.get("enc"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("A128GCM")
+        .to_string();
+    (alg, enc)
+}
+
+/// Annotate an ephemeral EC public JWK so a wallet can *select* it as the
+/// response-encryption key.
+///
+/// OpenID4VP wallets filter candidate encryption keys on `kid` and `alg` being
+/// present and non-empty, and locate the reader key via `use == "enc"`. josekit
+/// emits none of these for a generated keypair, so a bare public JWK is silently
+/// discarded and the wallet reports that the verifier advertised no encryption
+/// keys at all.
+///
+/// Only the *public* JWK is annotated. The stored private JWK deliberately stays
+/// bare so josekit's decrypter carries no key id, and therefore does not require
+/// the wallet to echo `kid` back in the JWE header.
+fn annotate_encryption_jwk(mut jwk: serde_json::Value, alg: &str) -> serde_json::Value {
+    if let Some(obj) = jwk.as_object_mut() {
+        obj.insert(
+            "kid".to_string(),
+            serde_json::json!(Uuid::new_v4().to_string()),
+        );
+        obj.insert("use".to_string(), serde_json::json!("enc"));
+        obj.insert("alg".to_string(), serde_json::json!(alg));
+    }
+    jwk
+}
+
 pub(crate) fn dns_host_only(base_url: &str) -> String {
     let host = base_url
         .trim_start_matches("https://")
@@ -79,8 +120,13 @@ pub async fn create_verification_request(
     let public_jwk = keypair.to_jwk_public_key();
     let private_jwk = keypair.to_jwk_private_key();
 
-    let ephem_public_json = serde_json::to_value(&public_jwk)
-        .map_err(|e| VerificationError::Serialization(e.to_string()))?;
+    let (response_enc_alg, response_enc_method) = response_encryption_params(config);
+
+    let ephem_public_json = annotate_encryption_jwk(
+        serde_json::to_value(&public_jwk)
+            .map_err(|e| VerificationError::Serialization(e.to_string()))?,
+        &response_enc_alg,
+    );
     let ephem_private_json = serde_json::to_value(&private_jwk)
         .map_err(|e| VerificationError::Serialization(e.to_string()))?;
 
@@ -124,7 +170,8 @@ pub async fn create_verification_request(
             "dcql_query": dcql,
             "nonce": nonce,
             "client_metadata": {
-                "jwks": { "keys": [ephem_public_json] }
+                "jwks": { "keys": [ephem_public_json] },
+                "encrypted_response_enc_values_supported": [response_enc_method]
             }
         });
 
@@ -197,10 +244,12 @@ pub fn build_signed_request_object(
     payload_map.insert("nonce".to_string(), serde_json::json!(tx.nonce));
     payload_map.insert("state".to_string(), serde_json::json!(tx.id));
     payload_map.insert("dcql_query".to_string(), tx.dcql_query.clone());
+    let (_, response_enc_method) = response_encryption_params(config);
     payload_map.insert(
         "client_metadata".to_string(),
         serde_json::json!({
-            "jwks": { "keys": [tx.ephem_public_jwk.clone()] }
+            "jwks": { "keys": [tx.ephem_public_jwk.clone()] },
+            "encrypted_response_enc_values_supported": [response_enc_method]
         }),
     );
     if let Some(ref td) = tx.transaction_data {
@@ -483,5 +532,134 @@ mod tests {
             verified_payload.claim("state").and_then(|v| v.as_str()),
             Some(tx.id.as_str())
         );
+    }
+
+    /// The ephemeral response-encryption JWK must carry the metadata a wallet
+    /// needs to *select* it: OpenID4VP wallets filter candidate encryption keys
+    /// on `kid` and `alg` being present and non-empty, and locate the reader key
+    /// via `use == "enc"`. A bare josekit public JWK has none of these and is
+    /// silently discarded, leaving the wallet with zero encryption keys.
+    #[tokio::test]
+    async fn test_dc_api_client_metadata_encryption_jwk_is_wallet_selectable() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "dc_api".to_string(),
+            transaction_data: None,
+        };
+
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let dc_req = res.dc_api_request.unwrap();
+        let cm = &dc_req["client_metadata"];
+        let key = &cm["jwks"]["keys"][0];
+
+        assert!(
+            key["kid"].as_str().is_some_and(|s| !s.is_empty()),
+            "encryption JWK must carry a non-empty kid, got: {key}"
+        );
+        assert_eq!(key["alg"], "ECDH-ES", "encryption JWK must carry alg");
+        assert_eq!(key["use"], "enc", "encryption JWK must be marked use=enc");
+
+        assert_eq!(
+            cm["encrypted_response_enc_values_supported"],
+            serde_json::json!(["A128GCM"]),
+            "client_metadata must advertise supported response encryption methods"
+        );
+    }
+
+    /// Same contract for the `request_uri` transport, whose client metadata is
+    /// carried inside the signed request object rather than returned inline.
+    #[tokio::test]
+    async fn test_signed_request_object_encryption_jwk_is_wallet_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let jws_str = build_signed_request_object(&config, &tx).unwrap();
+        let parts: Vec<&str> = jws_str.split('.').collect();
+        let payload_bytes = B64URL.decode(parts[1]).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+        let cm = &payload["client_metadata"];
+        let key = &cm["jwks"]["keys"][0];
+
+        assert!(
+            key["kid"].as_str().is_some_and(|s| !s.is_empty()),
+            "encryption JWK must carry a non-empty kid, got: {key}"
+        );
+        assert_eq!(key["alg"], "ECDH-ES", "encryption JWK must carry alg");
+        assert_eq!(key["use"], "enc", "encryption JWK must be marked use=enc");
+
+        assert_eq!(
+            cm["encrypted_response_enc_values_supported"],
+            serde_json::json!(["A128GCM"]),
+            "client_metadata must advertise supported response encryption methods"
+        );
+
+        // The advertised public key must still be the transaction's ephemeral
+        // key material, not a freshly generated one.
+        assert_eq!(key["x"], tx.ephem_public_jwk["x"]);
+        assert_eq!(key["y"], tx.ephem_public_jwk["y"]);
+    }
+
+    /// `verifier.response_encryption` was previously parsed but never read.
+    /// The advertised values must come from it rather than being hardcoded.
+    #[tokio::test]
+    async fn test_client_metadata_response_encryption_honours_config() {
+        let storage = test_storage().await;
+        let mut config = sample_config("/tmp/fake_key.pem");
+        config.verifier.response_encryption = Some(serde_json::json!({
+            "alg": "ECDH-ES",
+            "enc": "A256GCM"
+        }));
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "dc_api".to_string(),
+            transaction_data: None,
+        };
+
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let cm = &res.dc_api_request.unwrap()["client_metadata"];
+        assert_eq!(
+            cm["encrypted_response_enc_values_supported"],
+            serde_json::json!(["A256GCM"])
+        );
+        assert_eq!(cm["jwks"]["keys"][0]["alg"], "ECDH-ES");
     }
 }
