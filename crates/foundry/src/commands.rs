@@ -298,6 +298,16 @@ verifier:
   response_encryption: { alg: ECDH-ES, enc: A128GCM }
   transaction_data_hashes_alg: [sha-256]
   named_queries:
+    # `credentials` must be non-empty (OpenID4VP 1.0 §6, enforced when a
+    # verification request is created). The shipped `pid` type has no
+    # `age_equal_or_over` claim, so an age check requests `birthdate` and the
+    # verifier derives the age itself.
     - id: over18
-      dcql: { credentials: [] }
+      dcql:
+        credentials:
+          - id: pid
+            format: dc+sd-jwt
+            meta: { vct_values: ["https://localhost:8443/vct/pid"] }
+            claims:
+              - path: [birthdate]
 "#;

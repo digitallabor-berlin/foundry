@@ -227,6 +227,14 @@ pub async fn create_verification_request(
         ));
     };
 
+    // Validate before persisting. An unusable dcql_query would otherwise be
+    // stored, advertised to a wallet, and only surface at verification time --
+    // presenting the operator's configuration mistake as a presentation failure.
+    // `Dcql` maps to HTTP 400 on the admin API (`verifier_admin_error_response`).
+    serde_json::from_value::<crate::dcql_model::DcqlQuery>(dcql.clone()).map_err(|e| {
+        VerificationError::Dcql(format!("dcql_query is not a valid DCQL query: {e}"))
+    })?;
+
     let id = format!("v_{}", Uuid::new_v4().simple());
     let nonce = format!("vn_{}", Uuid::new_v4().simple());
 
@@ -527,6 +535,53 @@ mod tests {
         assert_eq!(tx.response_mode, "direct_post.jwt");
     }
 
+    /// An unusable `dcql_query` must fail the operator's create request rather
+    /// than being persisted, advertised to a wallet, and surfacing later as a
+    /// presentation failure that looks like the wallet's fault.
+    #[tokio::test]
+    async fn create_rejects_malformed_dcql_query() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({"credentials": "not-an-array"})),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        let err = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Dcql(ref m) if m.contains("not a valid DCQL query")),
+            "expected a Dcql error naming the parse failure, got: {err}"
+        );
+    }
+
+    /// `credentials: []` requests nothing and can never be satisfied. It shipped
+    /// in `config.yaml` and was accepted here until the query was validated.
+    #[tokio::test]
+    async fn create_rejects_empty_credentials_dcql_query() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({"credentials": []})),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        let err = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Dcql(_)),
+            "expected a Dcql error, got: {err}"
+        );
+    }
+
     #[tokio::test]
     async fn test_create_verification_request_named_query() {
         let storage = test_storage().await;
@@ -582,7 +637,9 @@ mod tests {
         let config = sample_config("/tmp/fake_key.pem");
 
         let req = CreateVerificationRequest {
-            dcql_query: Some(serde_json::json!({"credentials": []})),
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
             named_query_ref: None,
             transport: "dc_api".to_string(),
             transaction_data: None,

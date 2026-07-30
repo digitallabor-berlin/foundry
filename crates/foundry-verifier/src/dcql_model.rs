@@ -363,9 +363,11 @@ mod tests {
 
     // --- the three spec-mandated non-empty constraints, all fail-closed ---
 
-    /// §6: `credentials` is a non-empty array. `config.yaml` ships
-    /// `dcql: { credentials: [] }`, and today that is a parse error rather than
-    /// a query that vacuously matches nothing.
+    /// §6: `credentials` is a non-empty array — a parse error rather than a query
+    /// that vacuously matches nothing. The `quickstart` config scaffold used to
+    /// emit `dcql: { credentials: [] }`; `create_verification_request` now parses
+    /// the query before persisting it, so an empty one fails the operator's
+    /// request instead of reaching a wallet.
     #[test]
     fn rejects_empty_credentials() {
         assert!(parse(json!({ "credentials": [] })).is_err());
