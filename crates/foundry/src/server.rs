@@ -470,7 +470,7 @@ fn verifier_admin_error_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use foundry_verifier::VerificationError::*;
     let status = match e {
-        Dcql(_) | Serialization(_) => StatusCode::BAD_REQUEST,
+        Dcql(_) | InvalidRequest(_) | Serialization(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (

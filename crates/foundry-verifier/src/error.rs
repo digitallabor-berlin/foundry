@@ -11,6 +11,11 @@ pub enum VerificationError {
     #[error("dcql error: {0}")]
     Dcql(String),
 
+    /// A caller-supplied request parameter is structurally invalid. Maps to HTTP
+    /// 400 on the admin API (see AGENTS.md §4.3).
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+
     #[error("crypto error: {0}")]
     Crypto(String),
 
@@ -50,6 +55,9 @@ mod tests {
 
         let err = VerificationError::Dcql("invalid query".to_string());
         assert_eq!(err.to_string(), "dcql error: invalid query");
+
+        let err = VerificationError::InvalidRequest("bad transaction_data".to_string());
+        assert_eq!(err.to_string(), "invalid request: bad transaction_data");
 
         let err = VerificationError::Crypto("key error".to_string());
         assert_eq!(err.to_string(), "crypto error: key error");

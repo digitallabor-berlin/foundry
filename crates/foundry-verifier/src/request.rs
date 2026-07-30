@@ -117,6 +117,88 @@ pub struct CreateVerificationResponse {
     pub dc_api_request: Option<serde_json::Value>,
 }
 
+/// Encode `transaction_data` entries for the wire.
+///
+/// OpenID4VP v1.0 §8.4 defines each entry as a **base64url-encoded (unpadded)
+/// JSON object**, not a bare JSON object. foundry's admin API accepts objects
+/// because that is the ergonomic shape for a relying party; the encoding happens
+/// here, once, and the encoded strings are what get stored and emitted so that
+/// what a wallet hashes into `transaction_data_hashes` is byte-identical to what
+/// was advertised.
+///
+/// The validation is load-bearing, not politeness. A wallet that cannot parse an
+/// entry aborts the entire presentation rather than skipping it — the EUDI iOS
+/// wallet unwraps every parsed entry with `.get()`
+/// (`ResolvedRequestData.parseTransactionData`) and additionally requires each
+/// `credential_ids` element to name a credential present in the DCQL query
+/// (`TransactionData.hasCorrectIds`). Rejecting a malformed entry here converts
+/// an opaque device-side failure into a precise 400 for whoever built the
+/// request.
+fn encode_transaction_data(
+    entries: &[serde_json::Value],
+    dcql: &serde_json::Value,
+) -> Result<Vec<String>, VerificationError> {
+    let known_ids: Vec<&str> = dcql
+        .get("credentials")
+        .and_then(|c| c.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("id").and_then(|v| v.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let obj = entry.as_object().ok_or_else(|| {
+                VerificationError::InvalidRequest(format!(
+                    "transaction_data[{i}] must be a JSON object"
+                ))
+            })?;
+
+            let has_type = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| !t.is_empty());
+            if !has_type {
+                return Err(VerificationError::InvalidRequest(format!(
+                    "transaction_data[{i}] requires a non-empty string 'type'"
+                )));
+            }
+
+            let ids = obj
+                .get("credential_ids")
+                .and_then(|v| v.as_array())
+                .filter(|a| !a.is_empty())
+                .ok_or_else(|| {
+                    VerificationError::InvalidRequest(format!(
+                        "transaction_data[{i}] requires a non-empty 'credential_ids' array"
+                    ))
+                })?;
+
+            for id in ids {
+                let id = id.as_str().ok_or_else(|| {
+                    VerificationError::InvalidRequest(format!(
+                        "transaction_data[{i}] 'credential_ids' must contain only strings"
+                    ))
+                })?;
+                if !known_ids.contains(&id) {
+                    return Err(VerificationError::InvalidRequest(format!(
+                        "transaction_data[{i}] references credential id '{id}' which is not \
+                         present in the DCQL query"
+                    )));
+                }
+            }
+
+            let bytes = serde_json::to_vec(entry)
+                .map_err(|e| VerificationError::Serialization(e.to_string()))?;
+            Ok(B64URL.encode(bytes))
+        })
+        .collect()
+}
+
 pub async fn create_verification_request(
     config: &Config,
     storage: &dyn Storage,
@@ -175,6 +257,13 @@ pub async fn create_verification_request(
         _ => "direct_post.jwt".to_string(),
     };
 
+    // Validate and encode before persisting: a bad entry must fail the request,
+    // not reach a wallet that will abort the whole presentation over it.
+    let encoded_transaction_data = match req.transaction_data.as_deref() {
+        Some(entries) => Some(encode_transaction_data(entries, &dcql)?),
+        None => None,
+    };
+
     let tx = VerificationTransaction {
         id: id.clone(),
         state: VerificationState::Pending,
@@ -184,7 +273,7 @@ pub async fn create_verification_request(
         response_mode: response_mode.clone(),
         ephem_private_jwk: ephem_private_json,
         ephem_public_jwk: ephem_public_json.clone(),
-        transaction_data: req.transaction_data.clone(),
+        transaction_data: encoded_transaction_data,
         result: None,
         created_at: now_unix,
     };
@@ -447,7 +536,10 @@ mod tests {
             dcql_query: None,
             named_query_ref: Some("over18".to_string()),
             transport: "request_uri".to_string(),
-            transaction_data: Some(vec![serde_json::json!({"type": "payment"})]),
+            transaction_data: Some(vec![serde_json::json!({
+                "type": "payment",
+                "credential_ids": ["c1"]
+            })]),
         };
 
         let res = create_verification_request(&config, &storage, req, 1_700_000_000)
@@ -525,7 +617,11 @@ mod tests {
             })),
             named_query_ref: None,
             transport: "request_uri".to_string(),
-            transaction_data: Some(vec![serde_json::json!({"amount": 50})]),
+            transaction_data: Some(vec![serde_json::json!({
+                "type": "payment",
+                "credential_ids": ["c1"],
+                "amount": 50
+            })]),
         };
 
         let res = create_verification_request(&config, &storage, req, 1_700_000_000)
@@ -558,7 +654,12 @@ mod tests {
         assert_eq!(payload["response_mode"], "direct_post.jwt");
         assert_eq!(payload["nonce"], tx.nonce);
         assert_eq!(payload["state"], tx.id);
-        assert_eq!(payload["transaction_data"][0]["amount"], 50);
+        // Entries are advertised base64url-encoded per OpenID4VP v1.0 §8.4.
+        let td_encoded = payload["transaction_data"][0].as_str().unwrap();
+        let td: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(td_encoded).unwrap()).unwrap();
+        assert_eq!(td["amount"], 50);
+        assert_eq!(td["type"], "payment");
 
         // Verify JWS signature using verifier key
         let keypair = EcKeyPair::from_pem(km.private_pem.as_bytes(), None).unwrap();
@@ -852,5 +953,168 @@ mod tests {
             serde_json::json!(["A256GCM"])
         );
         assert_eq!(cm["jwks"]["keys"][0]["alg"], "ECDH-ES");
+    }
+
+    /// OpenID4VP v1.0 §8.4 defines `transaction_data` as an array of
+    /// **base64url-encoded JSON strings**, not raw JSON objects.
+    ///
+    /// Emitting objects is silently destructive rather than loudly wrong: the
+    /// EUDI iOS wallet reads the parameter as `[String]`
+    /// (`RequestAuthenticator.swift:48`), so an array of objects yields `nil`
+    /// and the transaction data is dropped with no error at all.
+    #[tokio::test]
+    async fn test_transaction_data_is_emitted_as_base64url_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let entry = serde_json::json!({
+            "type": "qes_authorization",
+            "credential_ids": ["pid"],
+            "transaction_data_hashes_alg": ["sha-256"]
+        });
+
+        let res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "pid", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![entry.clone()]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let jws = build_signed_request_object(&config, &tx).unwrap();
+        let parts: Vec<&str> = jws.split('.').collect();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+
+        let arr = payload["transaction_data"]
+            .as_array()
+            .expect("transaction_data must be an array");
+        assert_eq!(arr.len(), 1);
+        let encoded = arr[0]
+            .as_str()
+            .unwrap_or_else(|| panic!("entry must be a base64url string, got: {}", arr[0]));
+
+        // Must decode back to exactly the caller-supplied object.
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(encoded).unwrap()).unwrap();
+        assert_eq!(decoded, entry);
+    }
+
+    /// A wallet hard-throws on an entry it cannot parse
+    /// (`ResolvedRequestData.parseTransactionData` unwraps with `.get()`), so
+    /// foundry must reject a structurally invalid entry at request-creation time
+    /// with a clear error instead of shipping one that breaks resolution.
+    #[tokio::test]
+    async fn test_transaction_data_requires_type_and_credential_ids() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+        let dcql = serde_json::json!({
+            "credentials": [{"id": "pid", "format": "dc+sd-jwt"}]
+        });
+
+        // Missing `type`.
+        let err = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(dcql.clone()),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![serde_json::json!({"credential_ids": ["pid"]})]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::InvalidRequest(ref m) if m.contains("type")),
+            "expected InvalidRequest mentioning 'type', got: {err}"
+        );
+
+        // Missing `credential_ids`.
+        let err = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(dcql.clone()),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![serde_json::json!({"type": "qes_authorization"})]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::InvalidRequest(ref m) if m.contains("credential_ids")),
+            "expected InvalidRequest mentioning 'credential_ids', got: {err}"
+        );
+
+        // Not an object.
+        let err = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(dcql),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![serde_json::json!("already-encoded?")]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, VerificationError::InvalidRequest(_)));
+    }
+
+    /// The wallet also checks that every `credential_ids` entry refers to a
+    /// credential actually present in the DCQL query
+    /// (`TransactionData.hasCorrectIds`). foundry holds both at creation time,
+    /// so it can and should catch the mismatch first.
+    #[tokio::test]
+    async fn test_transaction_data_credential_ids_must_exist_in_dcql() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let err = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "pid", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![serde_json::json!({
+                    "type": "qes_authorization",
+                    "credential_ids": ["not_in_the_query"]
+                })]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, VerificationError::InvalidRequest(ref m)
+                if m.contains("not_in_the_query")),
+            "expected InvalidRequest naming the unknown id, got: {err}"
+        );
     }
 }

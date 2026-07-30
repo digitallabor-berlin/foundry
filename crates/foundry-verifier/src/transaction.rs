@@ -36,7 +36,10 @@ pub struct VerificationTransaction {
     pub response_mode: String,
     pub ephem_private_jwk: serde_json::Value,
     pub ephem_public_jwk: serde_json::Value,
-    pub transaction_data: Option<Vec<serde_json::Value>>,
+    /// `transaction_data` entries **already base64url-encoded** per OpenID4VP
+    /// v1.0 §8.4, exactly as advertised to the wallet. Stored encoded so that a
+    /// `transaction_data_hashes` check hashes the same bytes that were sent.
+    pub transaction_data: Option<Vec<String>>,
     pub result: Option<VerificationResult>,
     pub created_at: i64,
 }
@@ -95,7 +98,7 @@ mod tests {
             response_mode: "direct_post".to_string(),
             ephem_private_jwk: serde_json::json!({"kty": "EC", "crv": "P-256", "d": "test"}),
             ephem_public_jwk: serde_json::json!({"kty": "EC", "crv": "P-256", "x": "test", "y": "test"}),
-            transaction_data: Some(vec![serde_json::json!({"type": "payment", "amount": 100})]),
+            transaction_data: Some(vec!["eyJ0eXBlIjoicGF5bWVudCJ9".to_string()]),
             result: None,
             created_at: 1_700_000_000,
         }
