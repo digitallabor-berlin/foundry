@@ -137,7 +137,8 @@ cargo test -p foundry --test wallet_verification
   format branch — a wrongly-typed `vp_token` yields
   `Failed("unsupported vp_token format")`, not a failed check.
 - **`PresentedFormat::MsoMdoc`** is the variant name (not `Mdoc`), matching
-  `ClaimFormatDesignation::MsoMDoc`.
+  `dcql_model::CredentialFormat::MsoMdoc` (note: lower-case `d` in `Mdoc` —
+  the removed vendored type spelled it `MsoMDoc`).
 - **`response_uri` for mdoc device binding is reconstructed**, not stored:
   `{public_base_url}/vp/response/{tx.id}`. Changing the route shape in
   `crates/foundry` silently breaks the device signature check.

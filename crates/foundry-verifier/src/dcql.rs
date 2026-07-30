@@ -138,7 +138,8 @@ fn credential_query_satisfied(
 }
 
 /// Walk a claims `Value` by a DCQL claims path. Supports `String` (object key)
-/// and `Integer` (array index) segments. `Null` (array wildcard) segments are
+/// and `Index` (array index) segments. `Wildcard` segments — the JSON `null`
+/// component of OpenID4VP 1.0 §7.1, meaning "all elements of this array" — are
 /// not supported in this phase and cause the lookup to fail (fail-closed).
 fn resolve_path<'a>(claims: &'a Value, path: &[ClaimsPathSegment]) -> Option<&'a Value> {
     let mut cur = claims;
