@@ -106,7 +106,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
     (state, dir)
 }
 
-fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
+fn create_proof(c_nonce: &str, issuer: &str) -> (String, EcKeyPair) {
     let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
     let mut public_jwk = keypair.to_jwk_public_key();
     public_jwk.set_algorithm("ES256");
@@ -129,13 +129,7 @@ fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
     let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
     let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-    (
-        serde_json::json!({
-            "proof_type": "jwt",
-            "jwt": jwt_str,
-        }),
-        keypair,
-    )
+    (jwt_str, keypair)
 }
 
 #[tokio::test]
@@ -217,12 +211,12 @@ async fn full_issuance_flow_end_to_end() {
     let c_nonce = nonce_json["c_nonce"].as_str().unwrap();
 
     // 4. Construct holder proof and request credential at POST /credential
-    let (proof_json, _keypair) = create_proof(c_nonce, "https://issuer.example.com");
+    let (proof_jwt, _keypair) = create_proof(c_nonce, "https://issuer.example.com");
 
     let cred_req_body = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json,
+        "proofs": { "jwt": [proof_jwt] },
     });
 
     let wallet_app = wallet_router(state.clone());
@@ -242,7 +236,7 @@ async fn full_issuance_flow_end_to_end() {
         .unwrap();
     let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
 
-    let credential_str = cred_json["credential"].as_str().unwrap();
+    let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
     assert!(!credential_str.is_empty());
     assert!(credential_str.contains('~')); // SD-JWT VC format contains ~ separators
 }
@@ -412,12 +406,12 @@ async fn credential_request_with_proof_aud_mismatch_is_rejected() {
     let c_nonce = mint_c_nonce(&state, &access_token).await;
 
     // Build a proof whose `aud` doesn't match the configured issuer.
-    let (proof_json, _keypair) = create_proof(&c_nonce, "https://wrong-issuer.example.com");
+    let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://wrong-issuer.example.com");
 
     let cred_req_body = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json,
+        "proofs": { "jwt": [proof_jwt] },
     });
 
     let wallet_app = wallet_router(state.clone());
@@ -446,12 +440,12 @@ async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
     let _c_nonce = mint_c_nonce(&state, &access_token).await;
 
     // Build a proof carrying a nonce that does not match the transaction's c_nonce.
-    let (proof_json, _keypair) = create_proof("not-the-real-nonce", "https://issuer.example.com");
+    let (proof_jwt, _keypair) = create_proof("not-the-real-nonce", "https://issuer.example.com");
 
     let cred_req_body = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json,
+        "proofs": { "jwt": [proof_jwt] },
     });
 
     let wallet_app = wallet_router(state.clone());
@@ -489,12 +483,12 @@ async fn credential_request_with_expired_c_nonce_is_rejected() {
         .await
         .unwrap();
 
-    let (proof_json, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+    let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
 
     let cred_req_body = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json,
+        "proofs": { "jwt": [proof_jwt] },
     });
 
     let wallet_app = wallet_router(state.clone());
@@ -522,11 +516,11 @@ async fn second_credential_request_with_same_access_token_is_rejected() {
     let access_token = issue_offer_and_get_access_token(&state).await;
     let c_nonce = mint_c_nonce(&state, &access_token).await;
 
-    let (proof_json, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+    let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
     let cred_req_body = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json,
+        "proofs": { "jwt": [proof_jwt] },
     });
 
     // First request succeeds and moves the transaction to IssuanceState::Issued.
@@ -546,11 +540,11 @@ async fn second_credential_request_with_same_access_token_is_rejected() {
     // because the underlying transaction is now IssuanceState::Issued. Reuse the same
     // (already-consumed) proof/nonce here: /nonce itself now also rejects an Issued
     // transaction, so re-minting a nonce is not a viable path for this attempt anyway.
-    let (proof_json_2, _keypair_2) = create_proof(&c_nonce, "https://issuer.example.com");
+    let (proof_jwt_2, _keypair_2) = create_proof(&c_nonce, "https://issuer.example.com");
     let cred_req_body_2 = serde_json::json!({
         "credential_configuration_id": "pid",
         "format": "dc+sd-jwt",
-        "proof": proof_json_2,
+        "proofs": { "jwt": [proof_jwt_2] },
     });
 
     let wallet_app = wallet_router(state.clone());
