@@ -109,17 +109,19 @@ pub async fn run_issuance(
     let cred_req = serde_json::json!({
         "credential_configuration_id": credential_configuration_id,
         "format": "dc+sd-jwt",
-        "proof": proof.proof_json,
+        "proofs": { "jwt": [proof.jwt] },
     });
     let (status, cred_body) = http
         .post_json(&cred_url, Some(&access_token), &cred_req)
         .await?;
     ensure_2xx(status, &cred_url, &cred_body)?;
     let cred_json: serde_json::Value = serde_json::from_str(&cred_body)?;
-    let compact = cred_json["credential"]
+    let compact = cred_json["credentials"][0]["credential"]
         .as_str()
         .ok_or_else(|| {
-            WalletError::MalformedOffer("credential response missing 'credential'".to_string())
+            WalletError::MalformedOffer(
+                "credential response missing 'credentials[0].credential'".to_string(),
+            )
         })?
         .to_string();
 
