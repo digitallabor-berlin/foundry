@@ -41,6 +41,9 @@ pub struct CredentialConfigurationSupported {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ProofTypeSupported {
     pub proof_signing_alg_values_supported: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub key_attestations_required: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -91,6 +94,13 @@ pub fn build_issuer_metadata(cfg: &Config) -> CredentialIssuerMetadata {
                     "jwt".to_string(),
                     ProofTypeSupported {
                         proof_signing_alg_values_supported: vec!["ES256".to_string()],
+                        key_attestations_required: if cfg.issuer.key_attestation.mode
+                            == foundry_core::config::Mode::Required
+                        {
+                            Some(serde_json::json!({}))
+                        } else {
+                            None
+                        },
                     },
                 )]),
                 display: ct.display.clone(),
@@ -222,6 +232,45 @@ mod tests {
             vec!["jwk".to_string()]
         );
         assert!(pid.proof_types_supported.contains_key("jwt"));
+    }
+
+    #[test]
+    fn key_attestations_required_present_when_mode_required() {
+        let mut cfg = test_config();
+        cfg.issuer.key_attestation.mode = Mode::Required;
+        let meta = build_issuer_metadata(&cfg);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        let jwt_proof = pid.proof_types_supported.get("jwt").unwrap();
+        assert_eq!(
+            jwt_proof.key_attestations_required,
+            Some(serde_json::json!({}))
+        );
+    }
+
+    #[test]
+    fn key_attestations_required_absent_when_mode_optional_or_disabled() {
+        let mut cfg = test_config();
+        cfg.issuer.key_attestation.mode = Mode::Optional;
+        let meta = build_issuer_metadata(&cfg);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        assert_eq!(
+            pid.proof_types_supported
+                .get("jwt")
+                .unwrap()
+                .key_attestations_required,
+            None
+        );
+
+        cfg.issuer.key_attestation.mode = Mode::Disabled;
+        let meta = build_issuer_metadata(&cfg);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        assert_eq!(
+            pid.proof_types_supported
+                .get("jwt")
+                .unwrap()
+                .key_attestations_required,
+            None
+        );
     }
 
     #[test]
