@@ -43,6 +43,30 @@ fn response_encryption_params(config: &Config) -> (String, String) {
     (alg, enc)
 }
 
+/// Presentation formats this verifier can actually verify, in the OpenID4VP
+/// v1.0 `vp_formats_supported` shape. REQUIRED in client metadata unless the
+/// wallet obtains it by another mechanism (§5.1).
+///
+/// The algorithm values are load-bearing, not decorative: wallets intersect this
+/// set against their own supported formats by *exact equality*, so an
+/// under-specified entry such as `"mso_mdoc": {}` causes that format to be
+/// dropped entirely rather than read as "any algorithm".
+///
+/// Keep in sync with what `foundry-sd-jwt-vc` and `foundry-mdoc` actually
+/// verify: ES256, which is COSE algorithm -7.
+fn vp_formats_supported() -> serde_json::Value {
+    serde_json::json!({
+        "dc+sd-jwt": {
+            "sd-jwt_alg_values": ["ES256"],
+            "kb-jwt_alg_values": ["ES256"]
+        },
+        "mso_mdoc": {
+            "issuerauth_alg_values": [-7],
+            "deviceauth_alg_values": [-7]
+        }
+    })
+}
+
 /// Annotate an ephemeral EC public JWK so a wallet can *select* it as the
 /// response-encryption key.
 ///
@@ -171,7 +195,8 @@ pub async fn create_verification_request(
             "nonce": nonce,
             "client_metadata": {
                 "jwks": { "keys": [ephem_public_json] },
-                "encrypted_response_enc_values_supported": [response_enc_method]
+                "encrypted_response_enc_values_supported": [response_enc_method],
+                "vp_formats_supported": vp_formats_supported()
             }
         });
 
@@ -249,7 +274,8 @@ pub fn build_signed_request_object(
         "client_metadata".to_string(),
         serde_json::json!({
             "jwks": { "keys": [tx.ephem_public_jwk.clone()] },
-            "encrypted_response_enc_values_supported": [response_enc_method]
+            "encrypted_response_enc_values_supported": [response_enc_method],
+            "vp_formats_supported": vp_formats_supported()
         }),
     );
     if let Some(ref td) = tx.transaction_data {
@@ -629,6 +655,86 @@ mod tests {
         // key material, not a freshly generated one.
         assert_eq!(key["x"], tx.ephem_public_jwk["x"]);
         assert_eq!(key["y"], tx.ephem_public_jwk["y"]);
+    }
+
+    /// OpenID4VP v1.0 §5.1 makes `vp_formats_supported` REQUIRED unless the
+    /// wallet learns it by another mechanism. It must describe what this verifier
+    /// can actually verify: SD-JWT VC and mdoc, ES256 / COSE -7.
+    ///
+    /// The algorithm values are load-bearing, not decorative: wallets intersect
+    /// this set against their own by *exact equality*, so advertising e.g.
+    /// `"mso_mdoc": {}` would drop mdoc from the intersection entirely.
+    #[tokio::test]
+    async fn test_client_metadata_advertises_vp_formats_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let expected = serde_json::json!({
+            "dc+sd-jwt": {
+                "sd-jwt_alg_values": ["ES256"],
+                "kb-jwt_alg_values": ["ES256"]
+            },
+            "mso_mdoc": {
+                "issuerauth_alg_values": [-7],
+                "deviceauth_alg_values": [-7]
+            }
+        });
+
+        // dc_api transport: client metadata is returned inline.
+        let dc_res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "dc_api".to_string(),
+                transaction_data: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dc_res.dc_api_request.unwrap()["client_metadata"]["vp_formats_supported"],
+            expected,
+            "dc_api client_metadata must advertise vp_formats_supported"
+        );
+
+        // request_uri transport: client metadata lives in the signed request object.
+        let res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let jws_str = build_signed_request_object(&config, &tx).unwrap();
+        let parts: Vec<&str> = jws_str.split('.').collect();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+        assert_eq!(
+            payload["client_metadata"]["vp_formats_supported"], expected,
+            "signed request object client_metadata must advertise vp_formats_supported"
+        );
     }
 
     /// `verifier.response_encryption` was previously parsed but never read.
