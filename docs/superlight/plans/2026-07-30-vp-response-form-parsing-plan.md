@@ -120,11 +120,16 @@ parse path too.
 
 **Verify:** `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Addition beyond plan (accepted):** a `crates/foundry/AGENTS.md` gotcha
+recording the form-encoded body contract. Root `AGENTS.md` §8 calls for new
+binding facts to be captured, and this one just cost a field bug — the entry
+names the failure signature so a future reader recognises it instantly.
 
 ---
 
@@ -133,3 +138,4 @@ parse path too.
 Append one line per completed task: date, task, commit SHA.
 
 - 2026-07-30 — Task 1 (form body parsing + both clients migrated) — commit `af42b9b`. Red confirmed first: `form_encoded_response_parameter_is_accepted` failed with the exact production error `Invalid symbol 61, offset 8`, and `raw_jwe_request_body_is_rejected` failed by returning `200 verified:true`. After the fix: `cargo test --workspace` 40/40 binaries ok, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 with zero warnings, `cargo fmt --check` exit 0.
+- 2026-07-30 — Task 2 (OpenAPI form-encoded request body) — commit `f727f02`. Red confirmed first: `wallet_openapi_documents_vp_response_as_form_encoded` failed with `{"text/plain":{"schema":{"type":"string"}}}`. After: the spec emits `application/x-www-form-urlencoded` with `$ref: #/components/schemas/VpResponseForm` (plain name — the `09b0bb0` dotted-`$ref` trap avoided, `wallet_openapi_spec_all_refs_resolve` still green). `openapi-wallet.json` regenerated via `generate_wallet_openapi_spec()`, the same function `serve()` calls. All three gates: test exit 0 (40/40 ok), clippy exit 0 (0 warnings), fmt exit 0.
