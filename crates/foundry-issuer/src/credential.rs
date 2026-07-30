@@ -67,6 +67,10 @@ pub async fn handle_credential_request(
         .filter(|jwts| !jwts.is_empty())
         .ok_or_else(|| IssuanceError::InvalidProof("missing proof in credential request".into()))?;
 
+    let key_attestation_trust_store = foundry_core::trust::TrustStore::from_config(
+        &config.issuer.key_attestation.trusted_anchors,
+    )?;
+
     let verified_proofs = proof_jwts
         .iter()
         .map(|jwt_str| {
@@ -76,6 +80,8 @@ pub async fn handle_credential_request(
                 c_nonce,
                 c_nonce_expires_at,
                 now_unix,
+                config.issuer.key_attestation.mode.clone(),
+                &key_attestation_trust_store,
             )
         })
         .collect::<Result<Vec<_>, IssuanceError>>()?;

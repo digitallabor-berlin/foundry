@@ -3,6 +3,8 @@
 use crate::error::IssuanceError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use foundry_core::config::Mode;
+use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
 use josekit::jws::{JwsHeader, ES256};
 use serde::{Deserialize, Serialize};
@@ -23,14 +25,20 @@ pub struct VerifiedProof {
 }
 
 /// Verifies a single holder proof-of-possession JWT: JWS signature (against
-/// the `jwk` embedded in its header), `typ`, `aud`, and `nonce`/expiry
-/// binding to the transaction's `c_nonce`.
+/// a key identified via `jwk`, or `kid` + `key_attestation`), `typ`, `aud`,
+/// and `nonce`/expiry binding to the transaction's `c_nonce`.
+///
+/// `key_attestation_mode` gates which key-source header is acceptable:
+/// `Required` rejects a bare `jwk` proof (no attestation), `Disabled`
+/// rejects a `kid`+`key_attestation` proof, `Optional` accepts either.
 pub fn verify_holder_proof(
     jwt_str: &str,
     expected_issuer: &str,
     expected_c_nonce: &str,
     c_nonce_expires_at: i64,
     now_unix: i64,
+    key_attestation_mode: Mode,
+    key_attestation_trust_store: &TrustStore,
 ) -> Result<VerifiedProof, IssuanceError> {
     if now_unix > c_nonce_expires_at {
         return Err(IssuanceError::InvalidProof("c_nonce has expired".into()));
@@ -59,11 +67,75 @@ pub fn verify_holder_proof(
         )));
     }
 
-    let jwk_val = header
-        .claim("jwk")
-        .ok_or_else(|| IssuanceError::InvalidProof("missing jwk in proof header".into()))?;
-    let jwk: Jwk = serde_json::from_value(jwk_val.clone())
-        .map_err(|e| IssuanceError::InvalidProof(format!("invalid jwk in proof header: {e}")))?;
+    let jwk_claim = header.claim("jwk");
+    let kid_claim = header.claim("kid");
+    let x5c_claim = header.claim("x5c");
+    let key_attestation_claim = header.claim("key_attestation");
+
+    let present_count = [
+        jwk_claim.is_some(),
+        kid_claim.is_some(),
+        x5c_claim.is_some(),
+    ]
+    .iter()
+    .filter(|p| **p)
+    .count();
+    if present_count != 1 {
+        return Err(IssuanceError::InvalidProof(
+            "exactly one of jwk, kid, x5c header claims is required".into(),
+        ));
+    }
+
+    let jwk: Jwk = if let Some(jwk_val) = jwk_claim {
+        if key_attestation_mode == Mode::Required {
+            return Err(IssuanceError::InvalidProof(
+                "key attestation is required for this credential type".into(),
+            ));
+        }
+        serde_json::from_value(jwk_val.clone())
+            .map_err(|e| IssuanceError::InvalidProof(format!("invalid jwk in proof header: {e}")))?
+    } else if let Some(kid_val) = kid_claim {
+        let key_attestation_jwt =
+            key_attestation_claim
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    IssuanceError::InvalidProof(
+                        "kid header without key_attestation is not supported".into(),
+                    )
+                })?;
+
+        if key_attestation_mode == Mode::Disabled {
+            return Err(IssuanceError::InvalidProof(
+                "key attestation is disabled by issuer configuration".into(),
+            ));
+        }
+
+        let kid_str = kid_val
+            .as_str()
+            .ok_or_else(|| IssuanceError::InvalidProof("kid header must be a string".into()))?;
+        let kid_index: usize = kid_str.parse().map_err(|_| {
+            IssuanceError::InvalidProof("kid header must be a valid attested-key index".into())
+        })?;
+
+        let claims = crate::attestation::verify_key_attestation_jwt(
+            key_attestation_jwt,
+            key_attestation_trust_store,
+            expected_c_nonce,
+            now_unix,
+        )?;
+
+        claims
+            .attested_keys
+            .get(kid_index)
+            .cloned()
+            .ok_or_else(|| {
+                IssuanceError::InvalidProof("kid index out of bounds for attested_keys".into())
+            })?
+    } else {
+        return Err(IssuanceError::InvalidProof(
+            "x5c header for the jwt proof type is not yet supported".into(),
+        ));
+    };
 
     let verifier = ES256.verifier_from_jwk(&jwk).map_err(|e| {
         IssuanceError::InvalidProof(format!("unable to create verifier from jwk: {e}"))
@@ -103,6 +175,8 @@ pub fn verify_holder_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foundry_core::config::Mode;
+    use foundry_core::trust::TrustStore;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwt::{self, JwtPayload};
 
@@ -130,9 +204,61 @@ mod tests {
         jwt::encode_with_signer(&payload, &header, &signer).unwrap()
     }
 
+    /// Builds a valid key attestation whose sole attested key is `holder_pub_jwk`
+    /// (so the caller can sign the outer proof with the matching private key).
+    fn valid_key_attestation(
+        nonce: &str,
+        holder_pub_jwk: &serde_json::Value,
+    ) -> (String, TrustStore) {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+        use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
+        use foundry_core::pki::{issue_leaf, new_ca};
+
+        let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "wallet-provider.example.com",
+            &["wallet-provider.example.com".to_string()],
+            365,
+        )
+        .unwrap();
+        let leaf_der = {
+            let cert = foundry_core::trust::parse_cert_pem(leaf.cert_pem.as_bytes()).unwrap();
+            use x509_cert::der::Encode;
+            cert.to_der().unwrap()
+        };
+        let x5c = vec![base64::engine::general_purpose::STANDARD.encode(&leaf_der)];
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let header = serde_json::json!({"typ": "key-attestation+jwt", "alg": "ES256", "x5c": x5c});
+        let payload = serde_json::json!({
+            "iss": "https://wallet-provider.example.com",
+            "iat": now,
+            "exp": now + 100_000,
+            "nonce": nonce,
+            "attested_keys": [holder_pub_jwk],
+        });
+        let header_b64 = B64URL.encode(serde_json::to_vec(&header).unwrap());
+        let payload_b64 = B64URL.encode(serde_json::to_vec(&payload).unwrap());
+        let signing_input = format!("{header_b64}.{payload_b64}");
+        let signer =
+            FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+        let sig_b64 = B64URL.encode(signer.sign(signing_input.as_bytes()).unwrap());
+        let jwt = format!("{signing_input}.{sig_b64}");
+
+        let store = TrustStore::from_pems(&[ca.cert_pem.into_bytes()]).unwrap();
+        (jwt, store)
+    }
+
     #[test]
     fn verifies_valid_proof_jwt() {
         let jwt_str = signed_proof_jwt("https://issuer.example.com", "nonce-123");
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
 
         let res = verify_holder_proof(
             &jwt_str,
@@ -140,6 +266,8 @@ mod tests {
             "nonce-123",
             1_700_000_100,
             1_700_000_000,
+            Mode::Optional,
+            &empty_store,
         )
         .unwrap();
 
@@ -149,6 +277,7 @@ mod tests {
     #[test]
     fn rejects_mismatched_nonce() {
         let jwt_str = signed_proof_jwt("https://issuer.example.com", "wrong-nonce");
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
 
         let err = verify_holder_proof(
             &jwt_str,
@@ -156,6 +285,148 @@ mod tests {
             "nonce-123",
             1_700_000_100,
             1_700_000_000,
+            Mode::Optional,
+            &empty_store,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, IssuanceError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn accepts_kid_plus_key_attestation_proof() {
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut holder_pub = keypair.to_jwk_public_key();
+        holder_pub.set_algorithm("ES256");
+        let holder_pub_json = serde_json::to_value(&holder_pub).unwrap();
+
+        let (attestation_jwt, store) = valid_key_attestation("nonce-123", &holder_pub_json);
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header
+            .set_claim("kid", Some(serde_json::json!("0")))
+            .unwrap();
+        header
+            .set_claim("key_attestation", Some(serde_json::json!(attestation_jwt)))
+            .unwrap();
+        let mut payload = JwtPayload::new();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .unwrap();
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let res = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            "nonce-123",
+            now + 100,
+            now,
+            Mode::Required,
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(res.holder_jwk.key_type(), "EC");
+    }
+
+    #[test]
+    fn rejects_kid_without_key_attestation() {
+        // A `kid` header with no accompanying `key_attestation` claim at all.
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header
+            .set_claim("kid", Some(serde_json::json!("0")))
+            .unwrap();
+        let mut payload = JwtPayload::new();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .unwrap();
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let no_attestation_jwt = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
+        let err = verify_holder_proof(
+            &no_attestation_jwt,
+            "https://issuer.example.com",
+            "nonce-123",
+            1_700_000_100,
+            1_700_000_000,
+            Mode::Optional,
+            &empty_store,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn rejects_jwk_proof_when_key_attestation_required() {
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", "nonce-123");
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+        let err = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            "nonce-123",
+            1_700_000_100,
+            1_700_000_000,
+            Mode::Required,
+            &empty_store,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, IssuanceError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn rejects_kid_attestation_proof_when_key_attestation_disabled() {
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut holder_pub = keypair.to_jwk_public_key();
+        holder_pub.set_algorithm("ES256");
+        let holder_pub_json = serde_json::to_value(&holder_pub).unwrap();
+        let (attestation_jwt, store) = valid_key_attestation("nonce-123", &holder_pub_json);
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header
+            .set_claim("kid", Some(serde_json::json!("0")))
+            .unwrap();
+        header
+            .set_claim("key_attestation", Some(serde_json::json!(attestation_jwt)))
+            .unwrap();
+        let mut payload = JwtPayload::new();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        payload
+            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .unwrap();
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let err = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            "nonce-123",
+            1_700_000_100,
+            1_700_000_000,
+            Mode::Disabled,
+            &store,
         )
         .unwrap_err();
 
