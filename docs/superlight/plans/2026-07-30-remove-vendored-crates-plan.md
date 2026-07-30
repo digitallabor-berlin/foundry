@@ -387,10 +387,10 @@ test-based:
 
 **Verify:** `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check` plus the three grep checks above
 
-- [ ] Red — N/A (documentation)
-- [ ] Green — all files updated, `docs/VENDORING.md` deleted, `LICENSE` added
-- [ ] Refactor — N/A
-- [ ] Verify — gates plus the three grep checks
+- [x] Red — N/A (documentation)
+- [x] Green — all files updated, `docs/VENDORING.md` deleted, `LICENSE` added
+- [x] Refactor — N/A
+- [x] Verify — gates plus the three grep checks
 - [ ] Commit
 
 ---
@@ -528,3 +528,26 @@ Append one line per completed task: date, task, commit SHA.
   Plus the `#[ignore]`d e2e test still passing.
   Gates: `cargo clippy --workspace --all-targets -- -D warnings` 0
   diagnostics; `cargo fmt --check` clean.
+- 2026-07-30 — Task 5 (docs, routing tables, README, LICENSE) — commit
+  `0a415a2`. All nine planned files updated, `docs/VENDORING.md` deleted,
+  `LICENSE` added (verbatim Apache-2.0, 11,358 bytes — **not** severed).
+  **Two items beyond the plan**, both found by the grep checks rather than
+  assumed:
+  1. `crates/foundry-issuer/src/metadata.rs:3` — stale doc comment naming "the
+     vendored `oid4vci` crate's generic types" (carried in from Task 4).
+  2. `docs/superpowers/specs/2026-07-28-agents-md-discovery-design.md` — this
+     is linked from root `AGENTS.md` §8 as live design rationale, yet
+     referenced `docs/VENDORING.md` and the two deleted vendor-guard
+     `AGENTS.md` files. Given a **superseding note** rather than a rewrite: it
+     is a dated design record, but a dangling link reachable from live guidance
+     is a real defect, and the note fixes that without falsifying history.
+  Deliberately left: `README.md:266` (`openid4vp_uri` is protocol vocabulary),
+  `docs/superpowers/plans/*.md`, `.superpowers/sdd/*`, `.pi/reports/*` — all
+  historical records of past work rather than live guidance.
+  Gates: `cargo test --workspace` **327 passed / 0 failed**;
+  `cargo clippy --workspace --all-targets -- -D warnings` 0 diagnostics;
+  `cargo fmt --check` clean. Grep checks: no `.md` reference to the removed
+  crates outside historical artifacts and the `openid4vp://` URI; no live
+  `VENDORING` reference; no dangling `AGENTS.md` link.
+
+**All five tasks complete.** Next: superlight Phase 5 (review).
