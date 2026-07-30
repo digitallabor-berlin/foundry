@@ -196,6 +196,7 @@ mod tests {
         AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
         StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
     };
+    use foundry_core::crypto::jwe::encrypt_compact;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_mdoc::builder::{build_mdoc, MdocClaims};
@@ -203,7 +204,6 @@ mod tests {
     use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
-    use openid4vp::core::jwe::JweBuilder;
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -365,14 +365,13 @@ mod tests {
         let presentation =
             attach_kb_jwt(issuer_pres, &holder_signer, client_id, &tx.nonce).unwrap();
 
-        let jwe_str = JweBuilder::new()
-            .payload(serde_json::json!({ "vp_token": presentation }))
-            .recipient_key_json(&tx.ephem_public_jwk)
-            .unwrap()
-            .alg("ECDH-ES")
-            .enc("A128GCM")
-            .build()
-            .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": presentation }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
 
         let resolver = MockResolver { token: None };
         let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
@@ -399,14 +398,13 @@ mod tests {
         let (config, _trust_dir) = test_config(&ca_str);
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
-        let jwe_str = JweBuilder::new()
-            .payload(serde_json::json!({ "other_field": "no_vp_token" }))
-            .recipient_key_json(&tx.ephem_public_jwk)
-            .unwrap()
-            .alg("ECDH-ES")
-            .enc("A128GCM")
-            .build()
-            .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "other_field": "no_vp_token" }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
 
         let resolver = MockResolver { token: None };
         let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
@@ -468,14 +466,13 @@ mod tests {
         let presentation =
             attach_kb_jwt(issuer_pres, &holder_signer, client_id, "wrong-nonce").unwrap();
 
-        let jwe_str = JweBuilder::new()
-            .payload(serde_json::json!({ "vp_token": presentation }))
-            .recipient_key_json(&tx.ephem_public_jwk)
-            .unwrap()
-            .alg("ECDH-ES")
-            .enc("A128GCM")
-            .build()
-            .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": presentation }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
 
         let resolver = MockResolver { token: None };
         let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
@@ -533,14 +530,13 @@ mod tests {
         )
         .unwrap();
 
-        let jwe_str = JweBuilder::new()
-            .payload(serde_json::json!({ "vp_token": presentation }))
-            .recipient_key_json(&tx.ephem_public_jwk)
-            .unwrap()
-            .alg("ECDH-ES")
-            .enc("A128GCM")
-            .build()
-            .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": presentation }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
 
         let resolver = MockResolver { token: None };
         let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
@@ -636,14 +632,13 @@ mod tests {
             "mdoc": B64URL.encode(&mdoc_bytes),
             "device_signature": B64URL.encode(&d_sig_bytes),
         });
-        let jwe_str = JweBuilder::new()
-            .payload(serde_json::json!({ "vp_token": vp_token }))
-            .recipient_key_json(&tx.ephem_public_jwk)
-            .unwrap()
-            .alg("ECDH-ES")
-            .enc("A128GCM")
-            .build()
-            .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": vp_token }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
 
         let resolver = MockResolver { token: None };
         let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)

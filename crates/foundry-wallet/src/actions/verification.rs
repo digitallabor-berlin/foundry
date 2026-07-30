@@ -15,10 +15,10 @@ use crate::storage::event_log;
 use crate::storage::now_rfc3339;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use foundry_core::crypto::jwe::encrypt_compact;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_sd_jwt_vc::builder::attach_kb_jwt;
 use foundry_verifier::{CreateVerificationResponse, VerificationResult};
-use openid4vp::core::jwe::JweBuilder;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,14 +153,17 @@ pub async fn run_verification(
     let presentation = attach_kb_jwt(compact, &holder_signer, &client_id, &nonce)
         .map_err(|e| WalletError::MalformedRequestObject(format!("attach_kb_jwt failed: {e}")))?;
 
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": presentation }))
-        .recipient_key_json(&ephemeral_jwk)
-        .map_err(|e| WalletError::MalformedRequestObject(format!("invalid ephemeral jwk: {e}")))?
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .map_err(|e| WalletError::MalformedRequestObject(format!("JWE build failed: {e}")))?;
+    // `encrypt_compact` parses the recipient JWK and encrypts in a single step,
+    // so the two former failure points (invalid ephemeral JWK, then build
+    // failure) collapse into one error. The underlying josekit message still
+    // names which of the two actually went wrong.
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": presentation }),
+        &ephemeral_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .map_err(|e| WalletError::MalformedRequestObject(format!("JWE build failed: {e}")))?;
 
     let response_url = format!(
         "{}/vp/response/{}",

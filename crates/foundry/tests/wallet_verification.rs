@@ -9,6 +9,7 @@ use foundry_core::config::{
     AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, Mode, ServerConfig,
     StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
 };
+use foundry_core::crypto::jwe::encrypt_compact;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::pki::{issue_leaf, new_ca};
 use foundry_core::status_list::{build_status_list_token, StatusList, StatusListTokenClaims};
@@ -22,7 +23,6 @@ use foundry_verifier::{
 };
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
-use openid4vp::core::jwe::JweBuilder;
 use std::collections::BTreeMap as StdBTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -283,14 +283,13 @@ async fn full_verification_flow_end_to_end() {
         attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
 
     // 5. Encrypt presentation into JWE
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": sd_jwt_vc_presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     // 6. Wallet POST /vp/response/{id}
     let post_resp_req = Request::builder()
@@ -434,14 +433,13 @@ async fn resubmitting_a_verification_response_is_rejected() {
         attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
 
     // 5. Encrypt presentation into JWE
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": sd_jwt_vc_presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     // 6. First submission of the verification response succeeds
     let post_resp_req = Request::builder()
@@ -658,14 +656,13 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
     let sd_jwt_vc_presentation =
         attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
 
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": sd_jwt_vc_presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     let post_resp_req = Request::builder()
         .method("POST")
@@ -780,14 +777,13 @@ async fn dcql_vct_mismatch_is_rejected() {
     )
     .unwrap();
     let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     let post_resp_req = Request::builder()
         .method("POST")
@@ -903,14 +899,13 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
     )
     .unwrap();
     let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     let post_resp_req = Request::builder()
         .method("POST")
@@ -1059,14 +1054,13 @@ async fn mdoc_presentation_is_accepted() {
         "mdoc": B64URL.encode(&mdoc_bytes),
         "device_signature": B64URL.encode(&d_sig_bytes),
     });
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": vp_token }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": vp_token }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     let post_resp_req = Request::builder()
         .method("POST")

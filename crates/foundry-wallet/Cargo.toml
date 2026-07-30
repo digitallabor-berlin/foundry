@@ -18,7 +18,6 @@ foundry-core = { path = "../foundry-core" }
 foundry-issuer = { path = "../foundry-issuer" }
 foundry-verifier = { path = "../foundry-verifier" }
 foundry-sd-jwt-vc = { path = "../foundry-sd-jwt-vc" }
-openid4vp = { path = "../openid4vp" }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

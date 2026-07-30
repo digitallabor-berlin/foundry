@@ -13,6 +13,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use foundry_core::crypto::jwe::encrypt_compact;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_sd_jwt_vc::builder::attach_kb_jwt;
 use foundry_verifier::{
@@ -22,7 +23,6 @@ use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
 use josekit::jws::{JwsHeader, ES256};
 use josekit::jwt::{self, JwtPayload};
-use openid4vp::core::jwe::JweBuilder;
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
 use std::path::Path;
@@ -433,14 +433,13 @@ async fn run_verification(
         &nonce,
     )
     .expect("attach_kb_jwt");
-    let jwe_str = JweBuilder::new()
-        .payload(serde_json::json!({ "vp_token": presentation }))
-        .recipient_key_json(&ephem_public_jwk)
-        .unwrap()
-        .alg("ECDH-ES")
-        .enc("A128GCM")
-        .build()
-        .unwrap();
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": presentation }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
 
     let post_res = client
         .post(format!("{wallet_base}/vp/response/{verification_id}"))
