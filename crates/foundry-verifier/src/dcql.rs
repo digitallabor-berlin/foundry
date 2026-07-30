@@ -11,9 +11,8 @@
 //! of its format. Multi-credential and `credential_sets` combination logic is
 //! out of scope for this phase.
 
+use crate::dcql_model::{ClaimsPathSegment, CredentialFormat, DcqlCredentialQuery, DcqlQuery};
 use crate::transaction::CheckResult;
-use openid4vp::core::credential_format::ClaimFormatDesignation;
-use openid4vp::core::dcql_query::{DcqlCredentialClaimsQueryPath, DcqlCredentialQuery, DcqlQuery};
 use serde_json::Value;
 
 /// The concrete credential format actually present in the `vp_token`.
@@ -24,11 +23,11 @@ pub enum PresentedFormat {
 }
 
 impl PresentedFormat {
-    fn matches(self, designation: &ClaimFormatDesignation) -> bool {
+    fn matches(self, designation: &CredentialFormat) -> bool {
         matches!(
             (self, designation),
-            (PresentedFormat::SdJwtVc, ClaimFormatDesignation::DcSdJwt)
-                | (PresentedFormat::MsoMdoc, ClaimFormatDesignation::MsoMDoc)
+            (PresentedFormat::SdJwtVc, CredentialFormat::DcSdJwt)
+                | (PresentedFormat::MsoMdoc, CredentialFormat::MsoMdoc)
         )
     }
 }
@@ -118,10 +117,10 @@ fn credential_query_satisfied(
             })?;
             if let Some(expected) = claim.values() {
                 let ok = expected.iter().any(|e| {
-                    use openid4vp::core::dcql_query::DcqlCredentialClaimsQueryValue as V;
+                    use crate::dcql_model::ClaimValue as V;
                     match e {
                         V::String(s) => found.as_str() == Some(s.as_str()),
-                        V::Integer(i) => found.as_i64() == Some(*i as i64),
+                        V::Integer(i) => found.as_i64() == Some(*i),
                         V::Boolean(b) => found.as_bool() == Some(*b),
                     }
                 });
@@ -141,27 +140,24 @@ fn credential_query_satisfied(
 /// Walk a claims `Value` by a DCQL claims path. Supports `String` (object key)
 /// and `Integer` (array index) segments. `Null` (array wildcard) segments are
 /// not supported in this phase and cause the lookup to fail (fail-closed).
-fn resolve_path<'a>(
-    claims: &'a Value,
-    path: &[DcqlCredentialClaimsQueryPath],
-) -> Option<&'a Value> {
+fn resolve_path<'a>(claims: &'a Value, path: &[ClaimsPathSegment]) -> Option<&'a Value> {
     let mut cur = claims;
     for seg in path {
         match seg {
-            DcqlCredentialClaimsQueryPath::String(k) => cur = cur.get(k)?,
-            DcqlCredentialClaimsQueryPath::Integer(i) => cur = cur.get(*i)?,
-            DcqlCredentialClaimsQueryPath::Null => return None,
+            ClaimsPathSegment::String(k) => cur = cur.get(k)?,
+            ClaimsPathSegment::Index(i) => cur = cur.get(*i as usize)?,
+            ClaimsPathSegment::Wildcard => return None,
         }
     }
     Some(cur)
 }
 
-fn path_debug(path: &[DcqlCredentialClaimsQueryPath]) -> Vec<String> {
+fn path_debug(path: &[ClaimsPathSegment]) -> Vec<String> {
     path.iter()
         .map(|p| match p {
-            DcqlCredentialClaimsQueryPath::String(s) => s.clone(),
-            DcqlCredentialClaimsQueryPath::Integer(i) => i.to_string(),
-            DcqlCredentialClaimsQueryPath::Null => "null".to_string(),
+            ClaimsPathSegment::String(s) => s.clone(),
+            ClaimsPathSegment::Index(i) => i.to_string(),
+            ClaimsPathSegment::Wildcard => "null".to_string(),
         })
         .collect()
 }

@@ -1,4 +1,5 @@
 pub mod dcql;
+mod dcql_model;
 pub mod error;
 pub mod request;
 pub mod status;

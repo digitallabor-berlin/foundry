@@ -2145,7 +2145,6 @@ dependencies = [
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
  "josekit",
- "openid4vp",
  "percent-encoding",
  "rand 0.8.7",
  "reqwest 0.12.28",
