@@ -4,9 +4,9 @@
 use crate::attestation::{DefaultAttestationVerifier, WalletAttestationVerifier};
 use crate::error::IssuanceError;
 use crate::transaction::{
-    invalidate_authorization_code, load_transaction_by_access_token,
-    load_transaction_by_authorization_code, load_transaction_by_pre_auth_code,
-    save_transaction_with_indices, IssuanceState, IssuanceTransaction,
+    invalidate_authorization_code, load_transaction_by_authorization_code,
+    load_transaction_by_pre_auth_code, save_transaction_with_indices, IssuanceState,
+    IssuanceTransaction,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -28,13 +28,16 @@ pub struct TokenRequest {
     pub code_verifier: Option<String>,
 }
 
+/// Token Response (OpenID4VCI 1.0 Section 6.2).
+///
+/// Deliberately carries no `c_nonce`: the final specification moved challenge
+/// issuance to the Nonce Endpoint (Section 7), so a wallet obtains its
+/// challenge from `POST /nonce` and never from here.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct TokenResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: u64,
-    pub c_nonce: String,
-    pub c_nonce_expires_in: u64,
 }
 
 pub async fn handle_token_request(
@@ -149,22 +152,18 @@ async fn handle_authorization_code_grant(
     mint_and_save_tokens(storage, tx, now_unix).await
 }
 
-/// Shared by both grant branches: mint a fresh access_token/c_nonce pair,
-/// persist them on `tx`, and return the wire `TokenResponse`. Identical
-/// `TokenResponse` shape regardless of which grant produced it.
+/// Shared by both grant branches: mint a fresh access_token, persist it on
+/// `tx`, and return the wire `TokenResponse`. Identical `TokenResponse` shape
+/// regardless of which grant produced it.
 async fn mint_and_save_tokens(
     storage: &dyn Storage,
     mut tx: IssuanceTransaction,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
     let access_token = format!("at_{}", Uuid::new_v4().simple());
-    let c_nonce = format!("cn_{}", Uuid::new_v4().simple());
     let expires_in = 600u64;
-    let c_nonce_expires_in = 600u64;
 
     tx.access_token = Some(access_token.clone());
-    tx.c_nonce = Some(c_nonce.clone());
-    tx.c_nonce_expires_at = Some(now_unix + c_nonce_expires_in as i64);
 
     save_transaction_with_indices(storage, &tx, expires_in, now_unix).await?;
 
@@ -172,51 +171,6 @@ async fn mint_and_save_tokens(
         access_token,
         token_type: "Bearer".to_string(),
         expires_in,
-        c_nonce,
-        c_nonce_expires_in,
-    })
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-pub struct NonceResponse {
-    pub c_nonce: String,
-    pub c_nonce_expires_in: u64,
-}
-
-/// Mint a fresh c_nonce for an already-authorized transaction (identified by its
-/// bearer access_token) and persist it so a subsequent `/credential` call using
-/// that nonce in its proof JWT is accepted.
-///
-/// Returns `IssuanceError::InvalidGrant` if the access_token is unknown/expired
-/// or the underlying transaction has already been issued.
-pub async fn refresh_c_nonce(
-    storage: &dyn Storage,
-    access_token: &str,
-    now_unix: i64,
-) -> Result<NonceResponse, IssuanceError> {
-    let mut tx = load_transaction_by_access_token(storage, access_token)
-        .await?
-        .ok_or_else(|| {
-            IssuanceError::InvalidGrant("invalid or expired access_token".to_string())
-        })?;
-
-    if tx.state == IssuanceState::Issued {
-        return Err(IssuanceError::InvalidGrant(
-            "credential offer has already been claimed".to_string(),
-        ));
-    }
-
-    let c_nonce = format!("cn_{}", Uuid::new_v4().simple());
-    let c_nonce_expires_in = 600u64;
-
-    tx.c_nonce = Some(c_nonce.clone());
-    tx.c_nonce_expires_at = Some(now_unix + c_nonce_expires_in as i64);
-
-    save_transaction_with_indices(storage, &tx, 600, now_unix).await?;
-
-    Ok(NonceResponse {
-        c_nonce,
-        c_nonce_expires_in,
     })
 }
 
@@ -244,8 +198,6 @@ mod tests {
             tx_code: Some("4242".to_string()),
             status_list_index: Some(7),
             access_token: None,
-            c_nonce: None,
-            c_nonce_expires_at: None,
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
             redirect_uri: None,
@@ -280,14 +232,12 @@ mod tests {
 
         assert_eq!(res.token_type, "Bearer");
         assert!(!res.access_token.is_empty());
-        assert!(!res.c_nonce.is_empty());
 
         let updated_tx = load_transaction(&storage, "tx-tok-1")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(updated_tx.access_token.unwrap(), res.access_token);
-        assert_eq!(updated_tx.c_nonce.unwrap(), res.c_nonce);
     }
 
     #[tokio::test]
@@ -342,44 +292,6 @@ mod tests {
         assert!(err.to_string().contains("already been claimed"));
     }
 
-    #[tokio::test]
-    async fn refresh_c_nonce_mints_and_persists_a_new_nonce() {
-        let storage = test_storage().await;
-        let mut tx = sample_tx("tx-nonce-1");
-        tx.access_token = Some("at_existing_token".to_string());
-        tx.c_nonce = Some("cn_stale".to_string());
-        tx.c_nonce_expires_at = Some(1_700_000_100);
-        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
-            .await
-            .unwrap();
-
-        let res = refresh_c_nonce(&storage, "at_existing_token", 1_700_000_050)
-            .await
-            .unwrap();
-
-        assert!(!res.c_nonce.is_empty());
-        assert_ne!(res.c_nonce, "cn_stale");
-        assert_eq!(res.c_nonce_expires_in, 600);
-
-        let updated_tx = load_transaction(&storage, "tx-nonce-1")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(updated_tx.c_nonce.unwrap(), res.c_nonce);
-        assert_eq!(updated_tx.c_nonce_expires_at.unwrap(), 1_700_000_050 + 600);
-    }
-
-    #[tokio::test]
-    async fn refresh_c_nonce_rejects_unknown_access_token() {
-        let storage = test_storage().await;
-
-        let err = refresh_c_nonce(&storage, "at_does_not_exist", 1_700_000_050)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(err, IssuanceError::InvalidGrant(_)));
-    }
-
     const REDIRECT_URI: &str = "eudi-openid4ci://authorize";
     const CODE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
@@ -429,7 +341,6 @@ mod tests {
 
         assert_eq!(res.token_type, "Bearer");
         assert!(!res.access_token.is_empty());
-        assert!(!res.c_nonce.is_empty());
 
         let updated_tx = load_transaction(&storage, "tx-authz-tok-1")
             .await

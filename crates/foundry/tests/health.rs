@@ -68,7 +68,7 @@ async fn health_and_ready_return_200() {
     let db = dir.path().join("h.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(test_config());
-    let app = admin_router(AppState { storage, config }, AdminApiKey(None));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
 
     let health = app
         .clone()

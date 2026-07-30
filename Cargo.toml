@@ -39,6 +39,7 @@ rcgen = { version = "0.14", features = ["x509-parser"] }
 coset = "0.3"
 ciborium = "0.2"
 sha2 = "0.10"
+hmac = "0.12"
 rand = "0.8"
 hex = "0.4"
 percent-encoding = "2"

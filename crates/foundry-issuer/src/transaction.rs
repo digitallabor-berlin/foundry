@@ -15,8 +15,6 @@ pub struct IssuanceTransaction {
     pub tx_code: Option<String>,
     pub status_list_index: Option<u64>,
     pub access_token: Option<String>,
-    pub c_nonce: Option<String>,
-    pub c_nonce_expires_at: Option<i64>,
     pub state: IssuanceState,
     pub created_at: i64,
     /// Redirect URI pinned at `create_offer` time for the authorization_code
@@ -208,8 +206,6 @@ mod tests {
             tx_code: Some("4242".to_string()),
             status_list_index: Some(7),
             access_token: None,
-            c_nonce: None,
-            c_nonce_expires_at: None,
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
             redirect_uri: None,

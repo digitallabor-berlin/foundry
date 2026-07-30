@@ -56,7 +56,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `/.well-known/openid-credential-issuer` | GET | `foundry_issuer::build_issuer_metadata` |
 | `/.well-known/oauth-authorization-server` | GET | `foundry_issuer::build_authorization_server_metadata` |
 | `/token` | POST | `foundry_issuer::handle_token_request` |
-| `/nonce` | POST | `foundry_issuer::refresh_c_nonce` |
+| `/nonce` | POST | `foundry_issuer::issue_nonce` — **unauthenticated** (OpenID4VCI §7.1); responds with `Cache-Control: no-store` (§7.2) |
 | `/credential` | POST | `foundry_issuer::handle_credential_request` |
 | `/vp/request/:id` | GET | `foundry_verifier::build_signed_request_object` |
 | `/vp/response/:id` | POST | `foundry_verifier::verify_vp_response` |

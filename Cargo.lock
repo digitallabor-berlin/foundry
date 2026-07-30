@@ -2087,6 +2087,7 @@ dependencies = [
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
+ "hmac",
  "josekit",
  "percent-encoding",
  "rand 0.8.7",

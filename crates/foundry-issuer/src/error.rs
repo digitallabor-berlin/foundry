@@ -20,6 +20,8 @@ pub enum IssuanceError {
     Crypto(#[from] foundry_core::error::CryptoError),
     #[error(transparent)]
     Trust(#[from] foundry_core::error::TrustError),
+    #[error("internal error: {0}")]
+    Internal(String),
     #[error("serialization failed: {0}")]
     Serialization(String),
     #[error("deserialization failed: {0}")]

@@ -84,13 +84,7 @@ async fn setup(status_list_enabled: bool) -> (AppState, tempfile::TempDir) {
         },
     };
 
-    (
-        AppState {
-            storage: Arc::new(storage),
-            config: Arc::new(config),
-        },
-        dir,
-    )
+    (AppState::new(Arc::new(storage), Arc::new(config)), dir)
 }
 
 #[tokio::test]

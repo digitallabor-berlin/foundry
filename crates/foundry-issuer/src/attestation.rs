@@ -28,15 +28,23 @@ pub trait KeyAttestationVerifier: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct KeyAttestationClaims {
     pub attested_keys: Vec<Jwk>,
+    /// The attestation's `nonce` claim, returned so the caller can bind it to
+    /// the outer proof's own `nonce`.
+    pub nonce: String,
 }
 
 /// Verify a key-attestation JWT (OpenID4VCI Appendix D.1) against `trust_store`
-/// (the issuer's configured Wallet-Provider CAs), binding it to the current
-/// `c_nonce` per Appendix F.1's `key_attestation` header rule.
+/// (the issuer's configured Wallet-Provider CAs), checking that its `nonce` is
+/// an authentic, unexpired issuer-minted challenge per Appendix F.1's
+/// `key_attestation` header rule.
+///
+/// The nonce is validated against `nonce_secret` rather than compared to
+/// per-transaction state, because the Nonce Endpoint is unauthenticated and so
+/// nonces are never bound to a transaction (see [`crate::nonce`]).
 pub fn verify_key_attestation_jwt(
     key_attestation_jwt: &str,
     trust_store: &TrustStore,
-    expected_c_nonce: &str,
+    nonce_secret: &crate::nonce::NonceSecret,
     now_unix: i64,
 ) -> Result<KeyAttestationClaims, IssuanceError> {
     let parts: Vec<&str> = key_attestation_jwt.split('.').collect();
@@ -145,11 +153,9 @@ pub fn verify_key_attestation_jwt(
         .ok_or_else(|| {
             IssuanceError::InvalidProof("key_attestation: missing nonce claim".into())
         })?;
-    if nonce != expected_c_nonce {
-        return Err(IssuanceError::InvalidProof(format!(
-            "key_attestation: nonce mismatch: got {nonce}, expected {expected_c_nonce}"
-        )));
-    }
+    crate::nonce::verify_nonce(nonce_secret, nonce, now_unix)
+        .map_err(|e| IssuanceError::InvalidProof(format!("key_attestation: {e}")))?;
+    let nonce = nonce.to_string();
 
     let attested_keys_json = payload
         .get("attested_keys")
@@ -169,7 +175,10 @@ pub fn verify_key_attestation_jwt(
         attested_keys.push(jwk);
     }
 
-    Ok(KeyAttestationClaims { attested_keys })
+    Ok(KeyAttestationClaims {
+        attested_keys,
+        nonce,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -309,45 +318,63 @@ mod tests {
             .as_secs() as i64
     }
 
-    #[test]
-    fn verifies_valid_key_attestation_and_returns_attested_keys() {
-        let now = now_secs();
-        let (jwt, ca_pem) =
-            signed_key_attestation("nonce-abc", now + 100_000, vec![sample_jwk(), sample_jwk()]);
-        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+    fn test_secret() -> crate::nonce::NonceSecret {
+        crate::nonce::NonceSecret::from_bytes([42u8; 32])
+    }
 
-        let claims = verify_key_attestation_jwt(&jwt, &store, "nonce-abc", now).unwrap();
-        assert_eq!(claims.attested_keys.len(), 2);
+    /// A real MAC-authenticated nonce, exactly as `POST /nonce` mints them.
+    fn minted_nonce(secret: &crate::nonce::NonceSecret, now: i64) -> String {
+        crate::nonce::issue_nonce(secret, now).unwrap().c_nonce
     }
 
     #[test]
-    fn rejects_nonce_mismatch() {
+    fn verifies_valid_key_attestation_and_returns_attested_keys() {
         let now = now_secs();
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, now);
+        let (jwt, ca_pem) =
+            signed_key_attestation(&nonce, now + 100_000, vec![sample_jwk(), sample_jwk()]);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let claims = verify_key_attestation_jwt(&jwt, &store, &secret, now).unwrap();
+        assert_eq!(claims.attested_keys.len(), 2);
+        // Returned so the caller can bind it to the outer proof's nonce.
+        assert_eq!(claims.nonce, nonce);
+    }
+
+    #[test]
+    fn rejects_nonce_not_minted_by_this_issuer() {
+        let now = now_secs();
+        // A nonce this issuer never minted carries no valid MAC.
         let (jwt, ca_pem) = signed_key_attestation("nonce-abc", now + 100_000, vec![sample_jwk()]);
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        let err = verify_key_attestation_jwt(&jwt, &store, "wrong-nonce", now).unwrap_err();
+        let err = verify_key_attestation_jwt(&jwt, &store, &test_secret(), now).unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidProof(_)));
     }
 
     #[test]
     fn rejects_expired_attestation() {
         let now = now_secs();
-        let (jwt, ca_pem) = signed_key_attestation("nonce-abc", now - 100, vec![sample_jwk()]);
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, now);
+        let (jwt, ca_pem) = signed_key_attestation(&nonce, now - 100, vec![sample_jwk()]);
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        let err = verify_key_attestation_jwt(&jwt, &store, "nonce-abc", now).unwrap_err();
+        let err = verify_key_attestation_jwt(&jwt, &store, &secret, now).unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidProof(_)));
     }
 
     #[test]
     fn rejects_untrusted_chain() {
         let now = now_secs();
-        let (jwt, _ca_pem) = signed_key_attestation("nonce-abc", now + 100_000, vec![sample_jwk()]);
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, now);
+        let (jwt, _ca_pem) = signed_key_attestation(&nonce, now + 100_000, vec![sample_jwk()]);
         let other_ca = new_ca("Some Other Root CA", 3650).unwrap();
         let store = TrustStore::from_pems(&[other_ca.cert_pem.into_bytes()]).unwrap();
 
-        let err = verify_key_attestation_jwt(&jwt, &store, "nonce-abc", now).unwrap_err();
+        let err = verify_key_attestation_jwt(&jwt, &store, &secret, now).unwrap_err();
         assert!(
             matches!(err, IssuanceError::Trust(_)) || matches!(err, IssuanceError::InvalidProof(_))
         );
@@ -356,10 +383,12 @@ mod tests {
     #[test]
     fn rejects_empty_attested_keys() {
         let now = now_secs();
-        let (jwt, ca_pem) = signed_key_attestation("nonce-abc", now + 100_000, vec![]);
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, now);
+        let (jwt, ca_pem) = signed_key_attestation(&nonce, now + 100_000, vec![]);
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        let err = verify_key_attestation_jwt(&jwt, &store, "nonce-abc", now).unwrap_err();
+        let err = verify_key_attestation_jwt(&jwt, &store, &secret, now).unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidProof(_)));
     }
 }

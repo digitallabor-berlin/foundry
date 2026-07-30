@@ -26,6 +26,20 @@ use utoipa::OpenApi;
 pub struct AppState {
     pub storage: Arc<dyn Storage>,
     pub config: Arc<Config>,
+    /// Keys the MAC on `c_nonce` values minted by `POST /nonce`. Generated
+    /// once per process — see [`foundry_issuer::NonceSecret`].
+    pub nonce_secret: Arc<foundry_issuer::NonceSecret>,
+}
+
+impl AppState {
+    /// Build an `AppState`, generating this process's `c_nonce` MAC secret.
+    pub fn new(storage: Arc<dyn Storage>, config: Arc<Config>) -> Self {
+        Self {
+            storage,
+            config,
+            nonce_secret: Arc::new(foundry_issuer::NonceSecret::random()),
+        }
+    }
 }
 
 pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
@@ -371,6 +385,15 @@ async fn token_handler(
     .map_err(|e| wallet_error_response(&e))
 }
 
+/// Nonce Endpoint (OpenID4VCI 1.0 Section 7).
+///
+/// Deliberately **unauthenticated**: Section 7.1 states the endpoint "is not a
+/// protected resource, meaning the Wallet does not need to supply an access
+/// token to access it". Requiring a bearer token here breaks conformant
+/// wallets — they POST an empty body with no `Authorization` header, and on
+/// failure end up with no challenge to put in the proof JWT at all.
+///
+/// Minting is stateless, so an anonymous caller cannot grow storage.
 #[utoipa::path(
     post,
     path = "/nonce",
@@ -378,33 +401,24 @@ async fn token_handler(
 )]
 async fn nonce_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<NonceResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
-                "missing authorization header".into(),
-            ))
-        })?;
-
-    let access_token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
-        wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
-            "invalid bearer authorization header".into(),
-        ))
-    })?;
-
+) -> Result<
+    (
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<NonceResponse>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    let res = foundry_issuer::refresh_c_nonce(state.storage.as_ref(), access_token, now)
-        .await
+    let res = foundry_issuer::issue_nonce(state.nonce_secret.as_ref(), now)
         .map_err(|e| wallet_error_response(&e))?;
 
-    Ok(Json(res))
+    // Section 7.2: the Credential Issuer MUST make the response uncacheable
+    // by adding a Cache-Control header field including the value `no-store`.
+    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
 }
 
 #[utoipa::path(
@@ -443,6 +457,7 @@ async fn credential_handler(
         state.storage.as_ref(),
         access_token,
         &req,
+        state.nonce_secret.as_ref(),
         now,
     )
     .await
@@ -731,10 +746,7 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
 
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::connect(&cfg.storage.path).await?);
     let config = Arc::new(cfg.clone());
-    let state = AppState {
-        storage: storage.clone(),
-        config: config.clone(),
-    };
+    let state = AppState::new(storage.clone(), config.clone());
     let _sweeper = spawn_sweeper(storage, 60);
 
     let api_key = AdminApiKey::resolve(&cfg.server.admin);

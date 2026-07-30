@@ -3,7 +3,7 @@
 ## Purpose
 
 The **OpenID4VCI issuance engine**: credential offers with pre-authorized codes,
-token exchange, `c_nonce` refresh, holder-proof verification, and credential
+token exchange, `c_nonce` minting, holder-proof verification, and credential
 issuance (SD-JWT VC and mdoc), plus issuer/authorization-server metadata
 construction and status-list index allocation.
 
@@ -28,10 +28,11 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `lib.rs` | Module declarations and the `pub use` surface (see below) |
 | `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()` |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
-| `token.rs` | `POST /token` logic (pre-authorized-code grant → access token + `c_nonce`) and `POST /nonce` (`refresh_c_nonce`) |
+| `token.rs` | `POST /token` logic (pre-authorized-code and authorization-code grants → access token) |
+| `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceSecret` / `NonceResponse` |
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
 | `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
-| `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk`, `aud`, `c_nonce`, expiry) |
+| `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
 | `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config` |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
@@ -46,7 +47,7 @@ Entry point → the endpoint that drives it (routes defined in
 |---|---|---|
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
 | `handle_token_request(TokenRequest) -> TokenResponse` | `POST /token` | wallet-facing |
-| `refresh_c_nonce(..) -> NonceResponse` | `POST /nonce` | wallet-facing |
+| `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
 | `handle_credential_request(CredentialRequest) -> CredentialResponse` | `POST /credential` | wallet-facing |
 | `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
 | `build_authorization_server_metadata(&Config) -> AuthorizationServerMetadata` | `GET /.well-known/oauth-authorization-server` | wallet-facing |
@@ -128,10 +129,20 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   rejects any `grant_type` other than
   `urn:ietf:params:oauth:grant-type:pre-authorized_code` with
   `InvalidGrant("unsupported_grant_type")`.
-- **`c_nonce` binding is transaction-scoped.** The proof is verified against the
-  `c_nonce` and `c_nonce_expires_at` stored on the transaction, not against a
-  global nonce store; a transaction missing either field fails with
-  `InvalidProof`, so any code path that writes a transaction must populate both.
+- **`c_nonce` is stateless and NOT transaction-scoped.** The Nonce Endpoint is
+  unauthenticated (OpenID4VCI Section 7.1: "not a protected resource"), so the
+  issuer has no transaction context when minting and nothing is persisted.
+  `verify_nonce` validates an HMAC-SHA256 tag and an embedded expiry instead of
+  comparing against stored state. Never reintroduce a bearer-token requirement
+  on `/nonce`: conformant wallets send none, get no challenge, and their proof
+  JWT then carries no `nonce` claim at all.
+- **Nonce replay is bounded by the transaction, not the nonce.**
+  `handle_credential_request` rejects any transaction whose state is not
+  `Offered`, so an access token is redeemable once however often its nonce is
+  reused. Do not assume `verify_nonce` provides single-use semantics.
+- **`NonceSecret` is per-process.** Nonces do not survive a restart; that is
+  deliberate (no key management, no persisted secret) and safe because the
+  `/nonce` → `/credential` window is milliseconds.
 - **The `pre-authorized_code` field is serde-renamed** (hyphen, not underscore)
   in `TokenRequest`. Renaming the Rust field without preserving `#[serde(rename)]`
   silently breaks wallet compatibility.

@@ -74,7 +74,7 @@ async fn openapi_json_endpoint_returns_valid_spec() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(test_config(true));
-    let app = admin_router(AppState { storage, config }, AdminApiKey(None));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
 
     let response = app
         .oneshot(
@@ -117,7 +117,7 @@ async fn swagger_ui_endpoint_returns_html_when_enabled() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(test_config(true));
-    let app = admin_router(AppState { storage, config }, AdminApiKey(None));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
 
     let response = app
         .oneshot(
@@ -144,7 +144,7 @@ async fn swagger_ui_endpoint_returns_404_when_disabled() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(test_config(false));
-    let app = admin_router(AppState { storage, config }, AdminApiKey(None));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
 
     let response = app
         .oneshot(
@@ -165,7 +165,7 @@ async fn wallet_openapi_json_endpoint_returns_valid_spec() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(wallet_facing_test_config(true));
-    let app = wallet_router(AppState { storage, config });
+    let app = wallet_router(AppState::new(storage, config));
 
     let response = app
         .oneshot(
@@ -210,7 +210,7 @@ async fn wallet_swagger_ui_endpoint_returns_html_when_enabled() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(wallet_facing_test_config(true));
-    let app = wallet_router(AppState { storage, config });
+    let app = wallet_router(AppState::new(storage, config));
 
     let response = app
         .oneshot(
@@ -237,7 +237,7 @@ async fn wallet_swagger_ui_endpoint_returns_404_when_disabled() {
     let db = dir.path().join("test.db");
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(wallet_facing_test_config(false));
-    let app = wallet_router(AppState { storage, config });
+    let app = wallet_router(AppState::new(storage, config));
 
     let response = app
         .oneshot(

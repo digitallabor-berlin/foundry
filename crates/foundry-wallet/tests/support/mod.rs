@@ -159,10 +159,7 @@ pub async fn spawn_test_server() -> TestServer {
         },
     };
 
-    let state = AppState {
-        storage: Arc::new(storage),
-        config: Arc::new(config),
-    };
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
 
     let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

@@ -1,6 +1,7 @@
 //! OpenID4VCI credential endpoint business logic.
 
 use crate::error::IssuanceError;
+use crate::nonce::NonceSecret;
 use crate::proof::{verify_holder_proof, ProofsRequest};
 use crate::transaction::{
     load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
@@ -40,6 +41,7 @@ pub async fn handle_credential_request(
     storage: &dyn Storage,
     access_token: &str,
     req: &CredentialRequest,
+    nonce_secret: &NonceSecret,
     now_unix: i64,
 ) -> Result<CredentialResponse, IssuanceError> {
     let mut tx = load_transaction_by_access_token(storage, access_token)
@@ -51,14 +53,6 @@ pub async fn handle_credential_request(
             "credential offer has already been claimed".into(),
         ));
     }
-
-    let c_nonce = tx
-        .c_nonce
-        .as_deref()
-        .ok_or_else(|| IssuanceError::InvalidProof("no active c_nonce on transaction".into()))?;
-    let c_nonce_expires_at = tx
-        .c_nonce_expires_at
-        .ok_or_else(|| IssuanceError::InvalidProof("missing c_nonce expiration".into()))?;
 
     let proof_jwts = req
         .proofs
@@ -77,8 +71,7 @@ pub async fn handle_credential_request(
             verify_holder_proof(
                 jwt_str,
                 &config.issuer.credential_issuer,
-                c_nonce,
-                c_nonce_expires_at,
+                nonce_secret,
                 now_unix,
                 config.issuer.key_attestation.mode.clone(),
                 &key_attestation_trust_store,
@@ -319,6 +312,15 @@ mod tests {
         }
     }
 
+    fn test_secret() -> NonceSecret {
+        NonceSecret::from_bytes([42u8; 32])
+    }
+
+    /// A real MAC-authenticated nonce, exactly as `POST /nonce` mints them.
+    fn minted_nonce(secret: &NonceSecret, now: i64) -> String {
+        crate::nonce::issue_nonce(secret, now).unwrap().c_nonce
+    }
+
     fn generate_proof(c_nonce: &str, issuer: &str) -> (String, EcKeyPair) {
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut public_jwk = keypair.to_jwk_public_key();
@@ -366,8 +368,6 @@ mod tests {
             tx_code: None,
             status_list_index: None,
             access_token: Some("at_secret_123".to_string()),
-            c_nonce: Some("cn_nonce_123".to_string()),
-            c_nonce_expires_at: Some(1_700_000_600),
             state: IssuanceState::Offered,
             created_at: 1_700_000_000,
             redirect_uri: None,
@@ -380,7 +380,9 @@ mod tests {
             .await
             .unwrap();
 
-        let (proof_jwt, _) = generate_proof("cn_nonce_123", "https://issuer.example.com");
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, 1_700_000_000);
+        let (proof_jwt, _) = generate_proof(&nonce, "https://issuer.example.com");
 
         let req = CredentialRequest {
             credential_configuration_id: Some("pid".to_string()),
@@ -390,10 +392,16 @@ mod tests {
             }),
         };
 
-        let res =
-            handle_credential_request(&config, &storage, "at_secret_123", &req, 1_700_000_010)
-                .await
-                .unwrap();
+        let res = handle_credential_request(
+            &config,
+            &storage,
+            "at_secret_123",
+            &req,
+            &secret,
+            1_700_000_010,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(res.credentials.len(), 1);
         assert!(!res.credentials[0].credential.is_empty());
@@ -453,8 +461,6 @@ mod tests {
             tx_code: None,
             status_list_index: None,
             access_token: Some("at_secret_456".to_string()),
-            c_nonce: Some("cn_nonce_456".to_string()),
-            c_nonce_expires_at: Some(now + 600),
             state: IssuanceState::Offered,
             created_at: now,
             redirect_uri: None,
@@ -466,6 +472,9 @@ mod tests {
         save_transaction_with_indices(&storage, &tx, 600, now)
             .await
             .unwrap();
+
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, now);
 
         // Build a key attestation whose sole attested key matches the outer proof's signer.
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
@@ -484,7 +493,7 @@ mod tests {
             "iss": "https://wallet-provider.example.com",
             "iat": now,
             "exp": now + 100_000,
-            "nonce": "cn_nonce_456",
+            "nonce": nonce,
             "attested_keys": [serde_json::to_value(&holder_pub).unwrap()],
         });
         let h_b64 = B64URL.encode(serde_json::to_vec(&attestation_header).unwrap());
@@ -513,7 +522,7 @@ mod tests {
             .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
             .unwrap();
         proof_payload
-            .set_claim("nonce", Some(serde_json::json!("cn_nonce_456")))
+            .set_claim("nonce", Some(serde_json::json!(nonce)))
             .unwrap();
         let private_jwk = keypair.to_jwk_private_key();
         let proof_signer = ES256.signer_from_jwk(&private_jwk).unwrap();
@@ -528,9 +537,10 @@ mod tests {
             }),
         };
 
-        let res = handle_credential_request(&config, &storage, "at_secret_456", &req, now + 10)
-            .await
-            .unwrap();
+        let res =
+            handle_credential_request(&config, &storage, "at_secret_456", &req, &secret, now + 10)
+                .await
+                .unwrap();
 
         assert_eq!(res.credentials.len(), 1);
     }

@@ -100,10 +100,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
         },
     };
 
-    let state = AppState {
-        storage: Arc::new(storage),
-        config: Arc::new(config),
-    };
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
 
     (state, dir)
 }
@@ -208,7 +205,9 @@ async fn full_authorization_code_flow_end_to_end() {
     let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
     assert_eq!(token_json["token_type"], "Bearer");
     assert!(!token_json["access_token"].as_str().unwrap().is_empty());
-    assert!(!token_json["c_nonce"].as_str().unwrap().is_empty());
+    // OpenID4VCI 1.0 moved challenge issuance out of the Token Response and
+    // into the Nonce Endpoint (Section 7), so `c_nonce` must not appear here.
+    assert!(token_json.get("c_nonce").is_none());
 }
 
 #[tokio::test]

@@ -1,6 +1,7 @@
 //! Holder proof of possession JWT verification for OpenID4VCI.
 
 use crate::error::IssuanceError;
+use crate::nonce::{verify_nonce, NonceSecret};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Mode;
@@ -26,7 +27,12 @@ pub struct VerifiedProof {
 
 /// Verifies a single holder proof-of-possession JWT: JWS signature (against
 /// a key identified via `jwk`, or `kid` + `key_attestation`), `typ`, `aud`,
-/// and `nonce`/expiry binding to the transaction's `c_nonce`.
+/// and the `nonce` claim.
+///
+/// The `nonce` is not compared against per-transaction state. The Nonce
+/// Endpoint is unauthenticated (OpenID4VCI Section 7.1), so a nonce is never
+/// bound to a transaction; it is instead validated as an authentic, unexpired,
+/// issuer-minted challenge via `nonce_secret` — see [`crate::nonce`].
 ///
 /// `key_attestation_mode` gates which key-source header is acceptable:
 /// `Required` rejects a bare `jwk` proof (no attestation), `Disabled`
@@ -34,16 +40,11 @@ pub struct VerifiedProof {
 pub fn verify_holder_proof(
     jwt_str: &str,
     expected_issuer: &str,
-    expected_c_nonce: &str,
-    c_nonce_expires_at: i64,
+    nonce_secret: &NonceSecret,
     now_unix: i64,
     key_attestation_mode: Mode,
     key_attestation_trust_store: &TrustStore,
 ) -> Result<VerifiedProof, IssuanceError> {
-    if now_unix > c_nonce_expires_at {
-        return Err(IssuanceError::InvalidProof("c_nonce has expired".into()));
-    }
-
     let parts: Vec<&str> = jwt_str.split('.').collect();
     if parts.len() != 3 {
         return Err(IssuanceError::InvalidProof(
@@ -86,6 +87,11 @@ pub fn verify_holder_proof(
         ));
     }
 
+    // Set on the `kid`+`key_attestation` path so the proof payload's own nonce
+    // can be required to match the attestation's, preserving Appendix F.1's
+    // single-challenge binding now that neither is looked up in storage.
+    let mut attested_nonce: Option<String> = None;
+
     let jwk: Jwk = if let Some(jwk_val) = jwk_claim {
         if key_attestation_mode == Mode::Required {
             return Err(IssuanceError::InvalidProof(
@@ -120,9 +126,11 @@ pub fn verify_holder_proof(
         let claims = crate::attestation::verify_key_attestation_jwt(
             key_attestation_jwt,
             key_attestation_trust_store,
-            expected_c_nonce,
+            nonce_secret,
             now_unix,
         )?;
+
+        attested_nonce = Some(claims.nonce.clone());
 
         claims
             .attested_keys
@@ -176,10 +184,14 @@ pub fn verify_holder_proof(
         .ok_or_else(|| {
             IssuanceError::InvalidProof("missing or non-string nonce claim in proof payload".into())
         })?;
-    if nonce != expected_c_nonce {
-        return Err(IssuanceError::InvalidProof(format!(
-            "proof nonce mismatch: got {nonce}, expected {expected_c_nonce}"
-        )));
+    verify_nonce(nonce_secret, nonce, now_unix)?;
+
+    if let Some(attested) = &attested_nonce {
+        if nonce != attested {
+            return Err(IssuanceError::InvalidProof(
+                "proof nonce does not match the key_attestation nonce".into(),
+            ));
+        }
     }
 
     Ok(VerifiedProof { holder_jwk: jwk })
@@ -192,6 +204,17 @@ mod tests {
     use foundry_core::trust::TrustStore;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwt::{self, JwtPayload};
+
+    const NOW: i64 = 1_700_000_000;
+
+    fn test_secret() -> NonceSecret {
+        NonceSecret::from_bytes([42u8; 32])
+    }
+
+    /// A real MAC-authenticated nonce, exactly as `POST /nonce` mints them.
+    fn minted_nonce(secret: &NonceSecret, now: i64) -> String {
+        crate::nonce::issue_nonce(secret, now).unwrap().c_nonce
+    }
 
     fn signed_proof_jwt(aud: &str, nonce: &str) -> String {
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
@@ -270,15 +293,16 @@ mod tests {
 
     #[test]
     fn verifies_valid_proof_jwt() {
-        let jwt_str = signed_proof_jwt("https://issuer.example.com", "nonce-123");
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, NOW);
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", &nonce);
         let empty_store = TrustStore::from_pems(&[]).unwrap();
 
         let res = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &secret,
+            NOW,
             Mode::Optional,
             &empty_store,
         )
@@ -296,6 +320,9 @@ mod tests {
         // verifier's key_id, which then made signature verification fail with
         // "the JWS kid header claim is required" even though the proof is
         // otherwise perfectly valid.
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, NOW);
+
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut public_jwk = keypair.to_jwk_public_key();
         public_jwk.set_algorithm("ES256");
@@ -312,7 +339,7 @@ mod tests {
             .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
             .unwrap();
         payload
-            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .set_claim("nonce", Some(serde_json::json!(nonce)))
             .unwrap();
 
         let private_jwk = keypair.to_jwk_private_key();
@@ -323,9 +350,8 @@ mod tests {
         let res = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &secret,
+            NOW,
             Mode::Optional,
             &empty_store,
         )
@@ -338,16 +364,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_nonce() {
+    fn rejects_nonce_not_minted_by_this_issuer() {
+        // The nonce is no longer compared to per-transaction state, so the
+        // failure mode is a nonce that carries no valid issuer MAC.
         let jwt_str = signed_proof_jwt("https://issuer.example.com", "wrong-nonce");
         let empty_store = TrustStore::from_pems(&[]).unwrap();
 
         let err = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &test_secret(),
+            NOW,
             Mode::Optional,
             &empty_store,
         )
@@ -357,13 +384,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_expired_nonce() {
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, NOW);
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", &nonce);
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+        let err = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            &secret,
+            NOW + crate::nonce::C_NONCE_TTL_SECS as i64 + 1,
+            Mode::Optional,
+            &empty_store,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("expired"), "got: {err}");
+    }
+
+    #[test]
     fn accepts_kid_plus_key_attestation_proof() {
+        let secret = test_secret();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let nonce = minted_nonce(&secret, now);
+
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut holder_pub = keypair.to_jwk_public_key();
         holder_pub.set_algorithm("ES256");
         let holder_pub_json = serde_json::to_value(&holder_pub).unwrap();
 
-        let (attestation_jwt, store) = valid_key_attestation("nonce-123", &holder_pub_json);
+        let (attestation_jwt, store) = valid_key_attestation(&nonce, &holder_pub_json);
 
         let mut header = JwsHeader::new();
         header.set_token_type("openid4vci-proof+jwt");
@@ -378,21 +432,16 @@ mod tests {
             .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
             .unwrap();
         payload
-            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .set_claim("nonce", Some(serde_json::json!(nonce)))
             .unwrap();
         let private_jwk = keypair.to_jwk_private_key();
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
         let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
         let res = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            now + 100,
+            &secret,
             now,
             Mode::Required,
             &store,
@@ -426,9 +475,8 @@ mod tests {
         let err = verify_holder_proof(
             &no_attestation_jwt,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &test_secret(),
+            NOW,
             Mode::Optional,
             &empty_store,
         )
@@ -438,15 +486,16 @@ mod tests {
 
     #[test]
     fn rejects_jwk_proof_when_key_attestation_required() {
-        let jwt_str = signed_proof_jwt("https://issuer.example.com", "nonce-123");
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, NOW);
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", &nonce);
         let empty_store = TrustStore::from_pems(&[]).unwrap();
 
         let err = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &secret,
+            NOW,
             Mode::Required,
             &empty_store,
         )
@@ -485,9 +534,8 @@ mod tests {
         let err = verify_holder_proof(
             &jwt_str,
             "https://issuer.example.com",
-            "nonce-123",
-            1_700_000_100,
-            1_700_000_000,
+            &test_secret(),
+            NOW,
             Mode::Disabled,
             &store,
         )

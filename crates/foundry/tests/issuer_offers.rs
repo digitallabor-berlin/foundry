@@ -81,7 +81,7 @@ async fn test_app(status_list_enabled: bool) -> axum::Router {
     let config = Arc::new(test_config(status_list_enabled));
     std::mem::forget(dir);
     admin_router(
-        AppState { storage, config },
+        AppState::new(storage, config),
         AdminApiKey(Some("test-admin-key".to_string())),
     )
 }

@@ -79,7 +79,7 @@ async fn test_app() -> axum::Router {
     let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
     let config = Arc::new(test_config());
     std::mem::forget(dir);
-    wallet_router(AppState { storage, config })
+    wallet_router(AppState::new(storage, config))
 }
 
 #[tokio::test]

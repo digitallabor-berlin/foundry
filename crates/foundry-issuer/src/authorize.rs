@@ -173,8 +173,6 @@ mod tests {
             tx_code: None,
             status_list_index: None,
             access_token: None,
-            c_nonce: None,
-            c_nonce_expires_at: None,
             state,
             created_at: 1_700_000_000,
             redirect_uri: Some(REDIRECT_URI.to_string()),

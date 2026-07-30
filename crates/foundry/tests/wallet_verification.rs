@@ -172,10 +172,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         },
     };
 
-    let state = AppState {
-        storage: Arc::new(storage),
-        config: Arc::new(config),
-    };
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
 
     (state, dir, issuer_leaf.cert_pem, issuer_leaf.key_pem)
 }

@@ -106,9 +106,9 @@ cargo test -p foundry-core
   Do not describe this as full X.509 validation, and do not weaken it further.
 - **`get_kv` does not filter expired rows.** Expiry is enforced only by an
   explicit `purge_expired(now_unix)` sweep; between sweeps an expired row is
-  still readable. Callers that care about freshness (nonces, transactions) MUST
-  check the expiry themselves — see how `foundry-issuer` compares
-  `c_nonce_expires_at` against `now_unix`.
+  still readable. Callers that care about freshness MUST check the expiry
+  themselves — see how `foundry-issuer`'s `load_transaction_by_access_token`
+  guards transaction reads.
 - **`put_kv`'s last argument is an absolute Unix timestamp (`expires_at`), not a
   TTL duration.** Passing a duration silently creates a row that expired in 1970.
 - **Status packing is index-0-first, least-significant-bit-first within each

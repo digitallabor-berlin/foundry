@@ -8,7 +8,6 @@ use foundry_core::config::{
 };
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::storage::SqliteStorage;
-use foundry_issuer::{load_transaction_by_access_token, save_transaction_with_indices};
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
 use josekit::jws::{JwsHeader, ES256};
@@ -100,10 +99,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
         },
     };
 
-    let state = AppState {
-        storage: Arc::new(storage),
-        config: Arc::new(config),
-    };
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
 
     (state, dir)
 }
@@ -382,12 +378,14 @@ async fn issue_offer_and_get_access_token(state: &AppState) -> String {
     token_json["access_token"].as_str().unwrap().to_string()
 }
 
-async fn mint_c_nonce(state: &AppState, access_token: &str) -> String {
+/// Fetches a `c_nonce` the way a conformant wallet does: a bare `POST /nonce`
+/// with **no** `Authorization` header (OpenID4VCI Section 7.1 — the Nonce
+/// Endpoint is not a protected resource).
+async fn mint_c_nonce(state: &AppState) -> String {
     let wallet_app = wallet_router(state.clone());
     let nonce_req = Request::builder()
         .method("POST")
         .uri("/nonce")
-        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
         .body(Body::empty())
         .unwrap();
 
@@ -402,10 +400,44 @@ async fn mint_c_nonce(state: &AppState, access_token: &str) -> String {
 }
 
 #[tokio::test]
+async fn nonce_endpoint_requires_no_access_token_and_is_uncacheable() {
+    // Regression test for the interop break this replaced: requiring a bearer
+    // token here made conformant wallets (which send none) fail to obtain a
+    // challenge, so their proof JWT carried no `nonce` claim at all and the
+    // credential request was rejected as `invalid_proof`.
+    let (state, _dir) = setup_test_app().await;
+    let wallet_app = wallet_router(state.clone());
+
+    let res = wallet_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nonce")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    // Section 7.2 MUST: the response is uncacheable.
+    assert_eq!(
+        res.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(!json["c_nonce"].as_str().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn credential_request_with_proof_aud_mismatch_is_rejected() {
     let (state, _dir) = setup_test_app().await;
     let access_token = issue_offer_and_get_access_token(&state).await;
-    let c_nonce = mint_c_nonce(&state, &access_token).await;
+    let c_nonce = mint_c_nonce(&state).await;
 
     // Build a proof whose `aud` doesn't match the configured issuer.
     let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://wrong-issuer.example.com");
@@ -439,7 +471,7 @@ async fn credential_request_with_proof_aud_mismatch_is_rejected() {
 async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
     let (state, _dir) = setup_test_app().await;
     let access_token = issue_offer_and_get_access_token(&state).await;
-    let _c_nonce = mint_c_nonce(&state, &access_token).await;
+    let _c_nonce = mint_c_nonce(&state).await;
 
     // Build a proof carrying a nonce that does not match the transaction's c_nonce.
     let (proof_jwt, _keypair) = create_proof("not-the-real-nonce", "https://issuer.example.com");
@@ -473,17 +505,19 @@ async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
 async fn credential_request_with_expired_c_nonce_is_rejected() {
     let (state, _dir) = setup_test_app().await;
     let access_token = issue_offer_and_get_access_token(&state).await;
-    let c_nonce = mint_c_nonce(&state, &access_token).await;
-
-    // Force the stored c_nonce to already be expired.
-    let mut tx = load_transaction_by_access_token(state.storage.as_ref(), &access_token)
-        .await
+    // Expiry now lives inside the nonce itself rather than on the transaction,
+    // so backdate the minting clock by more than the TTL: `issue_nonce` stamps
+    // `exp = now + TTL`, making this nonce already expired when it is issued.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .expect("transaction should exist");
-    tx.c_nonce_expires_at = Some(0);
-    save_transaction_with_indices(state.storage.as_ref(), &tx, 600, 1_700_000_000)
-        .await
-        .unwrap();
+        .as_secs() as i64;
+    let c_nonce = foundry_issuer::issue_nonce(
+        state.nonce_secret.as_ref(),
+        now - foundry_issuer::C_NONCE_TTL_SECS as i64 - 10,
+    )
+    .unwrap()
+    .c_nonce;
 
     let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
 
@@ -516,7 +550,7 @@ async fn credential_request_with_expired_c_nonce_is_rejected() {
 async fn second_credential_request_with_same_access_token_is_rejected() {
     let (state, _dir) = setup_test_app().await;
     let access_token = issue_offer_and_get_access_token(&state).await;
-    let c_nonce = mint_c_nonce(&state, &access_token).await;
+    let c_nonce = mint_c_nonce(&state).await;
 
     let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
     let cred_req_body = serde_json::json!({
@@ -604,7 +638,7 @@ async fn full_issuance_flow_with_kid_key_attestation_proof() {
     state.config = Arc::new(config);
 
     let access_token = issue_offer_and_get_access_token(&state).await;
-    let c_nonce = mint_c_nonce(&state, &access_token).await;
+    let c_nonce = mint_c_nonce(&state).await;
 
     let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
     let mut holder_pub = keypair.to_jwk_public_key();
