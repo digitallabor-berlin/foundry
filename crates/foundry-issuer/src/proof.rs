@@ -7,10 +7,14 @@ use josekit::jwk::Jwk;
 use josekit::jws::{JwsHeader, ES256};
 use serde::{Deserialize, Serialize};
 
+/// Wire shape of the OpenID4VCI `proofs` request member. Only the `jwt`
+/// proof type is supported — that is the only proof path
+/// `eudi-lib-jvm-openid4vci-kt`'s `ProofsSpecification.JwtProofs` (the
+/// wallet this issuer serves) ever emits; `di_vp` and `attestation` proof
+/// types are intentionally not accepted.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
-pub struct ProofObject {
-    pub proof_type: String,
-    pub jwt: Option<String>,
+pub struct ProofsRequest {
+    pub jwt: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -18,25 +22,16 @@ pub struct VerifiedProof {
     pub holder_jwk: Jwk,
 }
 
+/// Verifies a single holder proof-of-possession JWT: JWS signature (against
+/// the `jwk` embedded in its header), `typ`, `aud`, and `nonce`/expiry
+/// binding to the transaction's `c_nonce`.
 pub fn verify_holder_proof(
-    proof: &ProofObject,
+    jwt_str: &str,
     expected_issuer: &str,
     expected_c_nonce: &str,
     c_nonce_expires_at: i64,
     now_unix: i64,
 ) -> Result<VerifiedProof, IssuanceError> {
-    if proof.proof_type != "jwt" {
-        return Err(IssuanceError::InvalidProof(format!(
-            "unsupported proof_type: {}",
-            proof.proof_type
-        )));
-    }
-
-    let jwt_str = proof
-        .jwt
-        .as_deref()
-        .ok_or_else(|| IssuanceError::InvalidProof("missing jwt string in proof".into()))?;
-
     if now_unix > c_nonce_expires_at {
         return Err(IssuanceError::InvalidProof("c_nonce has expired".into()));
     }
@@ -111,8 +106,7 @@ mod tests {
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwt::{self, JwtPayload};
 
-    #[test]
-    fn verifies_valid_proof_jwt() {
+    fn signed_proof_jwt(aud: &str, nonce: &str) -> String {
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut public_jwk = keypair.to_jwk_public_key();
         public_jwk.set_algorithm("ES256");
@@ -125,23 +119,23 @@ mod tests {
 
         let mut payload = JwtPayload::new();
         payload
-            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .set_claim("aud", Some(serde_json::json!(aud)))
             .unwrap();
         payload
-            .set_claim("nonce", Some(serde_json::json!("nonce-123")))
+            .set_claim("nonce", Some(serde_json::json!(nonce)))
             .unwrap();
 
         let private_jwk = keypair.to_jwk_private_key();
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
-        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+        jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+    }
 
-        let proof = ProofObject {
-            proof_type: "jwt".to_string(),
-            jwt: Some(jwt_str),
-        };
+    #[test]
+    fn verifies_valid_proof_jwt() {
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", "nonce-123");
 
         let res = verify_holder_proof(
-            &proof,
+            &jwt_str,
             "https://issuer.example.com",
             "nonce-123",
             1_700_000_100,
@@ -154,35 +148,10 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_nonce() {
-        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
-        let mut public_jwk = keypair.to_jwk_public_key();
-        public_jwk.set_algorithm("ES256");
-
-        let mut header = JwsHeader::new();
-        header.set_token_type("openid4vci-proof+jwt");
-        header
-            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
-            .unwrap();
-
-        let mut payload = JwtPayload::new();
-        payload
-            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
-            .unwrap();
-        payload
-            .set_claim("nonce", Some(serde_json::json!("wrong-nonce")))
-            .unwrap();
-
-        let private_jwk = keypair.to_jwk_private_key();
-        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
-        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
-
-        let proof = ProofObject {
-            proof_type: "jwt".to_string(),
-            jwt: Some(jwt_str),
-        };
+        let jwt_str = signed_proof_jwt("https://issuer.example.com", "wrong-nonce");
 
         let err = verify_holder_proof(
-            &proof,
+            &jwt_str,
             "https://issuer.example.com",
             "nonce-123",
             1_700_000_100,

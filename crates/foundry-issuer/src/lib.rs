@@ -24,7 +24,7 @@ pub use offer::{
     build_offer_uri, generate_pre_authorized_code, generate_tx_code, AuthorizationCodeGrant,
     CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
 };
-pub use proof::{verify_holder_proof, ProofObject, VerifiedProof};
+pub use proof::{verify_holder_proof, ProofsRequest, VerifiedProof};
 pub use status_index::allocate_status_index;
 pub use token::{
     handle_token_request, refresh_c_nonce, NonceResponse, TokenRequest, TokenResponse,
