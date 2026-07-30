@@ -339,11 +339,11 @@ cargo test --workspace \
   && cargo fmt --check
 ```
 
-- [ ] Red — N/A (deletion; the gates and the four evidence checks are the test)
-- [ ] Green — members trimmed, directories deleted, lockfile regenerated
-- [ ] Refactor — N/A
-- [ ] Verify — run the command plus all four evidence checks, record the numbers
-- [ ] Commit
+- [x] Red — N/A (deletion; the gates and the four evidence checks are the test)
+- [x] Green — members trimmed, directories deleted, lockfile regenerated
+- [x] Refactor — N/A
+- [x] Verify — run the command plus all four evidence checks, record the numbers
+- [x] Commit
 
 ---
 
@@ -363,6 +363,9 @@ cargo test --workspace \
 - modify `crates/foundry/AGENTS.md` — line 20, drop `vendored openid4vp`
 - modify `crates/foundry/tests/AGENTS.md` — line 59, drop `vendored openid4vp`
   from the dev-dependency list and name `foundry_core::crypto::jwe` instead
+- modify `crates/foundry-issuer/src/metadata.rs:3` — **added during Task 4**:
+  a stale doc comment still refers to "the vendored `oid4vci` crate's generic
+  types". Reword to drop the reference to a crate that no longer exists.
 - delete `docs/VENDORING.md`
 - create `LICENSE` — Apache License 2.0 text, matching
   `license = "Apache-2.0"` in `[workspace.package]`.
@@ -508,3 +511,20 @@ Append one line per completed task: date, task, commit SHA.
   `cargo test -p foundry --test e2e_full_flow -- --ignored` **1 passed**;
   `cargo clippy --workspace --all-targets -- -D warnings` 0 diagnostics;
   `cargo fmt --check` clean.
+- 2026-07-30 — Task 4 (delete the three vendored crates) — commit `89f89e6`.
+  All four required evidence checks recorded:
+  1. `cargo test --workspace` **327 passed / 0 failed**. Every foundry-owned
+     target matches the per-target baseline below except the two deliberately
+     grown (`foundry_core` 58→65, `foundry_verifier` 35→48). Arithmetic is
+     exact: 440 − 24 − 86 − 3 = 327.
+  2. `cargo tree -i -p <x>` reports "did not match any packages" for **all** of
+     `ssi`, `oid4vci`, `openid4vp`, `openid4vp-frontend`, `open-auth2`,
+     `json-ld`, `isomdl`, `jiff`, `dashmap`, `qrcode`.
+  3. `Cargo.lock` **743 → 385 packages (−358, −48%)**.
+  4. No `.rs` reference outside `openid4vp://` URI literals and the
+     `openid4vp_uri` response field — **with one exception found here**: a
+     stale doc comment at `crates/foundry-issuer/src/metadata.rs:3` referring
+     to "the vendored `oid4vci` crate's generic types". Carried into Task 5.
+  Plus the `#[ignore]`d e2e test still passing.
+  Gates: `cargo clippy --workspace --all-targets -- -D warnings` 0
+  diagnostics; `cargo fmt --check` clean.
