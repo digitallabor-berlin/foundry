@@ -148,9 +148,11 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
             credential_issuer: "https://localhost:8443".to_string(),
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
             },
             key_attestation: AttestationMode {
                 mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
             },
             status_list: StatusListConfig {
                 enabled: false,

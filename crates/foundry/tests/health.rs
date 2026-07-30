@@ -37,9 +37,11 @@ fn test_config() -> Config {
             credential_issuer: "https://localhost:8443".to_string(),
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
             },
             status_list: StatusListConfig {
                 enabled: false,

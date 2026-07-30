@@ -60,9 +60,11 @@ async fn setup(status_list_enabled: bool) -> (AppState, tempfile::TempDir) {
             credential_issuer: "https://issuer.example.com".to_string(),
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
             },
             status_list: StatusListConfig {
                 enabled: status_list_enabled,

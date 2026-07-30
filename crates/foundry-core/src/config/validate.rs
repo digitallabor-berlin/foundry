@@ -118,20 +118,156 @@ impl Config {
             }
         }
 
-        for anchor in &self.trust_anchors {
-            let path = base_dir.join(&anchor.certs);
-            let pem = std::fs::read(&path).map_err(|e| {
-                ConfigError::Validation(format!(
-                    "trust anchor '{}' {}: {e}",
-                    anchor.name,
-                    path.display()
-                ))
-            })?;
-            crate::trust::parse_cert_pem(&pem).map_err(|e| {
-                ConfigError::Validation(format!("trust anchor '{}': {e}", anchor.name))
-            })?;
-        }
+        validate_trust_anchor_list(&self.trust_anchors, base_dir, "top-level")?;
+        validate_trust_anchor_list(
+            &self.issuer.wallet_attestation.trusted_anchors,
+            base_dir,
+            "issuer.wallet_attestation",
+        )?;
+        validate_trust_anchor_list(
+            &self.issuer.key_attestation.trusted_anchors,
+            base_dir,
+            "issuer.key_attestation",
+        )?;
 
         Ok(())
+    }
+}
+
+fn validate_trust_anchor_list(
+    anchors: &[super::model::TrustAnchor],
+    base_dir: &Path,
+    label: &str,
+) -> Result<(), ConfigError> {
+    for anchor in anchors {
+        let path = base_dir.join(&anchor.certs);
+        let pem = std::fs::read(&path).map_err(|e| {
+            ConfigError::Validation(format!(
+                "{label} trust anchor '{}' {}: {e}",
+                anchor.name,
+                path.display()
+            ))
+        })?;
+        crate::trust::parse_cert_pem(&pem).map_err(|e| {
+            ConfigError::Validation(format!("{label} trust anchor '{}': {e}", anchor.name))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::model::{
+        AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
+        StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+    };
+    use std::collections::BTreeMap;
+
+    fn minimal_config() -> Config {
+        Config {
+            server: ServerConfig {
+                wallet_facing: WalletFacingConfig {
+                    public_base_url: "https://issuer.example.com".to_string(),
+                    bind: "0.0.0.0:8443".to_string(),
+                    swagger_ui_enabled: true,
+                },
+                admin: AdminConfig {
+                    bind: "127.0.0.1:9000".to_string(),
+                    api_key: None,
+                    api_key_env: None,
+                    swagger_ui_enabled: true,
+                    console_enabled: true,
+                },
+            },
+            storage: StorageConfig {
+                path: "./foundry.db".to_string(),
+                transaction_ttl_secs: 600,
+            },
+            keys: BTreeMap::new(),
+            trust_anchors: Vec::new(),
+            issuer: IssuerConfig {
+                credential_issuer: "https://issuer.example.com".to_string(),
+                wallet_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                    trusted_anchors: Vec::new(),
+                },
+                key_attestation: AttestationMode {
+                    mode: Mode::Optional,
+                    trusted_anchors: Vec::new(),
+                },
+                status_list: StatusListConfig {
+                    enabled: false,
+                    signing_key: None,
+                    list_size: None,
+                    public_base_url: None,
+                },
+            },
+            credential_types: Vec::new(),
+            verifier: VerifierConfig {
+                client_id_scheme: "x509_san_dns".to_string(),
+                signing_key: "verifier_signing".to_string(),
+                response_encryption: None,
+                transaction_data_hashes_alg: Vec::new(),
+                named_queries: Vec::new(),
+                webhook: None,
+            },
+        }
+    }
+
+    #[test]
+    fn key_attestation_trusted_anchor_must_resolve_and_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.pem");
+        let km = crate::pki::generate_ec_key(crate::crypto::SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let mut cfg = minimal_config();
+        cfg.keys.insert(
+            "verifier_signing".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "key.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg.issuer.key_attestation.trusted_anchors.push(TrustAnchor {
+            name: "wallet-provider-ca".to_string(),
+            certs: "does-not-exist.pem".to_string(),
+        });
+
+        let err = cfg.validate_key_material(dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("wallet-provider-ca"),
+            "expected error to name the anchor, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn key_attestation_trusted_anchor_parses_when_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("key.pem");
+        let km = crate::pki::generate_ec_key(crate::crypto::SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let ca = crate::pki::new_ca("Wallet Provider Root CA", 3650).unwrap();
+        let ca_path = dir.path().join("wallet-provider-ca.pem");
+        std::fs::write(&ca_path, &ca.cert_pem).unwrap();
+
+        let mut cfg = minimal_config();
+        cfg.keys.insert(
+            "verifier_signing".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "key.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg.issuer.key_attestation.trusted_anchors.push(TrustAnchor {
+            name: "wallet-provider-ca".to_string(),
+            certs: "wallet-provider-ca.pem".to_string(),
+        });
+
+        cfg.validate_key_material(dir.path()).unwrap();
     }
 }

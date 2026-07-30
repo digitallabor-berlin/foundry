@@ -85,6 +85,8 @@ pub struct IssuerConfig {
 pub struct AttestationMode {
     #[serde(default)]
     pub mode: Mode,
+    #[serde(default)]
+    pub trusted_anchors: Vec<TrustAnchor>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
