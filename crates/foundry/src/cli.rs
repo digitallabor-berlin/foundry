@@ -57,6 +57,9 @@ pub enum Command {
         /// Output file path (e.g. openapi.json)
         #[arg(long)]
         out: String,
+        /// Emit the wallet-facing spec (openapi-wallet.json) instead of the admin spec.
+        #[arg(long, default_value_t = false)]
+        wallet: bool,
     },
     /// Manage Token Status Lists offline (get, set status bit, generate status list token).
     StatusList {
@@ -191,7 +194,28 @@ mod tests {
     fn parses_openapi_out() {
         let cli = Cli::parse_from(["foundry", "openapi", "--out", "spec.json"]);
         match cli.command {
-            Command::Openapi { out } => assert_eq!(out, "spec.json"),
+            Command::Openapi { out, wallet } => {
+                assert_eq!(out, "spec.json");
+                assert!(!wallet, "the admin spec is the default");
+            }
+            _ => panic!("expected openapi"),
+        }
+    }
+
+    #[test]
+    fn parses_openapi_wallet_flag() {
+        let cli = Cli::parse_from([
+            "foundry",
+            "openapi",
+            "--wallet",
+            "--out",
+            "openapi-wallet.json",
+        ]);
+        match cli.command {
+            Command::Openapi { out, wallet } => {
+                assert_eq!(out, "openapi-wallet.json");
+                assert!(wallet);
+            }
             _ => panic!("expected openapi"),
         }
     }

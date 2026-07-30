@@ -347,3 +347,60 @@ fn wallet_openapi_documents_vp_response_as_form_encoded() {
         "the stale text/plain request body must be gone, got: {content}"
     );
 }
+
+// --- Committed-spec drift guards ---------------------------------------------
+//
+// Nothing previously asserted that the committed specs match generator output,
+// so a change to a `#[utoipa::path]` annotation could silently desynchronise
+// them from the code. Both files are tracked, so both can be guarded.
+
+/// Compare a committed spec against freshly generated output.
+///
+/// Parsed JSON rather than raw strings: the assertion should fire on *content*
+/// drift, not on serializer whitespace. On mismatch, report the differing
+/// top-level sections and the exact regeneration command instead of dumping two
+/// entire specs into the failure output.
+fn assert_committed_spec_matches(file: &str, regen: &str, generated: String) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(file);
+    let committed_raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let committed: serde_json::Value = serde_json::from_str(&committed_raw)
+        .unwrap_or_else(|e| panic!("{file} is not valid JSON: {e}"));
+    let generated: serde_json::Value =
+        serde_json::from_str(&generated).expect("generated spec is valid JSON");
+
+    if committed == generated {
+        return;
+    }
+
+    let differing: Vec<&str> = ["openapi", "info", "paths", "components", "tags"]
+        .into_iter()
+        .filter(|k| committed.get(*k) != generated.get(*k))
+        .collect();
+
+    panic!(
+        "{file} is out of date with the generated spec.\n\
+         Differing top-level sections: {differing:?}\n\
+         Regenerate with:\n    {regen}"
+    );
+}
+
+#[test]
+fn committed_admin_openapi_matches_generated() {
+    assert_committed_spec_matches(
+        "openapi.json",
+        "cargo run -p foundry -- openapi --out openapi.json",
+        foundry::openapi::generate_admin_openapi_spec(),
+    );
+}
+
+#[test]
+fn committed_wallet_openapi_matches_generated() {
+    assert_committed_spec_matches(
+        "openapi-wallet.json",
+        "cargo run -p foundry -- openapi --wallet --out openapi-wallet.json",
+        foundry::openapi::generate_wallet_openapi_spec(),
+    );
+}
