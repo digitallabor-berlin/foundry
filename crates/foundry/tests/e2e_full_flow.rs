@@ -434,7 +434,7 @@ async fn run_verification(
     )
     .expect("attach_kb_jwt");
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",

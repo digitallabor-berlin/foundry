@@ -284,7 +284,7 @@ async fn full_verification_flow_end_to_end() {
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -434,7 +434,7 @@ async fn resubmitting_a_verification_response_is_rejected() {
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -657,7 +657,7 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
         attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
 
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": sd_jwt_vc_presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -778,7 +778,7 @@ async fn dcql_vct_mismatch_is_rejected() {
     .unwrap();
     let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -900,7 +900,7 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
     .unwrap();
     let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": presentation }),
+        &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -1055,7 +1055,7 @@ async fn mdoc_presentation_is_accepted() {
         "device_signature": B64URL.encode(&d_sig_bytes),
     });
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": vp_token }),
+        &serde_json::json!({ "vp_token": { "c1": [vp_token] } }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -1101,6 +1101,16 @@ async fn mdoc_presentation_is_accepted() {
 /// serialization, and the `TempDir` (which the caller must keep alive — dropping
 /// it deletes the SQLite file out from under the running app).
 async fn pending_verification_with_jwe() -> (axum::Router, String, String, tempfile::TempDir) {
+    pending_verification_with_vp_token(|presentation| serde_json::json!({ "c1": [presentation] }))
+        .await
+}
+
+/// As `pending_verification_with_jwe`, but lets the caller decide the `vp_token`
+/// shape, so non-conformant envelopes can be driven through the real server
+/// instead of only through unit tests.
+async fn pending_verification_with_vp_token(
+    make_vp_token: impl FnOnce(String) -> serde_json::Value,
+) -> (axum::Router, String, String, tempfile::TempDir) {
     let (state, dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
 
     let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
@@ -1190,7 +1200,7 @@ async fn pending_verification_with_jwe() -> (axum::Router, String, String, tempf
     let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
 
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": presentation }),
+        &serde_json::json!({ "vp_token": make_vp_token(presentation) }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",
@@ -1198,6 +1208,56 @@ async fn pending_verification_with_jwe() -> (axum::Router, String, String, tempf
     .unwrap();
 
     (wallet_app, verification_id, jwe_str, dir)
+}
+
+/// foundry's pre-fix SD-JWT VC shape: `vp_token` as a bare string. OpenID4VP 1.0
+/// section 8.1 requires an object keyed by DCQL credential query id, so no
+/// conformant wallet sends this. Before the envelope fix it returned
+/// `200 verified:true`, which is exactly why the bug survived the suite.
+#[tokio::test]
+async fn bare_string_vp_token_is_rejected() {
+    let (wallet_app, verification_id, jwe_str, _dir) =
+        pending_verification_with_vp_token(serde_json::Value::String).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "the pre-fix bare-string vp_token must be rejected: {body}"
+    );
+    assert!(
+        body.contains("must be a JSON object"),
+        "the message should name the expected shape: {body}"
+    );
+}
+
+/// A conformant envelope that answers a credential query this request never
+/// asked for must be rejected, not silently credited to the real query.
+#[tokio::test]
+async fn vp_token_naming_an_unrequested_query_is_rejected() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_vp_token(
+        |presentation| serde_json::json!({ "not-requested": [presentation] }),
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    assert!(body.contains("not-requested"), "body: {body}");
+    assert!(body.contains("c1"), "must name the expected id: {body}");
 }
 
 /// Read a response's status and body together, so a failing assertion can show

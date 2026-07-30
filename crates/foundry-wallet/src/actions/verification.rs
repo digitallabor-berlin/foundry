@@ -153,12 +153,23 @@ pub async fn run_verification(
     let presentation = attach_kb_jwt(compact, &holder_signer, &client_id, &nonce)
         .map_err(|e| WalletError::MalformedRequestObject(format!("attach_kb_jwt failed: {e}")))?;
 
+    // OpenID4VP 1.0 section 8.1: `vp_token` is an object keyed by the DCQL
+    // credential query id this presentation answers, and each value is an ARRAY
+    // of presentations. A bare string here is what the verifier used to accept,
+    // and no conformant wallet sends it. The key is dynamic, so the map is built
+    // explicitly rather than through a `json!` key literal.
+    let mut vp_token = serde_json::Map::new();
+    vp_token.insert(
+        matched.query_id.clone(),
+        serde_json::Value::Array(vec![serde_json::Value::String(presentation)]),
+    );
+
     // `encrypt_compact` parses the recipient JWK and encrypts in a single step,
     // so the two former failure points (invalid ephemeral JWK, then build
     // failure) collapse into one error. The underlying josekit message still
     // names which of the two actually went wrong.
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": presentation }),
+        &serde_json::json!({ "vp_token": serde_json::Value::Object(vp_token) }),
         &ephemeral_jwk,
         "ECDH-ES",
         "A128GCM",

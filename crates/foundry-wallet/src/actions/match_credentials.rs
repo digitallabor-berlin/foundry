@@ -72,6 +72,7 @@ pub fn match_credentials(
             let disclosed_claims = merged_claims;
             let result = check_dcql_match(
                 &single_entry_query,
+                &query_id,
                 PresentedFormat::SdJwtVc,
                 &disclosed_claims,
                 None,

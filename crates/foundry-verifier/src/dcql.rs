@@ -41,10 +41,17 @@ fn failed(reason: String) -> CheckResult {
 }
 
 /// Check that `disclosed_claims` satisfy `dcql_query` for a credential of
-/// `format`. `doc_type` is the mdoc docType (`None` for SD-JWT VC). Returns a
+/// `format`, for the credential query the presentation actually answers.
+/// `doc_type` is the mdoc docType (`None` for SD-JWT VC). Returns a
 /// `CheckResult { check: "dcql_match", .. }`; never errors (fail-closed).
+///
+/// `answered_query_id` is the DCQL credential query id the wallet keyed its
+/// presentation under (OpenID4VP 1.0 section 8.1). Binding to *that* query,
+/// rather than accepting any credential query of the presented format, is what
+/// stops a presentation from being credited against a query it does not answer.
 pub fn check_dcql_match(
     dcql_query: &Value,
+    answered_query_id: &str,
     format: PresentedFormat,
     disclosed_claims: &Value,
     doc_type: Option<&str>,
@@ -54,30 +61,32 @@ pub fn check_dcql_match(
         Err(e) => return failed(format!("dcql_query is not a valid DCQL query: {e}")),
     };
 
-    let mut first_reason: Option<String> = None;
-    for cq in query.credentials() {
-        if !format.matches(cq.format()) {
-            continue;
-        }
-        match credential_query_satisfied(cq, format, disclosed_claims, doc_type) {
-            Ok(()) => {
-                return CheckResult {
-                    check: "dcql_match".to_string(),
-                    passed: true,
-                    detail: Some(format!("matched credential query '{}'", cq.id())),
-                };
-            }
-            Err(reason) => {
-                if first_reason.is_none() {
-                    first_reason = Some(format!("credential query '{}': {reason}", cq.id()));
-                }
-            }
-        }
+    let Some(cq) = query
+        .credentials()
+        .iter()
+        .find(|cq| cq.id() == answered_query_id)
+    else {
+        return failed(format!(
+            "presentation answers credential query '{answered_query_id}', which is not \
+             in this request's DCQL query"
+        ));
+    };
+
+    if !format.matches(cq.format()) {
+        return failed(format!(
+            "credential query '{answered_query_id}' does not request the presented \
+             credential format"
+        ));
     }
 
-    failed(first_reason.unwrap_or_else(|| {
-        "no credential query in the DCQL query matches the presented credential format".to_string()
-    }))
+    match credential_query_satisfied(cq, format, disclosed_claims, doc_type) {
+        Ok(()) => CheckResult {
+            check: "dcql_match".to_string(),
+            passed: true,
+            detail: Some(format!("matched credential query '{answered_query_id}'")),
+        },
+        Err(reason) => failed(format!("credential query '{answered_query_id}': {reason}")),
+    }
 }
 
 fn credential_query_satisfied(
@@ -177,7 +186,7 @@ mod tests {
     fn sd_jwt_vct_and_claim_present_passes() {
         let q = sd_jwt_query("https://issuer.example/pid");
         let claims = json!({"vct":"https://issuer.example/pid","given_name":"Alice"});
-        let r = check_dcql_match(&q, PresentedFormat::SdJwtVc, &claims, None);
+        let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
         assert!(r.passed, "detail={:?}", r.detail);
         assert_eq!(r.check, "dcql_match");
     }
@@ -186,7 +195,7 @@ mod tests {
     fn sd_jwt_vct_mismatch_fails() {
         let q = sd_jwt_query("https://issuer.example/OTHER");
         let claims = json!({"vct":"https://issuer.example/pid","given_name":"Alice"});
-        let r = check_dcql_match(&q, PresentedFormat::SdJwtVc, &claims, None);
+        let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
         assert!(!r.passed);
         assert!(r.detail.unwrap().contains("vct"));
     }
@@ -195,7 +204,7 @@ mod tests {
     fn sd_jwt_missing_mandatory_claim_fails() {
         let q = sd_jwt_query("https://issuer.example/pid");
         let claims = json!({"vct":"https://issuer.example/pid"});
-        let r = check_dcql_match(&q, PresentedFormat::SdJwtVc, &claims, None);
+        let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
         assert!(!r.passed);
         assert!(r.detail.unwrap().contains("given_name"));
     }
@@ -205,9 +214,9 @@ mod tests {
         let q = json!({"credentials":[{"id":"pid","format":"dc+sd-jwt","meta":{},
             "claims":[{"path":["age_over_18"],"values":[true]}]}]});
         let ok = json!({"vct":"x","age_over_18":true});
-        assert!(check_dcql_match(&q, PresentedFormat::SdJwtVc, &ok, None).passed);
+        assert!(check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &ok, None).passed);
         let bad = json!({"vct":"x","age_over_18":false});
-        assert!(!check_dcql_match(&q, PresentedFormat::SdJwtVc, &bad, None).passed);
+        assert!(!check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &bad, None).passed);
     }
 
     #[test]
@@ -218,12 +227,19 @@ mod tests {
         let claims = json!({"org.iso.18013.5.1":{"given_name":"John"}});
         let r = check_dcql_match(
             &q,
+            "mdl",
             PresentedFormat::MsoMdoc,
             &claims,
             Some("org.iso.18013.5.1.mDL"),
         );
         assert!(r.passed, "detail={:?}", r.detail);
-        let bad = check_dcql_match(&q, PresentedFormat::MsoMdoc, &claims, Some("org.iso.WRONG"));
+        let bad = check_dcql_match(
+            &q,
+            "mdl",
+            PresentedFormat::MsoMdoc,
+            &claims,
+            Some("org.iso.WRONG"),
+        );
         assert!(!bad.passed);
     }
 
@@ -231,7 +247,7 @@ mod tests {
     fn format_mismatch_fails() {
         let q = json!({"credentials":[{"id":"mdl","format":"mso_mdoc","meta":{}}]});
         let claims = json!({"vct":"x","given_name":"Alice"});
-        let r = check_dcql_match(&q, PresentedFormat::SdJwtVc, &claims, None);
+        let r = check_dcql_match(&q, "mdl", PresentedFormat::SdJwtVc, &claims, None);
         assert!(!r.passed);
     }
 
@@ -239,7 +255,48 @@ mod tests {
     fn unparseable_query_fails_closed() {
         let q = json!({"credentials":[]}); // NonEmptyVec rejects empty -> parse error
         let claims = json!({"vct":"x"});
-        let r = check_dcql_match(&q, PresentedFormat::SdJwtVc, &claims, None);
+        let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
         assert!(!r.passed);
+    }
+
+    /// A presentation must be credited to the query it *answers*, not to any
+    /// query it happens to satisfy. Before `check_dcql_match` was bound to
+    /// `answered_query_id` this passed, because the loop accepted any credential
+    /// query of the presented format.
+    #[test]
+    fn presentation_answering_one_query_is_not_credited_to_another() {
+        let q = json!({"credentials":[
+            {"id":"strict","format":"dc+sd-jwt","meta":{},
+             "claims":[{"path":["age_over_18"],"values":[true]}]},
+            {"id":"loose","format":"dc+sd-jwt","meta":{}}
+        ]});
+        let claims = json!({"vct":"x","age_over_18":false});
+
+        let r = check_dcql_match(&q, "strict", PresentedFormat::SdJwtVc, &claims, None);
+        assert!(
+            !r.passed,
+            "must be judged against the query it answers: detail={:?}",
+            r.detail
+        );
+        assert!(r.detail.unwrap_or_default().contains("strict"));
+
+        // The same claims DO satisfy 'loose', which is what the old any-query
+        // behaviour would have latched onto to report a match.
+        assert!(check_dcql_match(&q, "loose", PresentedFormat::SdJwtVc, &claims, None).passed);
+    }
+
+    #[test]
+    fn unknown_answered_query_id_fails_closed() {
+        let q = sd_jwt_query("https://issuer.example/pid");
+        let claims = json!({"vct":"https://issuer.example/pid","given_name":"Alice"});
+        let r = check_dcql_match(
+            &q,
+            "not-in-the-query",
+            PresentedFormat::SdJwtVc,
+            &claims,
+            None,
+        );
+        assert!(!r.passed);
+        assert!(r.detail.unwrap_or_default().contains("not-in-the-query"));
     }
 }
