@@ -14,7 +14,9 @@ pub use authorize::{
     handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
 };
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
-pub use credential::{handle_credential_request, CredentialRequest, CredentialResponse};
+pub use credential::{
+    handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
+};
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,

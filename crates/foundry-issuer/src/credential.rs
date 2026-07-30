@@ -1,7 +1,7 @@
 //! OpenID4VCI credential endpoint business logic.
 
 use crate::error::IssuanceError;
-use crate::proof::{verify_holder_proof, ProofObject};
+use crate::proof::{verify_holder_proof, ProofsRequest};
 use crate::transaction::{
     load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
 };
@@ -20,16 +20,19 @@ use std::collections::BTreeMap;
 pub struct CredentialRequest {
     pub credential_configuration_id: Option<String>,
     pub format: Option<String>,
-    pub proof: Option<ProofObject>,
+    pub proofs: Option<ProofsRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct IssuedCredential {
+    pub credential: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CredentialResponse {
-    pub credential: String,
+    pub credentials: Vec<IssuedCredential>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub c_nonce: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub c_nonce_expires_in: Option<u64>,
+    pub notification_id: Option<String>,
 }
 
 pub async fn handle_credential_request(
@@ -57,18 +60,25 @@ pub async fn handle_credential_request(
         .c_nonce_expires_at
         .ok_or_else(|| IssuanceError::InvalidProof("missing c_nonce expiration".into()))?;
 
-    let proof = req
-        .proof
+    let proof_jwts = req
+        .proofs
         .as_ref()
+        .map(|p| p.jwt.as_slice())
+        .filter(|jwts| !jwts.is_empty())
         .ok_or_else(|| IssuanceError::InvalidProof("missing proof in credential request".into()))?;
 
-    let verified_proof = verify_holder_proof(
-        proof,
-        &config.issuer.credential_issuer,
-        c_nonce,
-        c_nonce_expires_at,
-        now_unix,
-    )?;
+    let verified_proofs = proof_jwts
+        .iter()
+        .map(|jwt_str| {
+            verify_holder_proof(
+                jwt_str,
+                &config.issuer.credential_issuer,
+                c_nonce,
+                c_nonce_expires_at,
+                now_unix,
+            )
+        })
+        .collect::<Result<Vec<_>, IssuanceError>>()?;
 
     let cred_type = config
         .credential_types
@@ -98,103 +108,110 @@ pub async fn handle_credential_request(
         None
     };
 
-    let holder_jwk_json = serde_json::to_value(&verified_proof.holder_jwk)
-        .map_err(|e| IssuanceError::Serialization(e.to_string()))?;
+    let mut credentials = Vec::with_capacity(verified_proofs.len());
+    for verified_proof in &verified_proofs {
+        let holder_jwk_json = serde_json::to_value(&verified_proof.holder_jwk)
+            .map_err(|e| IssuanceError::Serialization(e.to_string()))?;
 
-    let credential_str = match cred_type.format.as_str() {
-        "dc+sd-jwt" => {
-            let vct = cred_type
-                .vct
-                .clone()
-                .unwrap_or_else(|| tx.credential_type_id.clone());
+        let credential_str = match cred_type.format.as_str() {
+            "dc+sd-jwt" => {
+                let vct = cred_type
+                    .vct
+                    .clone()
+                    .unwrap_or_else(|| tx.credential_type_id.clone());
 
-            let mut always_disclosed = Map::new();
-            let mut selectively_disclosable = Map::new();
+                let mut always_disclosed = Map::new();
+                let mut selectively_disclosable = Map::new();
 
-            for claim_def in &cred_type.claims {
-                if let Some(top_key) = claim_def.path.first() {
-                    if let Some(val) = tx.claims.get(top_key) {
-                        if claim_def.selectively_disclosable {
-                            selectively_disclosable.insert(top_key.clone(), val.clone());
-                        } else {
-                            always_disclosed.insert(top_key.clone(), val.clone());
+                for claim_def in &cred_type.claims {
+                    if let Some(top_key) = claim_def.path.first() {
+                        if let Some(val) = tx.claims.get(top_key) {
+                            if claim_def.selectively_disclosable {
+                                selectively_disclosable.insert(top_key.clone(), val.clone());
+                            } else {
+                                always_disclosed.insert(top_key.clone(), val.clone());
+                            }
                         }
                     }
                 }
+
+                let (status_list_index, status_list_uri) = if config.issuer.status_list.enabled {
+                    (
+                        tx.status_list_index,
+                        config
+                            .issuer
+                            .status_list
+                            .public_base_url
+                            .as_ref()
+                            .map(|url| format!("{}/1", url.trim_end_matches('/'))),
+                    )
+                } else {
+                    (None, None)
+                };
+
+                let sd_claims = IssuerClaims {
+                    iss: config.issuer.credential_issuer.clone(),
+                    sub: format!("sub_{}", tx.transaction_id),
+                    iat: now_unix,
+                    exp: now_unix + 86400 * 365,
+                    vct,
+                    cnf_jwk: holder_jwk_json,
+                    status_list_index,
+                    status_list_uri,
+                    always_disclosed,
+                    selectively_disclosable,
+                };
+
+                build_sd_jwt_vc(sd_claims, &signer, x5c.clone()).map_err(|e| {
+                    IssuanceError::InvalidRequest(format!("sd-jwt vc build failed: {e}"))
+                })?
             }
+            "mso_mdoc" => {
+                let doc_type = cred_type
+                    .vct
+                    .clone()
+                    .or_else(|| cred_type.doctype.clone())
+                    .unwrap_or_else(|| tx.credential_type_id.clone());
 
-            let (status_list_index, status_list_uri) = if config.issuer.status_list.enabled {
-                (
-                    tx.status_list_index,
-                    config
-                        .issuer
-                        .status_list
-                        .public_base_url
-                        .as_ref()
-                        .map(|url| format!("{}/1", url.trim_end_matches('/'))),
-                )
-            } else {
-                (None, None)
-            };
+                let mut ns_map = BTreeMap::new();
+                let mut elem_map = BTreeMap::new();
+                for (k, v) in &tx.claims {
+                    elem_map.insert(k.clone(), v.clone());
+                }
+                ns_map.insert(doc_type.clone(), elem_map);
 
-            let sd_claims = IssuerClaims {
-                iss: config.issuer.credential_issuer.clone(),
-                sub: format!("sub_{}", tx.transaction_id),
-                iat: now_unix,
-                exp: now_unix + 86400 * 365,
-                vct,
-                cnf_jwk: holder_jwk_json,
-                status_list_index,
-                status_list_uri,
-                always_disclosed,
-                selectively_disclosable,
-            };
+                let mdoc_claims = MdocClaims {
+                    doc_type,
+                    namespaces: ns_map,
+                    device_key_jwk: holder_jwk_json,
+                    signed_at: now_unix,
+                    valid_until: now_unix + 86400 * 365,
+                };
 
-            build_sd_jwt_vc(sd_claims, &signer, x5c).map_err(|e| {
-                IssuanceError::InvalidRequest(format!("sd-jwt vc build failed: {e}"))
-            })?
-        }
-        "mso_mdoc" => {
-            let doc_type = cred_type
-                .vct
-                .clone()
-                .or_else(|| cred_type.doctype.clone())
-                .unwrap_or_else(|| tx.credential_type_id.clone());
+                let cbor_bytes = build_mdoc(mdoc_claims, &signer, x5c.clone()).map_err(|e| {
+                    IssuanceError::InvalidRequest(format!("mdoc build failed: {e}"))
+                })?;
 
-            let mut ns_map = BTreeMap::new();
-            let mut elem_map = BTreeMap::new();
-            for (k, v) in &tx.claims {
-                elem_map.insert(k.clone(), v.clone());
+                B64STD.encode(cbor_bytes)
             }
-            ns_map.insert(doc_type.clone(), elem_map);
+            other => {
+                return Err(IssuanceError::InvalidRequest(format!(
+                    "unsupported credential format: {other}"
+                )))
+            }
+        };
 
-            let mdoc_claims = MdocClaims {
-                doc_type,
-                namespaces: ns_map,
-                device_key_jwk: holder_jwk_json,
-                signed_at: now_unix,
-                valid_until: now_unix + 86400 * 365,
-            };
-
-            let cbor_bytes = build_mdoc(mdoc_claims, &signer, x5c)
-                .map_err(|e| IssuanceError::InvalidRequest(format!("mdoc build failed: {e}")))?;
-
-            B64STD.encode(cbor_bytes)
-        }
-        other => {
-            return Err(IssuanceError::InvalidRequest(format!(
-                "unsupported credential format: {other}"
-            )))
-        }
-    };
+        credentials.push(IssuedCredential {
+            credential: credential_str,
+        });
+    }
 
     tx.state = IssuanceState::Issued;
     save_transaction_with_indices(storage, &tx, 600, now_unix).await?;
 
     Ok(CredentialResponse {
-        credential: credential_str,
-        c_nonce: None,
-        c_nonce_expires_in: None,
+        credentials,
+        notification_id: None,
     })
 }
 
@@ -294,7 +311,7 @@ mod tests {
         }
     }
 
-    fn generate_proof(c_nonce: &str, issuer: &str) -> (ProofObject, EcKeyPair) {
+    fn generate_proof(c_nonce: &str, issuer: &str) -> (String, EcKeyPair) {
         let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut public_jwk = keypair.to_jwk_public_key();
         public_jwk.set_algorithm("ES256");
@@ -317,13 +334,7 @@ mod tests {
         let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
         let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-        (
-            ProofObject {
-                proof_type: "jwt".to_string(),
-                jwt: Some(jwt_str),
-            },
-            keypair,
-        )
+        (jwt_str, keypair)
     }
 
     #[tokio::test]
@@ -361,12 +372,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (proof, _) = generate_proof("cn_nonce_123", "https://issuer.example.com");
+        let (proof_jwt, _) = generate_proof("cn_nonce_123", "https://issuer.example.com");
 
         let req = CredentialRequest {
             credential_configuration_id: Some("pid".to_string()),
             format: Some("dc+sd-jwt".to_string()),
-            proof: Some(proof),
+            proofs: Some(ProofsRequest {
+                jwt: vec![proof_jwt],
+            }),
         };
 
         let res =
@@ -374,7 +387,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(!res.credential.is_empty());
+        assert_eq!(res.credentials.len(), 1);
+        assert!(!res.credentials[0].credential.is_empty());
 
         let updated_tx = load_transaction(&storage, "tx-cred-1")
             .await
