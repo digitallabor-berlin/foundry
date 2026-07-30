@@ -576,16 +576,25 @@ async fn get_request_object_handler(
 /// Deliberately **not** `deny_unknown_fields`: §8 permits additional members
 /// (wallets commonly echo `state`), and rejecting them would break conformant
 /// wallets.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub(crate) struct VpResponseForm {
     /// JWE compact serialization of the VP Token response.
     response: String,
 }
 
+// NOTE: `content = VpResponseForm` must stay **unqualified**. utoipa generates the
+// `$ref` from the literal spelling in this attribute, so a qualified path such as
+// `crate::server::VpResponseForm` emits a dotted name that never matches the plain
+// key `components(schemas(...))` registers — the resolver break fixed in 09b0bb0.
 #[utoipa::path(
     post,
     path = "/vp/response/{id}",
-    request_body(content = String, description = "Encrypted JWE compact serialization of the VP Token response"),
+    request_body(
+        content = VpResponseForm,
+        content_type = "application/x-www-form-urlencoded",
+        description = "OpenID4VP `direct_post.jwt` authorization response: the `response` \
+                       parameter carries the JWE compact serialization of the VP Token"
+    ),
     responses((status = 200, body = VerificationResult))
 )]
 async fn post_response_handler(

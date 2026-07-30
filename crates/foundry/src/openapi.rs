@@ -61,6 +61,7 @@ pub fn generate_admin_openapi_spec() -> String {
         foundry_issuer::ProofsRequest,
         foundry_verifier::VerificationResult,
         foundry_verifier::CheckResult,
+        crate::server::VpResponseForm,
     ))
 )]
 pub struct WalletApiDoc;

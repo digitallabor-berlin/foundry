@@ -326,3 +326,24 @@ fn admin_openapi_spec_all_refs_resolve() {
 fn wallet_openapi_spec_all_refs_resolve() {
     assert_all_refs_resolve(&foundry::openapi::generate_wallet_openapi_spec(), "wallet");
 }
+
+/// `/vp/response/{id}` carries the OpenID4VP `direct_post.jwt` authorization
+/// response, which is `application/x-www-form-urlencoded` with the JWE in a
+/// `response` parameter. Documenting it as `text/plain` sends integrators down
+/// exactly the path that produced
+/// `Invalid JWE format: Invalid symbol 61, offset 8` in the field.
+#[test]
+fn wallet_openapi_documents_vp_response_as_form_encoded() {
+    let spec = foundry::openapi::generate_wallet_openapi_spec();
+    let doc: serde_json::Value = serde_json::from_str(&spec).unwrap();
+
+    let content = &doc["paths"]["/vp/response/{id}"]["post"]["requestBody"]["content"];
+    assert!(
+        content.get("application/x-www-form-urlencoded").is_some(),
+        "the vp response body must be documented as form-encoded, got: {content}"
+    );
+    assert!(
+        content.get("text/plain").is_none(),
+        "the stale text/plain request body must be gone, got: {content}"
+    );
+}

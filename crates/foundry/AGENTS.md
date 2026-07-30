@@ -118,6 +118,18 @@ cargo test -p foundry --test e2e_full_flow
 
 ## Gotchas
 
+- **`POST /vp/response/:id` takes a form-encoded body, NOT a bare JWE.** The
+  verifier advertises `response_mode: direct_post.jwt`, so per OpenID4VP 1.0
+  §8.2/§8.3 the wallet sends `application/x-www-form-urlencoded` with the JWE in
+  a **`response`** parameter; `post_response_handler` parses it with
+  `serde_html_form` into `VpResponseForm`. Never revert this to a bare `String`
+  body extractor: consuming the raw body feeds `response=eyJhbGci…` straight to
+  josekit, which base64url-decodes the literal parameter name and fails with
+  `Invalid JWE format: Invalid symbol 61, offset 8` (`'='` at index 8 — the
+  ninth byte of `response=`). Parsing happens **before** the transaction lookup,
+  so a malformed body is a deterministic 400 rather than 400-or-404 by id. The
+  form struct must never gain `deny_unknown_fields` — §8 permits extra members
+  such as `state`.
 - **Admin auth is `Authorization: Bearer <key>`, not an `x-api-key` header.**
   See `require_api_key`.
 - **If no admin key is configured, auth is a silent no-op.**
