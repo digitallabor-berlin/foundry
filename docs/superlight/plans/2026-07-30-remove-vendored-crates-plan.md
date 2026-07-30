@@ -391,7 +391,7 @@ test-based:
 - [x] Green — all files updated, `docs/VENDORING.md` deleted, `LICENSE` added
 - [x] Refactor — N/A
 - [x] Verify — gates plus the three grep checks
-- [ ] Commit
+- [x] Commit
 
 ---
 
