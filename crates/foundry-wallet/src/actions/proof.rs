@@ -69,5 +69,16 @@ mod tests {
             serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(payload["aud"], "https://issuer.example.com");
         assert_eq!(payload["nonce"], "nonce-123");
+
+        assert!(proof
+            .private_key_pem
+            .starts_with(b"-----BEGIN PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn each_call_generates_a_distinct_key() {
+        let a = build_proof_jwt("n", "aud").unwrap();
+        let b = build_proof_jwt("n", "aud").unwrap();
+        assert_ne!(a.private_key_pem, b.private_key_pem);
     }
 }
