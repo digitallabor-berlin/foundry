@@ -78,11 +78,20 @@ client are therefore one task by necessity, not by preference.
 
 **Verify:** `cargo test --workspace`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Deviation from plan (accepted):** the form parse runs **before** the
+transaction lookup, not after. A malformed body is malformed regardless of
+whether the transaction exists, so parsing first keeps the 400 deterministic
+instead of returning 400-or-404 depending on the id. Consequence:
+`response_for_unknown_transaction_id_returns_404` previously posted
+`irrelevant-body` and now posts `response=irrelevant-body`, which narrows it to
+the unknown-id path it actually names rather than incidentally covering the
+parse path too.
 
 ---
 
@@ -122,3 +131,5 @@ client are therefore one task by necessity, not by preference.
 ## Progress Log
 
 Append one line per completed task: date, task, commit SHA.
+
+- 2026-07-30 — Task 1 (form body parsing + both clients migrated) — commit `af42b9b`. Red confirmed first: `form_encoded_response_parameter_is_accepted` failed with the exact production error `Invalid symbol 61, offset 8`, and `raw_jwe_request_body_is_rejected` failed by returning `200 verified:true`. After the fix: `cargo test --workspace` 40/40 binaries ok, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 with zero warnings, `cargo fmt --check` exit 0.
