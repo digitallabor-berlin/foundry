@@ -199,7 +199,7 @@ async fn spawn_server() -> (ServerGuard, tempfile::TempDir, u16, u16) {
 /// Build an OpenID4VCI key-proof JWT (`openid4vci-proof+jwt`) bound to
 /// `c_nonce` and `issuer`. Ported from
 /// `crates/foundry/tests/wallet_issuance.rs::create_proof`.
-fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
+fn create_proof(c_nonce: &str, issuer: &str) -> (String, EcKeyPair) {
     let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
     let mut public_jwk = keypair.to_jwk_public_key();
     public_jwk.set_algorithm("ES256");
@@ -222,10 +222,7 @@ fn create_proof(c_nonce: &str, issuer: &str) -> (serde_json::Value, EcKeyPair) {
     let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
     let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-    (
-        serde_json::json!({ "proof_type": "jwt", "jwt": jwt_str }),
-        keypair,
-    )
+    (jwt_str, keypair)
 }
 
 /// An issued SD-JWT VC credential plus what later verification/revocation
@@ -295,21 +292,24 @@ async fn create_offer_and_issue_credential(
     // (`https://localhost:8443` from the quickstart template — a metadata
     // label only, never dereferenced over the network; see the design doc's
     // non-goals), not the real bound socket address.
-    let (proof_json, holder_keypair) = create_proof(&c_nonce, "https://localhost:8443");
+    let (proof_jwt, holder_keypair) = create_proof(&c_nonce, "https://localhost:8443");
     let cred_res = client
         .post(format!("{wallet_base}/credential"))
         .bearer_auth(&access_token)
         .json(&serde_json::json!({
             "credential_configuration_id": "pid",
             "format": "dc+sd-jwt",
-            "proof": proof_json,
+            "proofs": { "jwt": [proof_jwt] },
         }))
         .send()
         .await
         .expect("POST /credential");
     assert_eq!(cred_res.status(), reqwest::StatusCode::OK);
     let cred_json: serde_json::Value = cred_res.json().await.unwrap();
-    let compact = cred_json["credential"].as_str().unwrap().to_string();
+    let compact = cred_json["credentials"][0]["credential"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(
         compact.contains('~'),
         "SD-JWT VC compact serialization must contain '~' separators"
