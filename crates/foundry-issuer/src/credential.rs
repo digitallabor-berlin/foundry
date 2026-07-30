@@ -404,4 +404,134 @@ mod tests {
             .unwrap();
         assert_eq!(updated_tx.state, IssuanceState::Issued);
     }
+
+    #[tokio::test]
+    async fn issues_credential_with_kid_key_attestation_proof() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+        use foundry_core::pki::{issue_leaf, new_ca};
+        use foundry_core::trust::parse_cert_pem;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        // Wallet Provider CA that will be configured as a trusted anchor.
+        let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "wallet-provider.example.com",
+            &["wallet-provider.example.com".to_string()],
+            365,
+        )
+        .unwrap();
+        let ca_path = key_dir.path().join("wallet-provider-ca.pem");
+        std::fs::write(&ca_path, &ca.cert_pem).unwrap();
+
+        let mut config = test_config(key_path.to_str().unwrap());
+        config.issuer.key_attestation.mode = Mode::Required;
+        config.issuer.key_attestation.trusted_anchors = vec![foundry_core::config::TrustAnchor {
+            name: "wallet-provider-ca".to_string(),
+            certs: ca_path.to_str().unwrap().to_string(),
+        }];
+
+        let storage = test_storage().await;
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let tx = IssuanceTransaction {
+            transaction_id: "tx-cred-2".to_string(),
+            credential_type_id: "pid".to_string(),
+            claims,
+            pre_authorized_code: Some("code-456".to_string()),
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some("at_secret_456".to_string()),
+            c_nonce: Some("cn_nonce_456".to_string()),
+            c_nonce_expires_at: Some(now + 600),
+            state: IssuanceState::Offered,
+            created_at: now,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+        };
+        save_transaction_with_indices(&storage, &tx, 600, now)
+            .await
+            .unwrap();
+
+        // Build a key attestation whose sole attested key matches the outer proof's signer.
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut holder_pub = keypair.to_jwk_public_key();
+        holder_pub.set_algorithm("ES256");
+
+        let leaf_der = {
+            let cert = parse_cert_pem(leaf.cert_pem.as_bytes()).unwrap();
+            use x509_cert::der::Encode;
+            cert.to_der().unwrap()
+        };
+        let x5c = vec![B64STD.encode(&leaf_der)];
+        let attestation_header =
+            serde_json::json!({"typ": "key-attestation+jwt", "alg": "ES256", "x5c": x5c});
+        let attestation_payload = serde_json::json!({
+            "iss": "https://wallet-provider.example.com",
+            "iat": now,
+            "exp": now + 100_000,
+            "nonce": "cn_nonce_456",
+            "attested_keys": [serde_json::to_value(&holder_pub).unwrap()],
+        });
+        let h_b64 = B64URL.encode(serde_json::to_vec(&attestation_header).unwrap());
+        let p_b64 = B64URL.encode(serde_json::to_vec(&attestation_payload).unwrap());
+        let signing_input = format!("{h_b64}.{p_b64}");
+        let leaf_signer = foundry_core::crypto::FileSigner::from_pem(
+            leaf.key_pem.as_bytes(),
+            SignatureAlgorithm::Es256,
+        )
+        .unwrap();
+        let sig_b64 = B64URL.encode(
+            foundry_core::crypto::Signer::sign(&leaf_signer, signing_input.as_bytes()).unwrap(),
+        );
+        let attestation_jwt = format!("{signing_input}.{sig_b64}");
+
+        let mut proof_header = JwsHeader::new();
+        proof_header.set_token_type("openid4vci-proof+jwt");
+        proof_header
+            .set_claim("kid", Some(serde_json::json!("0")))
+            .unwrap();
+        proof_header
+            .set_claim("key_attestation", Some(serde_json::json!(attestation_jwt)))
+            .unwrap();
+        let mut proof_payload = JwtPayload::new();
+        proof_payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+        proof_payload
+            .set_claim("nonce", Some(serde_json::json!("cn_nonce_456")))
+            .unwrap();
+        let private_jwk = keypair.to_jwk_private_key();
+        let proof_signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let proof_jwt =
+            jwt::encode_with_signer(&proof_payload, &proof_header, &proof_signer).unwrap();
+
+        let req = CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proofs: Some(ProofsRequest {
+                jwt: vec![proof_jwt],
+            }),
+        };
+
+        let res = handle_credential_request(&config, &storage, "at_secret_456", &req, now + 10)
+            .await
+            .unwrap();
+
+        assert_eq!(res.credentials.len(), 1);
+    }
 }
