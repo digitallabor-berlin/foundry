@@ -200,15 +200,15 @@ cargo test --workspace \
   && cargo fmt --check
 ```
 
-- [ ] Red — N/A (migration; the 12 existing tests are the guard, and they are
+- [x] Red — N/A (migration; the 12 existing tests are the guard, and they are
       already green before the change — run them first to confirm the starting
       point, then confirm again after)
-- [ ] Green — all 13 sites migrated, both manifests trimmed
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output; 420 passed, 0 failed in the
+- [x] Green — all 13 sites migrated, both manifests trimmed
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output; 420 passed, 0 failed in the
       default run, **plus** `full_flow_issue_verify_revoke_reverify` passing in
       the `--ignored` run
-- [ ] Commit
+- [x] Commit
 
 ---
 
@@ -459,3 +459,26 @@ Append one line per completed task: date, task, commit SHA.
   `cargo clippy -p foundry-core --all-targets -- -D warnings` 0 warnings;
   `cargo fmt --check` clean; `cargo test --workspace` **427 passed / 0 failed**
   (baseline 420 + 7 new).
+- 2026-07-30 — Task 2 (migrate all 13 JWE call sites) — commit `03b3a4a`.
+  12 test sites migrated by a script with hard per-file `assert n == expected`
+  counts (verify.rs 5, wallet_verification.rs 6, e2e_full_flow.rs 1); the 1
+  production site (`foundry-wallet/src/actions/verification.rs:156`) by hand
+  because its error mapping differs. `openid4vp` dropped from
+  `foundry-wallet/Cargo.toml` and `foundry/Cargo.toml`; still present in
+  `foundry-verifier/Cargo.toml` until Task 3.
+  **Deviation from the plan, deliberate:** the wallet's two distinct error
+  messages (`"invalid ephemeral jwk: {e}"` on JWK parse, `"JWE build failed:
+  {e}"` on build) collapse into the latter, since `encrypt_compact` performs
+  both steps. josekit's inner message still names the real cause; a code comment
+  records the collapse. Splitting `encrypt_compact` in two to preserve both
+  strings was judged not worth it for one call site.
+  **No test assertion was altered** — the guard held, which is the actual
+  evidence that `encrypt_compact` is wire-compatible with the verifier's
+  unmodified josekit decrypt path.
+  Gates: `cargo test --workspace` **427 passed / 0 failed**, per-target counts
+  identical to the baseline table below (`wallet_verification` 9,
+  `foundry_verifier` 35, `foundry_wallet` 48, `foundry_core` 65);
+  `cargo test -p foundry --test e2e_full_flow -- --ignored` **1 passed** (the
+  sole coverage of the 13th call site — it exercises issue → verify → revoke →
+  reverify over real HTTP); `cargo clippy --workspace --all-targets -- -D
+  warnings` 0 diagnostics; `cargo fmt --check` clean.
