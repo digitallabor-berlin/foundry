@@ -9,7 +9,7 @@
 serialization:
 
 ```rust
-// crates/foundry/src/server.rs:577-581
+// crates/foundry/src/server.rs:576-580
 async fn post_response_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
