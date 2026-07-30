@@ -282,11 +282,11 @@ land together.
 
 **Verify:** `cargo test -p foundry-verifier && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -482,3 +482,29 @@ Append one line per completed task: date, task, commit SHA.
   sole coverage of the 13th call site — it exercises issue → verify → revoke →
   reverify over real HTTP); `cargo clippy --workspace --all-targets -- -D
   warnings` 0 diagnostics; `cargo fmt --check` clean.
+- 2026-07-30 — Task 3 (clean-room DCQL model + `dcql.rs` switch) — commit
+  `9f912f7`. `foundry-verifier` no longer depends on `openid4vp`, so **no
+  foundry crate does**. Clean-room honoured: the vendored `dcql_query.rs` /
+  `credential_format/mod.rs` were not opened; requirements came from
+  `dcql.rs`, our fixtures, and OpenID4VP 1.0 §6/§7 (fetched and indexed).
+  **Three additions the plan did not specify**, each found by reading our own
+  fixtures rather than assumed, each spec-mandated and fail-closed:
+  non-empty `credentials`, non-empty `claims[].path`, non-empty
+  `claims[].values`. The first is the important one — `dcql.rs`'s
+  `unparseable_query_fails_closed` test carries the comment "NonEmptyVec
+  rejects empty -> parse error" and `config.yaml:56` ships
+  `dcql: { credentials: [] }`, so a plain `Vec` would have kept the assertion
+  true while silently changing the failure mode from *parse error* to *matched
+  nothing*. RED was taken on exactly these three before adding validation.
+  Two further implementation decisions: `ClaimValue` declares `Boolean` before
+  `Integer` before `String` because `serde(untagged)` resolves in declaration
+  order and JSON booleans must not be coerced (guarded by
+  `boolean_claim_value_is_not_coerced`); `ClaimsPathSegment::Index` is `u64`
+  so `resolve_path` casts with `*i as usize` for `serde_json`'s `Index` impl.
+  **The 7 existing `dcql.rs` conformance tests pass unmodified** — verified by
+  grepping the diff for changed assertion/fixture lines and finding none.
+  13 new model tests, including both OpenID4VP Appendix D examples verbatim.
+  Gates: `cargo test --workspace` **440 passed / 0 failed** (427 + 13);
+  `cargo test -p foundry --test e2e_full_flow -- --ignored` **1 passed**;
+  `cargo clippy --workspace --all-targets -- -D warnings` 0 diagnostics;
+  `cargo fmt --check` clean.
