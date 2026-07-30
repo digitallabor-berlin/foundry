@@ -1,5 +1,6 @@
 use crate::error::CryptoError;
 
+pub mod jwe;
 pub mod signer;
 pub use signer::FileSigner;
 

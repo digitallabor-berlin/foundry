@@ -127,11 +127,11 @@ symmetric pair (`ECDH_ES.encrypter_from_jwk`, `jwt::encode_with_encrypter`) with
 
 **Verify:** `cargo test -p foundry-core && cargo clippy -p foundry-core --all-targets -- -D warnings && cargo fmt --check`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -444,3 +444,18 @@ All other doc-test targets contribute 0.
 ## Progress Log
 
 Append one line per completed task: date, task, commit SHA.
+
+- 2026-07-30 — Task 1 (`foundry-core` JWE helper) — commit `262c7f4`.
+  Added `CryptoError::Jwe(String)` and `foundry_core::crypto::jwe::encrypt_compact`
+  (7 new tests). **The feared `kid` asymmetry is a non-issue:** encrypting to
+  the annotated public JWK (with `kid`/`use`/`alg`) and decrypting with the bare
+  private JWK round-trips cleanly — now proven by
+  `round_trips_annotated_public_to_bare_private` rather than assumed.
+  Design decision made during implementation: `encrypt_compact` **validates**
+  `alg == "ECDH-ES"` and rejects anything else, rather than accepting the
+  parameter and emitting a header that misdescribes the ciphertext. `enc` is
+  passed through to josekit, which rejects unknown values.
+  Gates: `cargo test -p foundry-core` 65 passed / 0 failed;
+  `cargo clippy -p foundry-core --all-targets -- -D warnings` 0 warnings;
+  `cargo fmt --check` clean; `cargo test --workspace` **427 passed / 0 failed**
+  (baseline 420 + 7 new).

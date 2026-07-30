@@ -38,6 +38,8 @@ pub enum CryptoError {
     Sign(String),
     #[error("key or certificate generation failed: {0}")]
     Generation(String),
+    #[error("JWE encryption failed: {0}")]
+    Jwe(String),
 }
 
 #[derive(Debug, Error)]
