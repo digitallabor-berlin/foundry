@@ -486,3 +486,157 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         "an unsigned, non-JWT-shaped value must not be accepted as a valid Wallet Attestation"
     );
 }
+
+// ---------------------------------------------------------------------------
+// VCI-0033 — OpenID4VCI Token Request (L653): `pre-authorized_code` MUST be
+// present when `grant_type` is the pre-authorized code grant.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
+    let storage = test_storage().await;
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: None,
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+
+    let result =
+        handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_000).await;
+
+    assert!(
+        result.is_err(),
+        "a pre-authorized_code grant without a pre-authorized_code must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0034 — OpenID4VCI Token Request (L654): `tx_code` MUST be present if a
+// `tx_code` object was present in the Credential Offer.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
+    let cfg = test_config();
+    let storage = test_storage().await;
+    let req = CreateOfferRequest {
+        credential_type_id: "pid".to_string(),
+        claims: claims_with("given_name", "Alice"),
+        tx_code_required: true,
+        redirect_uri: None,
+    };
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None, // omitted, though the offer required one
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+
+    let result =
+        handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010).await;
+
+    assert!(
+        result.is_err(),
+        "omitting tx_code when the offer required one must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0035 — OpenID4VCI Token Request (L654): `tx_code` MUST only be used
+// when `grant_type` is the pre-authorized code grant — an authorization_code
+// grant request must not be affected by an incidental `tx_code` value.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
+    let cfg = test_config();
+    let storage = test_storage().await;
+    let redirect_uri = "eudi-openid4ci://authorize";
+    let resp = create_offer(
+        &cfg,
+        &storage,
+        offer_request(Some(redirect_uri)),
+        1_700_000_000,
+    )
+    .await
+    .unwrap();
+    let issuer_state = resp
+        .credential_offer
+        .grants
+        .authorization_code
+        .as_ref()
+        .unwrap()
+        .issuer_state
+        .clone()
+        .unwrap();
+
+    let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let params = AuthorizeParams {
+        response_type: "code".to_string(),
+        client_id: "wallet-dev".to_string(),
+        redirect_uri: redirect_uri.to_string(),
+        state: None,
+        code_challenge: s256_code_challenge(code_verifier),
+        code_challenge_method: "S256".to_string(),
+        issuer_state,
+    };
+    let outcome = handle_authorize_request(
+        &storage,
+        &params,
+        cfg.storage.transaction_ttl_secs,
+        1_700_000_005,
+    )
+    .await;
+    let code = match outcome {
+        AuthorizeOutcome::Success { code, .. } => code,
+        other => panic!("expected AuthorizeOutcome::Success, got {other:?}"),
+    };
+
+    // tx_code has no meaning for this grant; a stray value must not change
+    // the outcome.
+    let token_req = TokenRequest {
+        grant_type: "authorization_code".to_string(),
+        pre_authorized_code: None,
+        tx_code: Some("999999".to_string()),
+        code: Some(code),
+        redirect_uri: Some(redirect_uri.to_string()),
+        client_id: Some("wallet-dev".to_string()),
+        code_verifier: Some(code_verifier.to_string()),
+    };
+    handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
+        .await
+        .expect("a stray tx_code must not affect the authorization_code grant");
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0038 — OpenID4VCI Token Request (L668): the Authorization Server MUST
+// ignore unrecognized Token Request parameters.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0038_token_request_ignores_unrecognized_parameters() {
+    let json = serde_json::json!({
+        "grant_type": "urn:ietf:params:oauth:grant-type:pre-authorized_code",
+        "pre-authorized_code": "abc123",
+        "some_unrecognized_field": "whatever",
+        "another_bogus_one": 42,
+    });
+
+    let req: TokenRequest = serde_json::from_value(json)
+        .expect("unrecognized fields must not cause deserialization to fail");
+
+    assert_eq!(req.pre_authorized_code.as_deref(), Some("abc123"));
+}

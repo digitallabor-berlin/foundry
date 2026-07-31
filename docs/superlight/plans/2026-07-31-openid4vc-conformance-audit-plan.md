@@ -323,11 +323,11 @@ implements neither, and the rows make that visible rather than absent.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (13 rows: 10 conforming, 3 not-implemented; zero new gaps)
+- [x] Red / Green / Refactor per behavior (4 new tests, all green; 3 conforming clauses cite pre-existing tests unchanged)
+- [x] Record gaps — none this task
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
