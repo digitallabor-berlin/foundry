@@ -463,3 +463,532 @@ async fn haip_0008_authorization_response_includes_iss() {
         "RFC9207 requires the `iss` parameter in a successful Authorization Response; got {location}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// VCI-0032 — OpenID4VCI Authorization Error Response (L632): the
+// Authorization Error Response MUST be made as defined in RFC6749.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0032_authorize_error_redirect_encodes_error_per_rfc6749() {
+    let (state, _dir) = setup_test_app().await;
+    let issuer_state = create_authz_code_offer_issuer_state(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let code_challenge = code_challenge_for(CODE_VERIFIER);
+    // `redirect_uri` and `issuer_state` are both valid and trusted here, so
+    // the rejected `code_challenge_method` (RFC6749/PKCE requires S256, not
+    // `plain`) surfaces via `AuthorizeOutcome::ErrorRedirect`, not
+    // `DirectError` — exactly the same domain-level path already proven by
+    // foundry-issuer's `wrong_code_challenge_method_is_an_error_redirect`;
+    // this test captures the HTTP-level rendering of that outcome.
+    let authorize_uri = format!(
+        "/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}\
+         &state=xyz-state&code_challenge={code_challenge}&code_challenge_method=plain\
+         &issuer_state={issuer_state}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri(authorize_uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let authorize_res = wallet_app.oneshot(authorize_req).await.unwrap();
+
+    assert_eq!(
+        authorize_res.status(),
+        StatusCode::SEE_OTHER,
+        "RFC6749 SS4.1.2.1 delivers an Authorization Error Response via redirect, not a direct error body"
+    );
+    let location = authorize_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(location.starts_with(REDIRECT_URI));
+    // `append_query` (server.rs) percent-encodes every parameter value with
+    // `NON_ALPHANUMERIC`, which also escapes `_` and `-` (%5F / %2D) -- so
+    // `error`/`state` are asserted against their encoded form here rather
+    // than the plain ASCII a human would type.
+    assert!(
+        location.contains("error=invalid%5Frequest"),
+        "RFC6749 SS4.1.2.1 requires the `error` parameter on the redirect; got {location}"
+    );
+    assert!(
+        location.contains("state=xyz%2Dstate"),
+        "RFC6749 SS4.1.2.1 requires echoing `state` on the redirect when the client sent one; got {location}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0117 / VCI-0119 — OpenID4VCI Credential Issuer Metadata (L1320, L1325):
+// the Credential Issuer MUST respond with HTTP 200 and the metadata
+// parameters, and MUST indicate the media type via the `Content-Type` header.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0117_0119_issuer_metadata_endpoint_returns_http_200_and_json_content_type() {
+    let (state, _dir) = setup_test_app().await;
+    let wallet_app = wallet_router(state.clone());
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/.well-known/openid-credential-issuer")
+        .body(Body::empty())
+        .unwrap();
+    let res = wallet_app.oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-11 — OpenID4VCI Credential Issuer Metadata (L1312): Issuers
+// publishing metadata MUST make it available at the path formed by inserting
+// `/.well-known/openid-credential-issuer` into the Credential Issuer
+// Identifier *between the host and path components* — per the spec's own
+// worked example (L1314), a Credential Issuer Identifier of
+// `https://issuer.example.com/tenant1` must serve its metadata from
+// `https://issuer.example.com/.well-known/openid-credential-issuer/tenant1`.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-11: OpenID4VCI Credential Issuer Metadata (L1312) — when config.issuer.credential_issuer carries a path component, the well-known metadata document is never reachable at the spec-mandated location: wallet_router (server.rs) always registers the endpoint at the literal root path '/.well-known/openid-credential-issuer', with no logic that inserts any path segment from config"]
+async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("foundry.db");
+    let storage = SqliteStorage::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+
+    let config = Config {
+        server: ServerConfig {
+            wallet_facing: WalletFacingConfig {
+                public_base_url: "https://issuer.example.com/tenant1".to_string(),
+                bind: "0.0.0.0:8443".to_string(),
+                swagger_ui_enabled: false,
+            },
+            admin: AdminConfig {
+                bind: "127.0.0.1:9000".to_string(),
+                api_key: Some("test-admin-key".to_string()),
+                api_key_env: None,
+                swagger_ui_enabled: false,
+                console_enabled: false,
+            },
+        },
+        storage: StorageConfig {
+            path: db_path.to_str().unwrap().to_string(),
+            transaction_ttl_secs: 600,
+        },
+        keys: BTreeMap::new(),
+        trust_anchors: Vec::new(),
+        issuer: IssuerConfig {
+            credential_issuer: "https://issuer.example.com/tenant1".to_string(),
+            wallet_attestation: AttestationMode {
+                mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
+            },
+            key_attestation: AttestationMode {
+                mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
+            },
+            status_list: StatusListConfig {
+                enabled: false,
+                signing_key: None,
+                list_size: None,
+                public_base_url: None,
+            },
+        },
+        credential_types: vec![],
+        verifier: VerifierConfig {
+            client_id_scheme: "x509_san_dns".to_string(),
+            signing_key: "verifier_signing".to_string(),
+            response_encryption: None,
+            transaction_data_hashes_alg: vec![],
+            named_queries: vec![],
+            webhook: None,
+        },
+    };
+
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
+    let wallet_app = wallet_router(state);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/.well-known/openid-credential-issuer/tenant1")
+        .body(Body::empty())
+        .unwrap();
+    let res = wallet_app.oneshot(req).await.unwrap();
+
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "the well-known metadata document MUST be reachable at the path formed by inserting \
+         /.well-known/openid-credential-issuer between the host and path components of the \
+         Credential Issuer Identifier"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Shared harness for VP-0134 and the AGENTS.md Sec4.3 HTTP-layer mapping
+// check — a full OpenID4VP `direct_post.jwt` round trip exercised through
+// the real HTTP routers (GET /vp/request/:id, POST /vp/response/:id), so
+// response headers (not just status codes) can be asserted directly. Closely
+// modeled on crates/foundry/tests/wallet_verification.rs's `setup_test_app` /
+// `full_verification_flow_end_to_end` / `run_status_flow`; duplicated rather
+// than imported, per this run's Global Constraint that new conformance tests
+// live in new files and never modify existing ones.
+// ---------------------------------------------------------------------------
+async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("foundry.db");
+    let issuer_key_path = dir.path().join("issuer.pem");
+    let verifier_key_path = dir.path().join("verifier.pem");
+
+    let root = foundry_core::pki::new_ca("Foundry Task18 Test Root CA", 365).unwrap();
+    let issuer_leaf = foundry_core::pki::issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "localhost",
+        &["localhost".to_string()],
+        365,
+    )
+    .unwrap();
+    std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
+
+    let verifier_km =
+        foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+            .unwrap();
+    std::fs::write(&verifier_key_path, &verifier_km.private_pem).unwrap();
+
+    let trust_root_path = dir.path().join("trust_root.pem");
+    std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
+
+    let storage = SqliteStorage::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        "issuer_key".to_string(),
+        foundry_core::config::KeyEntry {
+            private_key: issuer_key_path.to_str().unwrap().to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    keys.insert(
+        "verifier_signing".to_string(),
+        foundry_core::config::KeyEntry {
+            private_key: verifier_key_path.to_str().unwrap().to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+
+    let config = Config {
+        server: ServerConfig {
+            wallet_facing: WalletFacingConfig {
+                public_base_url: "https://localhost:8443".to_string(),
+                bind: "0.0.0.0:8443".to_string(),
+                swagger_ui_enabled: true,
+            },
+            admin: AdminConfig {
+                bind: "127.0.0.1:9000".to_string(),
+                api_key: Some("test-admin-key".to_string()),
+                api_key_env: None,
+                swagger_ui_enabled: true,
+                console_enabled: true,
+            },
+        },
+        storage: StorageConfig {
+            path: db_path.to_str().unwrap().to_string(),
+            transaction_ttl_secs: 600,
+        },
+        keys,
+        trust_anchors: vec![foundry_core::config::TrustAnchor {
+            name: "test_ca".to_string(),
+            certs: trust_root_path.to_str().unwrap().to_string(),
+        }],
+        issuer: IssuerConfig {
+            credential_issuer: "https://localhost:8443".to_string(),
+            wallet_attestation: AttestationMode {
+                mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
+            },
+            key_attestation: AttestationMode {
+                mode: Mode::Disabled,
+                trusted_anchors: Vec::new(),
+            },
+            status_list: StatusListConfig {
+                enabled: false,
+                signing_key: None,
+                list_size: None,
+                public_base_url: None,
+            },
+        },
+        credential_types: vec![CredentialType {
+            id: "pid".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://localhost:8443/vct/pid".to_string()),
+            doctype: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![ClaimDef {
+                path: vec!["given_name".to_string()],
+                selectively_disclosable: true,
+                display: vec![],
+            }],
+        }],
+        verifier: VerifierConfig {
+            client_id_scheme: "x509_san_dns".to_string(),
+            signing_key: "verifier_signing".to_string(),
+            response_encryption: None,
+            transaction_data_hashes_alg: vec![],
+            named_queries: vec![],
+            webhook: None,
+        },
+    };
+
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
+
+    (state, dir, issuer_leaf.cert_pem, issuer_leaf.key_pem)
+}
+
+fn der_b64_for_x5c(pem_bytes: &[u8]) -> String {
+    std::str::from_utf8(pem_bytes)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Create a verification request and GET /vp/request/:id, returning the
+/// verification id plus the fields a holder needs to build a Presentation:
+/// `client_id`, `nonce`, and the ephemeral encryption JWK.
+async fn begin_verification_request(
+    state: &AppState,
+) -> (String, String, String, serde_json::Value) {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "request_uri"
+    });
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+    let create_res = admin_app.oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: foundry_verifier::CreateVerificationResponse =
+        serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    (verification_id, client_id, nonce, ephem_public_jwk)
+}
+
+/// Build a KB-JWT-bound SD-JWT VC presentation for the `pid` credential type,
+/// signed by a fresh holder key and the harness's issuer leaf certificate.
+/// `status_list` is `(index, uri)` when the credential should carry a
+/// `status.status_list` claim.
+fn build_presentation(
+    issuer_cert_pem: &str,
+    issuer_key_pem: &str,
+    client_id: &str,
+    nonce: &str,
+    status_list: Option<(u64, String)>,
+) -> String {
+    let holder_kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer = foundry_core::crypto::FileSigner::from_pem(
+        &holder_kp.to_pem_private_key(),
+        foundry_core::crypto::SignatureAlgorithm::Es256,
+    )
+    .unwrap();
+    let issuer_signer = foundry_core::crypto::FileSigner::from_pem(
+        issuer_key_pem.as_bytes(),
+        foundry_core::crypto::SignatureAlgorithm::Es256,
+    )
+    .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let (status_list_index, status_list_uri) = match status_list {
+        Some((idx, uri)) => (Some(idx), Some(uri)),
+        None => (None, None),
+    };
+
+    let claims = foundry_sd_jwt_vc::builder::IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index,
+        status_list_uri,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+    let issuer_pres = foundry_sd_jwt_vc::builder::build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64_for_x5c(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    foundry_sd_jwt_vc::builder::attach_kb_jwt(issuer_pres, &holder_signer, client_id, nonce)
+        .unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// VP-0134 — OpenID4VP Response / Response Mode `direct_post` (L1276): on
+// successful processing the Response URI MUST respond with HTTP 200,
+// `Content-Type: application/json`, and a JSON object body.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vp_0134_response_on_success_is_http_200_with_json_content_type() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_verifier_flow_app().await;
+    let (verification_id, client_id, nonce, ephem_public_jwk) =
+        begin_verification_request(&state).await;
+
+    let presentation =
+        build_presentation(&issuer_cert_pem, &issuer_key_pem, &client_id, &nonce, None);
+    let jwe_str = foundry_core::crypto::jwe::encrypt_compact(
+        &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    let wallet_app = wallet_router(state.clone());
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+    let post_resp_res = wallet_app.oneshot(post_resp_req).await.unwrap();
+
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+    assert_eq!(
+        post_resp_res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json",
+        "VP-0134: a successful Response URI response MUST use Content-Type: application/json"
+    );
+
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verify_result: foundry_verifier::VerificationResult =
+        serde_json::from_slice(&verify_bytes).unwrap();
+    assert!(verify_result.verified);
+}
+
+// ---------------------------------------------------------------------------
+// AGENTS.md Sec4.3 — Network status-fetch unavailability MUST surface as
+// HTTP 502 (BAD_GATEWAY), not a policy verdict, all the way through the real
+// `POST /vp/response/:id` HTTP endpoint — extending Task 16's
+// `vp_0152_status_endpoint_unreachable_is_a_hard_error_through_full_verification`
+// (foundry-verifier library level) with HTTP-layer evidence for VP-0152.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vp_0152_status_fetch_network_failure_maps_to_http_502() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_verifier_flow_app().await;
+    let (verification_id, client_id, nonce, ephem_public_jwk) =
+        begin_verification_request(&state).await;
+
+    // Bind a listener to reserve a port, then drop it immediately without
+    // ever serving anything: connecting to that port now fails fast with
+    // connection-refused, a genuine (and quick) network failure rather than
+    // a slow timeout.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let dead_status_uri = format!("http://{addr}/statuslists/1");
+
+    let presentation = build_presentation(
+        &issuer_cert_pem,
+        &issuer_key_pem,
+        &client_id,
+        &nonce,
+        Some((0, dead_status_uri)),
+    );
+    let jwe_str = foundry_core::crypto::jwe::encrypt_compact(
+        &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    let wallet_app = wallet_router(state.clone());
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+    let post_resp_res = wallet_app.oneshot(post_resp_req).await.unwrap();
+
+    assert_eq!(
+        post_resp_res.status(),
+        StatusCode::BAD_GATEWAY,
+        "AGENTS.md Sec4.3: a Status List fetch network failure MUST surface as HTTP 502, not a policy verdict"
+    );
+    let body_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "status_unavailable");
+}
