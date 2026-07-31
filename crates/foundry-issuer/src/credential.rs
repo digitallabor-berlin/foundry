@@ -36,6 +36,15 @@ pub struct CredentialResponse {
     pub notification_id: Option<String>,
 }
 
+/// `skip_all` is mandatory: the arguments include the bearer `access_token`, the
+/// holder proofs and the whole `Config`.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        credential_configuration_id = ?req.credential_configuration_id,
+        format = ?req.format,
+    )
+)]
 pub async fn handle_credential_request(
     config: &Config,
     storage: &dyn Storage,
@@ -44,9 +53,14 @@ pub async fn handle_credential_request(
     nonce_secret: &NonceSecret,
     now_unix: i64,
 ) -> Result<CredentialResponse, IssuanceError> {
+    tracing::info!("credential request received");
     let mut tx = load_transaction_by_access_token(storage, access_token)
         .await?
-        .ok_or_else(|| IssuanceError::InvalidGrant("invalid or expired access_token".into()))?;
+        .ok_or_else(|| {
+            // Never log the token itself, only that presenting it failed.
+            tracing::warn!("access_token did not resolve to a live transaction");
+            IssuanceError::InvalidGrant("invalid or expired access_token".into())
+        })?;
 
     if tx.state != IssuanceState::Offered {
         return Err(IssuanceError::InvalidGrant(

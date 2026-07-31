@@ -40,6 +40,10 @@ pub struct TokenResponse {
     pub expires_in: u64,
 }
 
+/// `skip_all` is mandatory: `req` carries the pre-authorized code, the
+/// authorization code and the transaction code, none of which may ever be
+/// logged.
+#[tracing::instrument(skip_all, fields(grant_type = %req.grant_type))]
 pub async fn handle_token_request(
     storage: &dyn Storage,
     req: &TokenRequest,
@@ -47,8 +51,17 @@ pub async fn handle_token_request(
     attestation_header: Option<&str>,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
+    tracing::info!(
+        wallet_attestation_mode = ?attestation_mode,
+        wallet_attestation_present = attestation_header.is_some(),
+        "token request received"
+    );
     let verifier = DefaultAttestationVerifier;
-    verifier.verify_wallet_attestation(attestation_mode, attestation_header)?;
+    verifier
+        .verify_wallet_attestation(attestation_mode, attestation_header)
+        .inspect_err(|e| {
+            tracing::warn!(error.kind = e.kind(), "wallet attestation rejected");
+        })?;
 
     match req.grant_type.as_str() {
         "urn:ietf:params:oauth:grant-type:pre-authorized_code" => {

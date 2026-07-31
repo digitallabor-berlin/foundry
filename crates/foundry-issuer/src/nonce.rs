@@ -108,7 +108,11 @@ impl NonceSecret {
 }
 
 /// Mint a fresh `c_nonce` valid for [`C_NONCE_TTL_SECS`].
+/// `skip_all` is mandatory: the argument is the process's `c_nonce` MAC secret.
+/// The minted nonce is likewise never logged — only that one was issued.
+#[tracing::instrument(skip_all)]
 pub fn issue_nonce(secret: &NonceSecret, now_unix: i64) -> Result<NonceResponse, IssuanceError> {
+    tracing::debug!(ttl_secs = C_NONCE_TTL_SECS, "issuing c_nonce");
     let exp = now_unix + C_NONCE_TTL_SECS as i64;
 
     let mut payload = [0u8; PAYLOAD_LEN];
@@ -129,6 +133,9 @@ pub fn issue_nonce(secret: &NonceSecret, now_unix: i64) -> Result<NonceResponse,
 ///
 /// The MAC is checked before the embedded expiry is trusted, because that
 /// expiry is attacker-supplied until the MAC proves this issuer minted it.
+/// `skip_all` is mandatory: the arguments are the MAC secret and the `c_nonce`
+/// value itself.
+#[tracing::instrument(skip_all)]
 pub fn verify_nonce(
     secret: &NonceSecret,
     c_nonce: &str,

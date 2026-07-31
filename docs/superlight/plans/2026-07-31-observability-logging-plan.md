@@ -602,11 +602,37 @@ return type, or status mapping in this task — instrumentation only.
 
 **Verify:** `cargo test -p foundry-verifier -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 479 workspace tests pass, clippy and fmt clean.
+
+Instead of the plan's per-event behavioural assertions, this task adds
+`crates/foundry/tests/instrumentation_hygiene.rs` — three **structural** guards
+enforcing the rules that would otherwise depend on every future author
+remembering them: `skip_all` on every instrument attribute, the documented field
+names still being emitted, and payload fields being gated on
+`obs::sensitive_enabled()`. Behavioural event assertions over a real flow belong
+to Task 11, which drives the routers end to end; duplicating them here would
+have meant reconstructing the verifier's private test fixtures.
+
+Rationale for not testing engine events from inside the engine crates: the
+capture layer lives in `crates/foundry`, and `foundry-verifier` cannot depend on
+it (upward dependency). Adding `tracing-subscriber` as a dev-dependency there
+would breach the plan's "only two Cargo.toml additions" constraint.
+
+**All three guards were verified to fire**, not merely to pass:
+- removing a `sensitive_enabled()` gate → payload test fails, naming the file
+  and line;
+- a synthetic `#[tracing::instrument]` without `skip_all` → hygiene test fails,
+  naming it.
+- Incidentally discovered: dropping `skip_all` from `check_status` does not even
+  compile, because `&dyn StatusListResolver` is not `Debug`. A stronger
+  guarantee, but only incidental — which is why the grep guard still earns its
+  place.
 
 ---
 
@@ -759,3 +785,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 6 (error kind()) — bb57a73
 - 2026-07-31 — Task 7 (error logging at mappers) — 1779ce6
 - 2026-07-31 — Task 8 (persist failure reason) — 06185e6
+- 2026-07-31 — Task 9 (verifier instrumentation) — 2363be6

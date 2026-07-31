@@ -21,6 +21,7 @@ josekit = { workspace = true }
 utoipa = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 x509-cert = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

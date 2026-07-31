@@ -39,6 +39,18 @@ pub struct CreateOfferResponse {
 /// Default tx_code length when `tx_code_required` is set (HAIP-typical 4 digits).
 const DEFAULT_TX_CODE_LENGTH: usize = 4;
 
+/// `skip_all` is mandatory: `req` carries the claim values to be issued and the
+/// optional transaction code.
+#[tracing::instrument(
+    skip_all,
+    fields(
+        credential_type_id = %req.credential_type_id,
+        tx_code_required = req.tx_code_required,
+        // A redirect URI means an authorization_code grant; the URI itself is
+        // caller-supplied, so only its presence is recorded.
+        authorization_code_grant = req.redirect_uri.is_some(),
+    )
+)]
 pub async fn create_offer(
     cfg: &Config,
     storage: &dyn Storage,

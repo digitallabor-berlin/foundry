@@ -65,6 +65,9 @@ fn is_valid_code_challenge(code_challenge: &str) -> bool {
 /// re-saving the transaction (to persist the minted `authorization_code`)
 /// requires the caller to supply the TTL again, exactly as `create_offer`
 /// and `/token` already do.
+/// `skip_all` is mandatory: `params` carries `issuer_state` and the redirect
+/// parameters.
+#[tracing::instrument(skip_all)]
 pub async fn handle_authorize_request(
     storage: &dyn Storage,
     params: &AuthorizeParams,

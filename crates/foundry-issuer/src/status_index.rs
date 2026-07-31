@@ -17,6 +17,7 @@ const MAX_ATTEMPTS: u32 = 20;
 /// `credential_type_id`, via CSPRNG draw + storage check-and-set. The
 /// allocated index is never released (no expiry on the "used" marker) —
 /// index release/reuse policy is out of scope for this phase.
+#[tracing::instrument(skip_all, fields(credential_type_id = %credential_type_id, list_size))]
 pub async fn allocate_status_index(
     storage: &dyn Storage,
     credential_type_id: &str,

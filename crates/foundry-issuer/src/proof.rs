@@ -37,6 +37,9 @@ pub struct VerifiedProof {
 /// `key_attestation_mode` gates which key-source header is acceptable:
 /// `Required` rejects a bare `jwk` proof (no attestation), `Disabled`
 /// rejects a `kid`+`key_attestation` proof, `Optional` accepts either.
+/// `skip_all` is mandatory: `jwt_str` is the holder's proof JWT and
+/// `nonce_secret` is the process MAC secret.
+#[tracing::instrument(skip_all, fields(key_attestation_mode = ?key_attestation_mode))]
 pub fn verify_holder_proof(
     jwt_str: &str,
     expected_issuer: &str,

@@ -41,6 +41,9 @@ pub struct KeyAttestationClaims {
 /// The nonce is validated against `nonce_secret` rather than compared to
 /// per-transaction state, because the Nonce Endpoint is unauthenticated and so
 /// nonces are never bound to a transaction (see [`crate::nonce`]).
+/// `skip_all` is mandatory: the arguments are the attestation JWT and the
+/// process MAC secret.
+#[tracing::instrument(skip_all)]
 pub fn verify_key_attestation_jwt(
     key_attestation_jwt: &str,
     trust_store: &TrustStore,
