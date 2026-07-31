@@ -198,12 +198,31 @@ fn select_presentation<'a>(
     Ok((cq.id().to_string(), selected))
 }
 
+/// `skip_all` is mandatory here, not stylistic: the default `instrument`
+/// behaviour `Debug`-formats every argument, which would write `Config` and
+/// `VerificationTransaction` — the latter holding `ephem_private_jwk` — plus the
+/// raw JWE straight into the log. Fields are opt-in, always.
+#[tracing::instrument(
+    skip_all,
+    fields(tx_id = %tx.id, transport = %tx.transport, jwe_len = encrypted_jwe_str.len())
+)]
 pub async fn verify_vp_response(
     config: &Config,
     tx: &mut VerificationTransaction,
     encrypted_jwe_str: &str,
     resolver: &dyn StatusListResolver,
 ) -> Result<VerificationResult, VerificationError> {
+    tracing::info!("verifying vp response");
+
+    // Payload access is doubly gated: the explicit dev-only flag AND a
+    // debug/trace level. Either alone is insufficient authorisation.
+    if foundry_core::obs::sensitive_enabled() {
+        tracing::debug!(
+            vp_response_jwe = %encrypted_jwe_str,
+            "SENSITIVE: raw encrypted response"
+        );
+    }
+
     match do_verify_vp_response(config, tx, encrypted_jwe_str, resolver).await {
         Ok(result) => {
             tx.state = if result.verified {
@@ -211,6 +230,35 @@ pub async fn verify_vp_response(
             } else {
                 VerificationState::Failed
             };
+
+            // One record per check, so an operator can see which stage rejected a
+            // presentation without reading the JSON verdict.
+            for check in &result.checks {
+                if check.passed {
+                    tracing::info!(check = %check.check, passed = true, "verification check");
+                } else {
+                    tracing::warn!(
+                        check = %check.check,
+                        passed = false,
+                        detail = %check.detail.as_deref().unwrap_or(""),
+                        "verification check failed"
+                    );
+                }
+            }
+
+            // A policy failure (DCQL mismatch, revoked credential) is a 200 with
+            // verified: false, so `warn` — not `error` — is the right level: the
+            // service behaved correctly.
+            if result.verified {
+                tracing::info!(verified = true, "vp response verified");
+            } else {
+                tracing::warn!(
+                    verified = false,
+                    failed_checks = result.checks.iter().filter(|c| !c.passed).count(),
+                    "vp response not verified"
+                );
+            }
+
             tx.result = Some(result.clone());
             Ok(result)
         }
@@ -283,6 +331,7 @@ fn check_name_for(err: &VerificationError) -> &'static str {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn do_verify_vp_response(
     config: &Config,
     tx: &VerificationTransaction,
@@ -304,6 +353,14 @@ async fn do_verify_vp_response(
 
     let response_json = serde_json::to_value(jwt_payload.claims_set())
         .map_err(|e| VerificationError::Decryption(e.to_string()))?;
+
+    tracing::debug!(step = "jwe_decryption", "response decrypted");
+    if foundry_core::obs::sensitive_enabled() {
+        tracing::trace!(
+            decrypted_response = %response_json,
+            "SENSITIVE: decrypted response payload"
+        );
+    }
 
     let mut checks = vec![CheckResult {
         check: "jwe_decryption".to_string(),

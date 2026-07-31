@@ -199,6 +199,9 @@ fn encode_transaction_data(
         .collect()
 }
 
+/// `skip_all` is mandatory: the default would `Debug`-format `Config` and the
+/// whole request into the span.
+#[tracing::instrument(skip_all, fields(tx_id, named_query_ref = ?req.named_query_ref))]
 pub async fn create_verification_request(
     config: &Config,
     storage: &dyn Storage,
@@ -289,6 +292,17 @@ pub async fn create_verification_request(
     save_verification_transaction(storage, &tx, config.storage.transaction_ttl_secs, now_unix)
         .await?;
 
+    // Recorded on the span so that every later event in this request — and the
+    // wallet's subsequent GET /vp/request/:id and POST /vp/response/:id — can be
+    // threaded together by one `tx_id` value.
+    tracing::Span::current().record("tx_id", tracing::field::display(&tx.id));
+    tracing::info!(
+        tx_id = %tx.id,
+        transport = %tx.transport,
+        ttl_secs = config.storage.transaction_ttl_secs,
+        "verification request created"
+    );
+
     let base_url = config
         .server
         .wallet_facing
@@ -332,6 +346,8 @@ pub async fn create_verification_request(
     }
 }
 
+/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
+#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
 pub fn build_signed_request_object(
     config: &Config,
     tx: &VerificationTransaction,

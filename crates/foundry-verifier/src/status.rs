@@ -81,6 +81,8 @@ fn failed(detail: String) -> CheckResult {
 /// Status List Token failing trust-anchor/`sub`/`exp` verification is a
 /// **failed** check. Only an IO/network failure fetching the token is a hard
 /// `Err(VerificationError::StatusUnavailable)`.
+/// `skip_all` is mandatory: `disclosed_claims` holds the holder's claim values.
+#[tracing::instrument(skip_all)]
 pub async fn check_status(
     disclosed_claims: &Value,
     trust_store: &TrustStore,
@@ -92,7 +94,13 @@ pub async fn check_status(
         .and_then(|s| s.get("status_list"))
     {
         Some(sl) => sl,
-        None => return Ok(passed("no status list claim present")),
+        None => {
+            tracing::debug!(
+                check = "status_check",
+                "credential carries no status list claim; nothing to check"
+            );
+            return Ok(passed("no status list claim present"));
+        }
     };
 
     let uri = match status_list.get("uri").and_then(|v| v.as_str()) {
@@ -112,8 +120,19 @@ pub async fn check_status(
         }
     };
 
+    // The status list URI is issuer-published infrastructure, not holder data, so
+    // it is safe at `info`. `idx` identifies a position in a public bitstring and
+    // reveals nothing about the holder on its own.
+    tracing::info!(status_list_uri = %uri, idx, "fetching status list token");
+
     // IO: fetch the token. A network failure is a hard, recoverable error.
-    let token = resolver.fetch(uri).await?;
+    let token = resolver.fetch(uri).await.inspect_err(|e| {
+        tracing::error!(
+            status_list_uri = %uri,
+            error.kind = e.kind(),
+            "status list token could not be fetched"
+        );
+    })?;
 
     // Per draft-ietf-oauth-status-list-14 §5.1 the token's `sub` MUST equal the
     // referenced token's `uri`, so we verify against `uri` as the expected sub.
@@ -127,11 +146,27 @@ pub async fn check_status(
     };
 
     match verified.status_at(idx) {
-        Ok(StatusValue::Valid) => Ok(passed(&format!("index {idx} is valid"))),
-        Ok(other) => Ok(failed(format!(
-            "credential status at index {idx} is {other:?}"
-        ))),
-        Err(e) => Ok(failed(format!("status lookup failed at index {idx}: {e}"))),
+        Ok(StatusValue::Valid) => {
+            tracing::info!(idx, status = "valid", "credential status is valid");
+            Ok(passed(&format!("index {idx} is valid")))
+        }
+        Ok(other) => {
+            // A revoked or suspended credential is a policy outcome, not a fault:
+            // `warn`, and the caller still returns HTTP 200 with
+            // verified: false (root AGENTS.md §4.3).
+            tracing::warn!(
+                idx,
+                status = ?other,
+                "credential status is not valid"
+            );
+            Ok(failed(format!(
+                "credential status at index {idx} is {other:?}"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(idx, detail = %e, "status lookup failed");
+            Ok(failed(format!("status lookup failed at index {idx}: {e}")))
+        }
     }
 }
 

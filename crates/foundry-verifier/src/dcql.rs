@@ -33,6 +33,14 @@ impl PresentedFormat {
 }
 
 fn failed(reason: String) -> CheckResult {
+    // A DCQL mismatch is a policy outcome: the caller returns HTTP 200 with
+    // verified: false (root AGENTS.md §4.3). `warn` says "the presentation did
+    // not satisfy the query", not "foundry malfunctioned".
+    //
+    // The reason names the credential query or claim path that missed. Claim
+    // *paths* are query structure, chosen by the verifier's own configuration —
+    // not holder values — so they are safe at this level.
+    tracing::warn!(check = "dcql_match", reason = %reason, "dcql query not satisfied");
     CheckResult {
         check: "dcql_match".to_string(),
         passed: false,

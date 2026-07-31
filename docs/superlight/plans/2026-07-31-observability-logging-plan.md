@@ -547,11 +547,23 @@ this boundary rather than widening the cap.
 
 **Verify:** `cargo test -p foundry-verifier -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 4 tests; 476 workspace tests pass, clippy and fmt clean. All seven
+pre-existing state assertions in `verify.rs` still pass, as does
+`wallet_verification.rs:330`.
+
+**Verified by mutation, not by assertion alone.** Reverting the
+`tx.result = Some(..)` assignment makes all three new behavioural tests fail;
+restoring it makes them pass. Without that step, "the tests pass" would have
+said nothing about whether they actually detect the regression.
+
+The `save_verification_transaction` half of this task landed in Task 7, since it
+lives in `server.rs` alongside the other discarded-error fixes.
 
 ---
 
@@ -746,3 +758,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 5 (http_log access log) — e0a88d8
 - 2026-07-31 — Task 6 (error kind()) — bb57a73
 - 2026-07-31 — Task 7 (error logging at mappers) — 1779ce6
+- 2026-07-31 — Task 8 (persist failure reason) — 06185e6
