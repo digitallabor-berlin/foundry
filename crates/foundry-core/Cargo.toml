@@ -16,6 +16,7 @@ tracing = { workspace = true }
 josekit = { workspace = true }
 x509-cert = { workspace = true }
 base64 = { workspace = true }
+sha2 = { workspace = true }
 rcgen = { workspace = true }
 time = { workspace = true }
 flate2 = { workspace = true }

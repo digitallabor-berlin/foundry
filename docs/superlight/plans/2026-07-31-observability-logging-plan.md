@@ -140,11 +140,18 @@ no `unwrap`, no `Result`.
 
 **Verify:** `cargo test -p foundry-core`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 13 tests. Added beyond the plan: an RFC 7638 §3.1 known-answer
+vector (without it the thumbprint tests were only self-consistent), a
+member-order/extra-member invariance test, an RSA+OKP key-type test, a
+`max = 0` boundary case, and a direct assertion that a thumbprint contains no
+key material. Flag behaviour is one test, not several, because the flag is
+process-global and concurrent `#[test]` functions would race on it.
 
 ---
 
@@ -645,4 +652,4 @@ not something a test can assert.
 Append one line per completed task: date, task, commit SHA.
 
 - 2026-07-31 — Phase 2 spec committed — cff20ec
-- 2026-07-31 — Phase 3 plan committed — 842c37d
+- 2026-07-31 — Phase 3 plan committed — 842c37d- 2026-07-31 — Task 1 (foundry_core::obs) — ec33518
