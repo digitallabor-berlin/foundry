@@ -684,3 +684,4 @@ to green over the completed report.
 - 2026-07-31 — scope amendment: W3C VC profiles + `di_vp` marked `out-of-scope`, VCI in-scope 201 → 181 — `443c830`
 - 2026-07-31 — Task 4 (extract OpenID4VP: 266 clauses, 161 in scope; attribution rule for presentation-binding clauses recorded in the report's Audit Boundary) — `faf1db3`
 - 2026-07-31 — Task 5 (extract HAIP: 96 clauses, 77 in scope; extraction phase complete, 592 clauses total, 419 awaiting adjudication) — `8fb33d0`
+- 2026-07-31 — Task 6 (adjudicate Credential Offer: 14 rows — 7 conforming, 5 not-implemented, 2 gap; GAP-VCI-01 pre-authorized_code reuse, GAP-HAIP-01 missing scope value) — `b0243dd`
