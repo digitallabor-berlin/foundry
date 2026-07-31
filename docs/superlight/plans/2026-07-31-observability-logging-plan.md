@@ -313,11 +313,21 @@ site; the module itself installs nothing globally.
 
 **Verify:** `cargo test -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 9 tests; 451 workspace tests pass, clippy and fmt clean. Added
+beyond the plan: `CaptureHandle` is `Clone` (clones share one buffer),
+`at_least(level)` and `clear()` helpers, an `init_for_test(filter)` convenience
+wrapper returning a scoped `DefaultGuard`, and a test proving `contains_value`
+also finds a secret recorded on a **span** rather than an event — a per-event
+check would have missed that, and it is exactly the shape a leak would take.
+Typed `Visit` hooks are implemented rather than falling through to
+`record_debug`, because `Debug` quotes strings and quoted values break the
+substring assertions the redaction suite depends on.
 
 ---
 
@@ -685,3 +695,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 1 (foundry_core::obs) — 718b2e6
 - 2026-07-31 — Task 2 (LoggingConfig) — 66673d6
 - 2026-07-31 — Task 3 (CLI/precedence/startup order) — 88d30b4
+- 2026-07-31 — Task 4 (log_capture test layer) — b298f07

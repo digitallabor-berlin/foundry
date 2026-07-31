@@ -77,7 +77,7 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
         .route_layer(middleware::from_fn_with_state(api_key, require_api_key))
         .with_state(state);
 
-    unauthenticated.merge(authenticated)
+    crate::http_log::with_access_log(unauthenticated.merge(authenticated), "admin")
 }
 
 pub fn wallet_router(state: AppState) -> Router {
@@ -107,7 +107,7 @@ pub fn wallet_router(state: AppState) -> Router {
         router.route("/api-docs/openapi.json", get(wallet_openapi_json_handler))
     };
 
-    router.with_state(state)
+    crate::http_log::with_access_log(router.with_state(state), "wallet")
 }
 
 pub(crate) async fn wallet_openapi_json_handler(
