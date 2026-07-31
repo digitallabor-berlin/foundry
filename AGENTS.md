@@ -139,6 +139,38 @@ verdicts, evidence, and the register of known gaps — lives in
 It is a living document: closing a gap means updating the affected rows there,
 not only changing the code.
 
+### 4.5 Observability Must Not Leak
+
+Logging is a request-path concern and is governed like one.
+
+- **Every `#[tracing::instrument]` MUST carry `skip_all`.** Without it, every
+  argument is `Debug`-formatted into the span — which in these crates means
+  `Config`, `VerificationTransaction` (holding `ephem_private_jwk`), access
+  tokens, holder proofs and raw JWEs. Fields are opt-in, always.
+- **Never logged, at any level, under any flag:** private and ephemeral JWKs,
+  signer keys, the admin API key, access tokens, `c_nonce` values and the nonce
+  secret, pre-authorized codes, authorization codes, transaction codes. Public
+  keys appear only as RFC 7638 thumbprints (`foundry_core::obs::thumbprint`).
+- **Payload fields require BOTH `foundry_core::obs::sensitive_enabled()` AND a
+  `debug`/`trace` level** — never one alone. A level is not authorisation;
+  `RUST_LOG=debug` is ordinary in production.
+- **Every typed error produces exactly one log record**, emitted inside the
+  relevant error mapper in `crates/foundry/src/server.rs` — never at the call
+  site (that duplicates) and never nowhere (that is the defect this rule exists
+  to prevent). A handler collapsing to a bare `StatusCode` must still log.
+- **Level follows meaning:** a policy outcome (DCQL mismatch, revoked
+  credential) is `warn` and still HTTP 200 per §4.3; `error` is for actual
+  faults.
+- **Log field names are operator-facing API.** `request_id`, `tx_id`, `route`,
+  `method`, `listener`, `http.status`, `latency_ms`, `error.kind`,
+  `error.detail`. Renaming one is a breaking change for whoever is watching the
+  logs; update `README.md` too.
+
+Enforced by `crates/foundry/tests/instrumentation_hygiene.rs` (structural) and
+`crates/foundry/tests/logging_redaction.rs` (behavioural, with a positive
+control). Operator-facing documentation lives in the "Logging & Observability"
+section of [`README.md`](README.md).
+
 ---
 
 ## 5. Verification Gates

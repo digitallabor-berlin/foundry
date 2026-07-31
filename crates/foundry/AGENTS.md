@@ -27,14 +27,16 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 
 | File | Responsibility |
 |---|---|
-| `lib.rs` | Declares `admin_auth`, `cli`, `commands`, `logging`, `openapi`, `server`; re-exports the OpenAPI surface |
-| `main.rs` | `#[tokio::main]`; parses `Cli`, calls `logging::init`, then **dispatches the `Command` match inline** (there is no `commands::execute`) |
-| `cli.rs` | Clap definitions: `Cli`, `LogFormat`, `Command`, and the sub-action enums `ConfigAction`, `KeysAction`, `CertAction`, `StatusListCommands` |
+| `lib.rs` | Declares `admin_auth`, `cli`, `commands`, `http_log`, `log_capture`, `logging`, `openapi`, `server`; re-exports the OpenAPI surface |
+| `main.rs` | `#[tokio::main]`; parses `Cli`, **best-effort-loads the config to shape the subscriber**, calls `logging::init`, then **dispatches the `Command` match inline** (there is no `commands::execute`) |
+| `cli.rs` | Clap definitions: `Cli`, `LogFormat` (+ `From` into the core `LogFormat`), `Command::config_path`, and the sub-action enums `ConfigAction`, `KeysAction`, `CertAction`, `StatusListCommands` |
 | `commands.rs` | Non-serve command implementations: `keys_generate`, `cert_new_ca`, `cert_issue`, `quickstart`, `status_list_get`, `status_list_set`, `status_list_token` |
 | `server.rs` | `AppState`, both routers, every handler, all four error mappers, `spawn_sweeper`, and `serve` |
 | `admin_auth.rs` | `AdminApiKey` (resolved from config literal or env var) and the `require_api_key` middleware |
 | `openapi.rs` | `AdminApiDoc` / `WalletApiDoc` (`utoipa::OpenApi`) and `generate_admin_openapi_spec` / `generate_wallet_openapi_spec` |
-| `logging.rs` | `init(level, format)` — tracing subscriber, human or JSON |
+| `logging.rs` | `resolve_level` / `resolve_format` / `resolve_sensitive` (precedence `RUST_LOG` > CLI > config > default), `build_filter`, and `init` |
+| `http_log.rs` | `with_access_log(router, listener)` — per-request correlation span and one access record; sets `x-request-id` |
+| `log_capture.rs` | Capturing `tracing` layer used by tests to assert on what was logged |
 
 ### Route table — admin listener (`admin_router`, binds `server.admin.bind`)
 
@@ -107,9 +109,10 @@ No admin route is mounted on the wallet router, and vice versa.
 
 ## Tests
 
-Inline `#[cfg(test)]` modules live in `openapi.rs`, `admin_auth.rs`, and
-`cli.rs`. Everything else is covered by the integration suite under `tests/` —
-see [`tests/AGENTS.md`](tests/AGENTS.md) for the per-file coverage map.
+Inline `#[cfg(test)]` modules live in `openapi.rs`, `admin_auth.rs`, `cli.rs`,
+`logging.rs`, `http_log.rs`, `log_capture.rs`, and `server.rs`. Everything else
+is covered by the integration suite under `tests/` — see
+[`tests/AGENTS.md`](tests/AGENTS.md) for the per-file coverage map.
 
 ```bash
 cargo test -p foundry
@@ -138,6 +141,25 @@ cargo test -p foundry --test e2e_full_flow
   every request through. `serve` only logs a warning
   ("admin endpoints are UNAUTHENTICATED (dev only)"). Never rely on the
   middleware being active without checking config.
+- **`log_capture.rs` is deliberately `pub`, not `#[cfg(test)]`.** Integration
+  tests under `tests/` link the library compiled *without* `cfg(test)`, so a
+  gated helper would be invisible to them — including the redaction suite, which
+  is the only test proving no secret reaches the log. Moving it behind
+  `cfg(test)` silently disables that guarantee.
+- **`main.rs` loads the config twice, on purpose.** The subscriber must exist
+  before anything worth logging happens, but `logging:` lives in the config file.
+  So `main` best-effort-loads it (discarding the error) to choose log settings,
+  and the matched arm reuses that value where it succeeded. The authoritative
+  load still runs in the arm, so a broken config still fails with its typed
+  `ConfigError`.
+- **`logging::init` must be called exactly once per process** —
+  `tracing_subscriber`'s `init()` panics on a second call. Tests use
+  `log_capture::capture_layer` with a scoped subscriber instead.
+- **Error logging lives inside the four mappers, never at their call sites.**
+  Every typed error passes through exactly one mapper exactly once, so that
+  placement is what makes coverage complete and double-logging impossible. A
+  handler that returns a bare `StatusCode` must call `internal_error(..)`; a test
+  asserts no `map_err(|_| StatusCode::…)` survives in this file.
 - **`serve()` overwrites `openapi.json` and `openapi-wallet.json` in the process
   working directory on every startup.** Running the server from the repo root
   therefore mutates two tracked files. This — not the CLI — is what actually

@@ -25,14 +25,15 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 
 | File | Responsibility |
 |---|---|
-| `lib.rs` | Declares `config`, `crypto`, `error`, `pki`, `status_list`, `storage`, `trust` |
+| `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust` |
 | `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model` |
-| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig` |
+| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat` |
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
 | `crypto/signer.rs` | `FileSigner` — PEM-file-backed `Signer` implementation |
 | `crypto/jwe.rs` | `encrypt_compact(payload, recipient_public_jwk, alg, enc)` — ECDH-ES JWE compact serialization over `josekit`, the encrypt counterpart to `foundry-verifier`'s decrypt path. Rejects any `alg` other than `ECDH-ES` rather than emitting a header that misdescribes the ciphertext |
 | `error.rs` | All error enums plus the `CoreError` umbrella and `CoreResult<T>` alias |
+| `obs.rs` | Observability support shared by both engines and the binary: the process-global sensitive-payload flag (`set_sensitive` / `sensitive_enabled`) and the redaction helpers `truncate` and `thumbprint` (RFC 7638). **Contains no log statements** |
 | `pki/mod.rs` | **Dev-only** PKI: `KeyMaterial`, `CertMaterial`, `generate_ec_key`, `new_ca`, `issue_leaf` |
 | `status_list/mod.rs` | Token Status List (IETF `draft-ietf-oauth-status-list-14`): status packing, zlib compression, `StatusList`, signed Status List Token build/sign/verify, and `Storage`-backed persistence |
 | `storage/mod.rs` | The async `Storage` trait; re-exports `SqliteStorage` |

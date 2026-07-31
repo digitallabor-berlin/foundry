@@ -302,6 +302,111 @@ cargo run -p foundry -- cert issue \
 
 ---
 
+## Logging & Observability
+
+Every HTTP request on both listeners produces one structured log record, and
+every typed error produces exactly one — so an operator can follow both what
+happened and why it failed.
+
+### Choosing a level
+
+Three sources can set the log level. They are resolved in this order, highest
+priority first:
+
+| Priority | Source | Example |
+|---|---|---|
+| 1 | `RUST_LOG` environment variable | `RUST_LOG=info,foundry_verifier=debug` |
+| 2 | `--log-level` CLI flag | `foundry --log-level debug serve --config config.yaml` |
+| 3 | `logging.level` in the config file | see below |
+| 4 | built-in default | `info` |
+
+The same ladder applies to the output format (`--log-format` /
+`logging.format`, no environment tier) and to payload logging
+(`--log-sensitive` / `logging.sensitive_payloads`).
+
+```bash
+# Everything at info, but verbose verification internals
+RUST_LOG=info,foundry_verifier=debug foundry serve --config config.yaml
+
+# JSON output for a log shipper
+foundry --log-format json serve --config config.yaml
+```
+
+> **A silent log usually means a typo, not a bug.** `RUST_LOG` accepts any
+> target name, so a misspelled level such as `RUST_LOG=infoo` builds a valid
+> filter that matches nothing — and the process then logs nothing at all, with
+> no warning. Only a *syntactically* invalid directive is reported and downgraded
+> to `info`.
+
+### Configuration file
+
+All three settings can live in `config.yaml`. The whole section is optional; a
+config without it behaves exactly as before.
+
+```yaml
+logging:
+  level: info                  # any EnvFilter directive
+  format: human                # human | json
+  sensitive_payloads: false    # DEV/TEST ONLY — see the warning below
+```
+
+### Following a request
+
+Every access record carries these fields. They are stable names — alerting and
+log queries can rely on them:
+
+| Field | Meaning |
+|---|---|
+| `request_id` | Random per request; also returned in the `x-request-id` response header |
+| `method` | HTTP method |
+| `route` | The route **template** (`/vp/response/:id`), never the concrete path |
+| `listener` | `admin` or `wallet` — the two listeners bind different ports |
+| `http.status` | Response status |
+| `latency_ms` | Time to produce the response |
+| `error.kind` | Stable error-variant name, on failure records |
+| `error.detail` | Human-readable reason, length-capped |
+
+The level follows the status class: 2xx/3xx at `info`, 4xx at `warn`, 5xx at
+`error`.
+
+**To reconstruct one wallet interaction**, grep the domain transaction id
+(`tx_id`) rather than `request_id`. A presentation spans three requests across
+both listeners — `POST /admin/verification/requests`, then the wallet's
+`GET /vp/request/:id` and `POST /vp/response/:id` — and `tx_id` is what ties them
+together:
+
+```bash
+# Whole flow for one transaction
+foundry serve --config config.yaml 2>&1 | grep 'v_1a2b3c'
+
+# Or, if a wallet reported a failure, start from the header it saw
+foundry serve --config config.yaml 2>&1 | grep '<the x-request-id value>'
+```
+
+A failed verification records which stage rejected the presentation, using the
+same check names the successful path reports — `jwe_decryption`,
+`sd_jwt_vc_signature_and_kb_jwt`, `mdoc_issuer_auth_and_device_signature`,
+`dcql_match`, `status_check` — and the reason is also persisted on the
+transaction, so it appears in the admin API and the test console rather than only
+in the log.
+
+### `sensitive_payloads` — development only
+
+> **Do not enable this in production.** With `sensitive_payloads: true` (or
+> `--log-sensitive`), `debug` and `trace` records may include raw JWEs,
+> `vp_token` values, decrypted response payloads and disclosed claim values —
+> that is, holder personal data. The process prints a `WARN` on startup whenever
+> the flag is on.
+
+Without the flag, no payload is logged at any level. Regardless of the flag,
+these are **never** logged: private and ephemeral JWKs, the admin API key,
+access tokens, `c_nonce` values and the nonce secret, pre-authorized codes,
+authorization codes and transaction codes. Public keys appear only as RFC 7638
+thumbprints. This is enforced by tests
+(`crates/foundry/tests/logging_redaction.rs`), not by convention.
+
+---
+
 ## Debug Wallet CLI/TUI (`foundry-wallet`)
 
 `foundry-wallet` is a debug EUDI wallet used to drive and inspect `foundry`'s

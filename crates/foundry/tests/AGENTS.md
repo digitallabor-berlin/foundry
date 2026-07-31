@@ -35,6 +35,8 @@ cargo test --workspace                                 # the gate (root AGENTS.m
 | `cli_status_list.rs` | `status-list set` → `get` → `token` round-trip | `commands::status_list_{set,get,token}` |
 | `quickstart.rs` | `quickstart` emits a valid dev PKI and a loadable config | `commands::quickstart` |
 | `e2e_full_flow.rs` | Boots the real binary (`quickstart`, then `serve`) and drives it over HTTP as a wallet: issue → verify → revoke → re-verify | the whole stack |
+| `logging_redaction.rs` | Drives real issuance and presentation flows with planted secrets and asserts none reaches the log at any level; includes the positive control proving `sensitive_payloads` actually unlocks payloads, and that one `tx_id` threads a whole flow | `http_log`, the four error mappers, `foundry_core::obs`, engine instrumentation |
+| `instrumentation_hygiene.rs` | Structural guards: every `#[tracing::instrument]` carries `skip_all`, the documented field names are still emitted, payload fields are gated on `obs::sensitive_enabled()` | all instrumented crates |
 
 ## Shared Setup Patterns
 

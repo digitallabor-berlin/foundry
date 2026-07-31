@@ -59,6 +59,20 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 
 ## Binding Invariants
 
+- **Every `#[tracing::instrument]` in this crate MUST carry `skip_all`.** Without
+  it every argument is `Debug`-formatted into the span — including `Config` and
+  `VerificationTransaction`, which holds `ephem_private_jwk`, plus raw JWE
+  strings. Fields are opt-in, always. Enforced by
+  `crates/foundry/tests/instrumentation_hygiene.rs`.
+- **Payload-bearing log fields require BOTH `obs::sensitive_enabled()` AND a
+  `debug`/`trace` level.** A level alone is not authorisation — `RUST_LOG=debug`
+  is ordinary in production. Never log an ephemeral or private JWK at all.
+  Redaction tiers: see the "Logging & Observability" section of the root
+  [README.md](../../README.md).
+- **A policy failure logs at `warn`, not `error`.** A DCQL mismatch or a revoked
+  credential is a correct outcome that still returns HTTP 200 with
+  `verified: false` (root [AGENTS.md](../../AGENTS.md) §4.3); reserve `error` for
+  actual faults such as an unreachable status list.
 - **`verified` MUST equal `checks.iter().all(|c| c.passed)`** — never hardcode
   `verified: true`; it is computed once at the end of `do_verify_vp_response` —
   full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
@@ -68,6 +82,12 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   **A single result contains four of them**, because the SD-JWT VC and mdoc
   checks are mutually exclusive (chosen by whether `vp_token` is a JSON string
   or an object) — full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
+- **The error path of `verify_vp_response` MUST populate `tx.result`.** Setting
+  only `tx.state = Failed` leaves the reason inside the returned `Err`, which the
+  HTTP layer sends to the *wallet* — so the admin console renders a bare red
+  "failed" with no explanation (it shows its checks list only when `tx.result` is
+  present). `check_name_for` maps the aborting variant onto the same check
+  vocabulary the success path uses.
 - **Never skip a push on a failure path.** An omitted `CheckResult` silently
   disappears from `all(passed)` and can turn a failure into a pass — root
   [AGENTS.md](../../AGENTS.md) §4.2.

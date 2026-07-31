@@ -70,6 +70,18 @@ Other public surface:
 
 ## Binding Invariants
 
+- **Every `#[tracing::instrument]` in this crate MUST carry `skip_all`.** These
+  functions take the bearer `access_token`, holder proof JWTs, the `c_nonce` MAC
+  secret and the whole `Config` as arguments, so the default would `Debug`-format
+  all of it into the span. Fields are opt-in, always. Enforced by
+  `crates/foundry/tests/instrumentation_hygiene.rs`.
+- **Never log a credential-issuance secret.** Not the pre-authorized code, the
+  authorization code, the transaction code, the access token, a `c_nonce` value,
+  the nonce secret, or a holder proof JWT. Log the *shape* of the exchange
+  (grant type, configuration id, format, outcome) and public keys only as RFC 7638
+  thumbprints. Redaction tiers: see the "Logging & Observability" section of the
+  root [README.md](../../README.md); enforced by
+  `crates/foundry/tests/logging_redaction.rs`.
 - **No `.unwrap()` / `.expect()` / `panic!()` / `unreachable!()`** anywhere
   outside `#[cfg(test)]` — this crate is named explicitly in the rule; always
   return `IssuanceError` — full rule: root [AGENTS.md](../../AGENTS.md) §4.1.

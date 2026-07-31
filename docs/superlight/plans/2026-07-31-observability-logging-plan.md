@@ -729,11 +729,34 @@ fix the emitting site, never weaken the assertion.
 
 **Verify:** `cargo test -p foundry --test logging_redaction`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 6 tests; 485 workspace tests pass, clippy and fmt clean. As planned,
+this task added **no** production code — and found no leaks, so none was needed.
+
+**Verified by mutation.** Logging the access token in
+`handle_credential_request` fails `issuance_never_logs_...` with "access token
+leaked into the log"; making `obs::sensitive_enabled()` return `false`
+unconditionally fails the positive control with its "the switch is inert"
+message. Both were then reverted.
+
+Each negative test also asserts the captured buffer and each planted secret are
+non-empty *before* searching, so no assertion can pass vacuously.
+
+Added beyond the plan: a test that one `tx_id` threads a whole presentation
+across three requests on two listeners — the property that turns a pile of log
+lines into a diagnosis, and the thing Q3 of the interview was actually about.
+
+**Clippy caught a real defect in the test harness**, not a style nit: the
+process-global flag needs serialising, and the first version held a
+`std::sync::MutexGuard` across `.await`, which can deadlock on a multi-threaded
+runtime. Switched to `tokio::sync::Mutex` rather than suppressing the lint.
+
+---
 
 ---
 
@@ -803,3 +826,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 8 (persist failure reason) — 06185e6
 - 2026-07-31 — Task 9 (verifier instrumentation) — 2363be6
 - 2026-07-31 — Task 10 (issuer instrumentation) — b392689
+- 2026-07-31 — Task 11 (redaction gate) — e26ab8f
