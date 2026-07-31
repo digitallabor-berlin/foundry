@@ -68,7 +68,8 @@ Three ordered stages:
 
 1. **Extract.** Walk each vendored spec and emit one inventory row per mandatory
    clause — `id`, spec, section, abridged requirement, applies-to
-   (issuer / verifier / http / n-a), initial verdict `unverified`. Committed as
+   (`issuer` / `verifier` / `http` / `wallet` / `other`), initial verdict
+   `unverified`. Committed as
    the skeleton of the conformance report before any adjudication happens.
 2. **Adjudicate.** Per functional area, read the implementation and set each
    applicable row's verdict plus evidence (`file:line`).
@@ -147,10 +148,13 @@ by design an immutable record of this run only.
 Three parts:
 
 1. **Summary** — per spec, counts of: total clauses, `conforming`, `gap`,
-   `not-implemented`, `not-unit-testable`, `out-of-scope`, `unverified`.
+   `not-implemented`, `not-unit-testable`, `out-of-scope`, `ambiguous`,
+   `unverified`.
 2. **Gap register** — `| ID | Severity | Spec § | Requirement | Impact | Test |`
 3. **Clause inventory** — one table per spec:
    `| ID | § | Requirement | Applies to | Verdict | Evidence | Test |`
+4. **Unresolved Ambiguities** — every `ambiguous` clause with both readings and
+   why the ambiguity matters.
 
 A one-line pointer to the report is added to `AGENTS.md` §4.4 so the invariant
 and the evidence for it are one hop apart.
@@ -173,6 +177,7 @@ future runs, and commit messages cite them.
 | `not-implemented` | Optional feature foundry does not offer; permitted by §4.4 |
 | `not-unit-testable` | Transport, deployment, or operational requirement; rationale recorded |
 | `out-of-scope` | Outside the audit boundary above; reason recorded |
+| `ambiguous` | Clause examined, but genuinely readable two ways; both readings recorded. A terminal verdict, not pending work |
 | `unverified` | Not yet adjudicated — the remaining-work marker |
 
 ### Severity
@@ -203,8 +208,10 @@ spec text
 
 ### Error handling / edge cases
 
-- **Ambiguous clause** — verdict stays `unverified`, flagged in the report with
-  both readings and the reason the ambiguity matters. Never resolved by guessing.
+- **Ambiguous clause** — verdict `ambiguous`, with both readings and the reason
+  the ambiguity matters recorded. Never resolved by guessing, and deliberately
+  distinct from `unverified`: the clause *was* examined, so it does not block
+  completion, but no conformance claim is made for it.
 - **Untestable at unit level** — `not-unit-testable` plus rationale.
 - **Mandatory clause unreachable through the crate's public API** — recorded as
   a finding in its own right, because it means the behaviour cannot be asserted
@@ -286,7 +293,8 @@ non-goal.
 
 ### Completion criteria
 
-- Zero `unverified` rows in the clause inventory.
+- Zero `unverified` rows in the clause inventory. `ambiguous` rows are permitted
+  and are listed together in an "Unresolved Ambiguities" section of the report.
 - `cargo test --workspace` clean.
 - `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - `cargo fmt --check` clean.
