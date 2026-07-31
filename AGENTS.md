@@ -98,6 +98,41 @@ that point back here.
   HTTP 400 (`BAD_REQUEST`).
 - **Network** status-fetch unavailability → HTTP 502 (`BAD_GATEWAY`).
 
+### 4.4 Conformance With the Vendored Protocol Specifications
+
+The authoritative protocol texts foundry implements are checked into
+[`docs/specs/`](docs/specs/). All behaviour — wire formats, parameter names,
+error codes, metadata fields, signing/encryption algorithms, and state
+transitions — MUST align with them.
+
+| Spec file | Governs |
+|---|---|
+| [`openid-4-verifiable-credential-issuance-1_0.md`](docs/specs/openid-4-verifiable-credential-issuance-1_0.md) | OpenID4VCI — `foundry-issuer` and the issuer HTTP routes (offers, pre-auth codes, `/token`, `/nonce`, `/credential`, holder proofs, issuer metadata) |
+| [`openid-4-verifiable-presentations-1_0.md`](docs/specs/openid-4-verifiable-presentations-1_0.md) | OpenID4VP — `foundry-verifier` and the verifier HTTP routes (authorization/request objects, `vp_token`, response modes, JARM/JWE, DCQL, client ID schemes) |
+| [`openid4vc-high-assurance-interoperability-profile-1_0.md`](docs/specs/openid4vc-high-assurance-interoperability-profile-1_0.md) | HAIP — the profile that narrows both of the above (mandated SD-JWT VC / mdoc formats, required algorithms, key binding, trust mechanisms). Where HAIP is stricter, **HAIP wins.** |
+
+Rules:
+
+- **Consult the spec before implementing or changing protocol-facing
+  behaviour.** Do not infer the wire format from existing code, other
+  implementations, or memory — open the relevant section in `docs/specs/` and
+  follow it.
+- **Cite the spec in code and PRs.** New or changed protocol logic MUST carry a
+  comment naming the spec and section (e.g.
+  `// OpenID4VCI §7.2 — credential response`) so reviewers can verify without
+  guessing which text was used.
+- **Deliberate deviations MUST be documented** — an inline comment explaining
+  *why* (interop workaround, unimplemented optional feature) plus a note in the
+  relevant crate's `AGENTS.md` Gotchas section. Silent divergence is a defect.
+- **Unimplemented optional features are acceptable; incorrect implementations
+  are not.** Prefer a typed "unsupported" error over a non-conformant response.
+- These files are **pinned drafts** (see the `seriesInfo` version at the top of
+  each). Treat the checked-in copy as the source of truth for this repository,
+  not a newer draft found online. Bumping a spec is its own deliberate change:
+  update the file, then reconcile the code.
+- When dispatching a subagent to protocol work, point it at the specific spec
+  file and section — it does not inherit this table.
+
 ---
 
 ## 5. Verification Gates
@@ -174,6 +209,9 @@ file's routing table.
   reminder to every crate file it binds.
 - **Endpoint change** → update the OpenAPI specs (§6) and, if routing changed,
   `crates/foundry/AGENTS.md`.
+- **Protocol behaviour change** → verify it against the pinned specs in
+  `docs/specs/` (§4.4) and cite the section in a code comment. **New or replaced
+  spec file in `docs/specs/`** → add or update its row in the §4.4 table.
 - **No line counts, test counts, or other per-commit-drifting numbers** in any
   AGENTS.md — stale numbers erode trust in the whole file.
 - Design rationale for this structure: `docs/superpowers/specs/2026-07-28-agents-md-discovery-design.md`.
