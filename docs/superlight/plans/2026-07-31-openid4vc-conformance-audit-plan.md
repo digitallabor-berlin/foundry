@@ -132,11 +132,11 @@ red the moment a later task writes an inconsistent row.
 
 **Verify:** `cargo test -p foundry --test conformance_report`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — each of the 11 checks verified to fail against a deliberately corrupted report
+- [x] Green — 11 checks pass against the empty scaffold
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -664,3 +664,4 @@ to green over the completed report.
 *Append one line per completed task: date, task, commit SHA.*
 
 - 2026-07-31 — Task 1 (report scaffold + AGENTS.md pointer) — `f3cd3ad`
+- 2026-07-31 — Task 2 (report consistency test, 11 checks, all mutation-verified) — `a377536`
