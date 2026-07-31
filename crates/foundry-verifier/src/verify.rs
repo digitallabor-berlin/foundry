@@ -963,6 +963,171 @@ mod tests {
             .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
     }
 
+    /// VP-0175, VP-0177, VP-0179, VP-0180 -- OpenID4VP 1.0 Security /
+    /// Preventing Replay (L1789-1795): the Verifier MUST verify the binding
+    /// of the proof of possession (the KB-JWT) to audience and `nonce`, MUST
+    /// validate that every individual Presentation is linked to the
+    /// `client_id` and `nonce` of *its own* request, and MUST reject a
+    /// response if any Presentation carries the wrong `nonce`. A captured
+    /// presentation is bound (via the KB-JWT's `aud` and `nonce` claims) to
+    /// the specific transaction it was produced for; replaying it verbatim
+    /// against a second, independently-created transaction exercises
+    /// exactly the attack this section defends against, distinct from
+    /// `test_verify_vp_response_kb_nonce_mismatch`'s arbitrary bad-nonce
+    /// case.
+    #[tokio::test]
+    async fn vp_0175_0177_0179_0180_presentation_replayed_against_second_transaction_is_rejected() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+
+        // Transaction 1: the presentation is legitimately produced for this one.
+        let (tx1, _) = sample_tx();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx1.nonce,
+        )
+        .unwrap();
+
+        // Sanity: the presentation verifies fine against the transaction it
+        // was actually produced for.
+        let mut tx1_for_check = tx1.clone();
+        let jwe_for_tx1 = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation.clone()] } }),
+            &tx1_for_check.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+        let resolver = MockResolver { token: None };
+        let ok = verify_vp_response(&config, &mut tx1_for_check, &jwe_for_tx1, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            ok.verified,
+            "sanity check: the presentation must verify against its own transaction"
+        );
+
+        // Transaction 2: a wholly separate request (independent nonce and
+        // ephemeral encryption key), as if an attacker relayed the captured
+        // presentation to a second Authorization Request.
+        let keypair2 = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut tx2 = tx1.clone();
+        tx2.id = "vtx-test-456".to_string();
+        tx2.nonce = "nonce-replay-attempt".to_string();
+        tx2.ephem_public_jwk = serde_json::to_value(keypair2.to_jwk_public_key()).unwrap();
+        tx2.ephem_private_jwk = serde_json::to_value(keypair2.to_jwk_private_key()).unwrap();
+
+        let jwe_for_tx2 = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx2.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+        let err = verify_vp_response(&config, &mut tx2, &jwe_for_tx2, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Failed(_)),
+            "replaying a presentation bound to a different transaction's nonce \
+             must be rejected: {err:?}"
+        );
+        assert_eq!(tx2.state, VerificationState::Failed);
+    }
+
+    /// AGENTS.md Sec4.2/Sec4.3, VP-0152 (Response / VP Token Validation,
+    /// L1522): a Status List Token that cannot be fetched is a
+    /// network/structural failure, not a policy verdict -- it MUST
+    /// propagate as `Err`, never resolve to
+    /// `Ok(VerificationResult { verified: false, .. })`. `status.rs`'s own
+    /// `network_failure_is_hard_error` proves this for `check_status` in
+    /// isolation; this test proves the same holds through the full
+    /// `verify_vp_response` entry point, including the transaction state
+    /// transition on failure.
+    #[tokio::test]
+    async fn vp_0152_status_endpoint_unreachable_is_a_hard_error_through_full_verification() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            // A status claim is present, so check_status must actually fetch
+            // the Status List Token -- and the MockResolver below has none.
+            status_list_index: Some(42),
+            status_list_uri: Some("https://issuer.example/statuslists/1".to_string()),
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: serde_json::Map::new(),
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx.nonce,
+        )
+        .unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None }; // errors on fetch
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::StatusUnavailable(_)),
+            "an unreachable status list endpoint must propagate as a hard error, \
+             not a policy verdict: {err:?}"
+        );
+        assert_eq!(tx.state, VerificationState::Failed);
+    }
+
     #[tokio::test]
     async fn test_verify_vp_response_mdoc_presentation() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
