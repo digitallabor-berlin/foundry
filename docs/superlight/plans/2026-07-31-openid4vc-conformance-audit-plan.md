@@ -359,11 +359,11 @@ the HAIP rows before defaulting to `not-implemented`.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (60 rows: 12 conforming/3 gap/38 not-implemented/3 not-unit-testable VCI; 3 conforming/1 ambiguous HAIP)
+- [x] Red / Green / Refactor per behavior (7 new tests; both fixture files needed a real signing key added, previously absent)
+- [x] Record gaps — GAP-VCI-02 (credential_configuration_id ignored), GAP-VCI-03 (mdoc credential not base64url), GAP-VCI-04 (invalid_nonce never distinguished from invalid_proof)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -696,3 +696,4 @@ to green over the completed report.
 - 2026-07-31 — Task 6 (adjudicate Credential Offer: 14 rows — 7 conforming, 5 not-implemented, 2 gap; GAP-VCI-01 pre-authorized_code reuse, GAP-HAIP-01 missing scope value) — `b0243dd`
 - 2026-07-31 — Task 7 (adjudicate Authorization Endpoint: 22 rows — 5 conforming, 4 gap, 10 not-implemented, 2 not-unit-testable, 1 ambiguous; GAP-HAIP-02 missing RFC9207 iss, GAP-HAIP-03 no DPoP, GAP-HAIP-04 Critical — Wallet Attestation JWT never cryptographically validated) — `470bf2f`
 - 2026-07-31 — Task 8 (adjudicate Token/Nonce Endpoint: 13 rows — 10 conforming, 3 not-implemented; no new gaps) — `d6452c5`
+- 2026-07-31 — Task 9 (adjudicate Credential Endpoint incl. Deferred/Encrypted/Notification/Key Attestation: 60 rows — 15 conforming, 3 gap, 38 not-implemented, 3 not-unit-testable, 1 ambiguous; GAP-VCI-02/03/04) — `8156a96`
