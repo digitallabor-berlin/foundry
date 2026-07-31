@@ -134,6 +134,15 @@ a verdict in the inventory but a test only where the test is cheap.
 - Token Status List **bitstring encoding**, for the same reason — the defining
   spec is not vendored. HAIP's mandate *that* status lists are used is in scope;
   whether the bitset is encoded correctly is not.
+- **W3C Verifiable Credential format profiles** (`jwt_vc_json`, `ldp_vc`,
+  `jwt_vc_json-ld`) and the **`di_vp` proof type** — narrowed 2026-07-31 after
+  Task 3 showed the real clause count to be roughly double the Phase 3 estimate.
+  foundry accepts only `dc+sd-jwt` and `mso_mdoc`
+  (`crates/foundry-core/src/config/validate.rs`) and only the `jwt` proof type
+  (`crates/foundry-issuer/src/proof.rs`), so these clause sets would adjudicate
+  uniformly to `not-implemented`. The rows are **retained** in the inventory with
+  verdict `out-of-scope` and this rationale — identifiers are never renumbered,
+  and an excluded clause must stay visible.
 
 Out-of-scope areas appear in the report with the verdict `out-of-scope` and the
 reason, so that silence is never mistaken for a pass.

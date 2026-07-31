@@ -67,6 +67,12 @@ Applied by Tasks 3–5, relied on by every later task.
 - Non-normative sections are not extracted: Introduction, Terminology, Overview,
   Use Cases, Additional Examples, IANA Considerations, Acknowledgements,
   Notices, Document History.
+- **Narrowed 2026-07-31:** W3C Verifiable Credential format profiles
+  (`jwt_vc_json`, `ldp_vc`, `jwt_vc_json-ld`) and the `di_vp` proof type are
+  extracted but immediately marked `out-of-scope` with a rationale. foundry
+  accepts only `dc+sd-jwt` and `mso_mdoc` and only the `jwt` proof type, so these
+  clauses would adjudicate uniformly to `not-implemented`. Rows are retained,
+  never deleted — identifiers are never renumbered.
 - `Requirement` is abridged to one line but must preserve the normative verb and
   the condition. Where abridging would change the meaning, quote the clause.
 
@@ -160,9 +166,9 @@ Wallet Attestations, Proof Types.
 
 **Verify:** `cargo test -p foundry --test conformance_report`
 
-- [ ] Extract clauses per convention
-- [ ] Verify — consistency test green, IDs sequential and unique
-- [ ] Commit
+- [x] Extract clauses per convention — 230 rows (issuer 170, http 31, wallet 28, other 1)
+- [x] Verify — consistency test green, IDs sequential and unique
+- [x] Commit
 
 ---
 
@@ -178,7 +184,9 @@ Wallet Attestations, Proof Types.
 §9 Wallet Invocation, §10 Wallet Metadata, §11 Verifier Metadata,
 §12 Verifier Attestation JWT, §13 Implementation Considerations (normative
 only), §14 Security Considerations, §15 Privacy Considerations (normative only),
-Credential Format Specific Parameters (mdoc and SD-JWT VC subsections only).
+Credential Format Specific Parameters (mdoc and SD-JWT VC subsections only; the
+W3C Verifiable Credentials subsection is extracted as `out-of-scope` per the
+2026-07-31 narrowing).
 
 **Explicitly extracted but expected `not-implemented`:** OpenID4VP over the
 Digital Credentials API, and Combining this specification with SIOPv2 — foundry
@@ -360,7 +368,7 @@ the HAIP rows before defaulting to `not-implemented`.
 - `jwt` proof `iat` presence and freshness window — edge cases
 - Plural `proofs` object: all proofs validated, not just the first — error path when a later proof is invalid
 - `attestation` proof type handling — happy path or `not-implemented`
-- `di_vp` proof type — expected `not-implemented`
+- (`di_vp` proof type is `out-of-scope` per the 2026-07-31 narrowing — no adjudication, no test)
 - Key attestation JWT required claims and trust-anchor chaining — happy path and error path
 - Wallet attestation JWT required claims and mode handling (`required` / `optional` / `disabled`) — edge cases
 
@@ -665,3 +673,4 @@ to green over the completed report.
 
 - 2026-07-31 — Task 1 (report scaffold + AGENTS.md pointer) — `f3cd3ad`
 - 2026-07-31 — Task 2 (report consistency test, 11 checks, all mutation-verified) — `a377536`
+- 2026-07-31 — Task 3 (extract OpenID4VCI: 230 clauses, 201 in scope) — `f25b9f1`

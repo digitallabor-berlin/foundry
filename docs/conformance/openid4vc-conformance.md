@@ -51,6 +51,8 @@ pass:
 | mdoc format internals (CBOR structure, MSO layout) | Defining spec (ISO/IEC 18013-5) not vendored and not vendorable — paid standard |
 | Token Status List bitstring encoding | Defining spec not vendored |
 | Wallet-side and third-party obligations | Recorded with `Applies to = wallet` / `other` and verdict `out-of-scope` |
+| W3C Verifiable Credential format profiles (`jwt_vc_json`, `ldp_vc`, `jwt_vc_json-ld`) | foundry issues only `dc+sd-jwt` and `mso_mdoc`; excluded 2026-07-31 by scope decision |
+| `di_vp` proof type | foundry implements only the `jwt` proof type; excluded 2026-07-31 by scope decision |
 
 What *is* in scope for the credential formats is what the three vendored specs
 say about their **usage**: which formats must be supported, required algorithms,
@@ -91,7 +93,7 @@ strings, commit messages, and follow-up work.
 
 | Spec | Total | conforming | gap | not-implemented | not-unit-testable | out-of-scope | ambiguous | unverified |
 |---|---|---|---|---|---|---|---|---|
-| OpenID4VCI | 230 | 0 | 0 | 0 | 0 | 29 | 0 | 201 |
+| OpenID4VCI | 230 | 0 | 0 | 0 | 0 | 49 | 0 | 181 |
 | OpenID4VP | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 | HAIP | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
 
@@ -268,16 +270,16 @@ strings, commit messages, and follow-up work.
 | VCI-0162 | Security / TLS Requirements (L1523) | A TLS server certificate check MUST be performed per RFC6125 whenever TLS is used | http | `unverified` |  |  |
 | VCI-0163 | Security / Protecting the Access Token (L1527) | Long-lived Access Tokens MUST NOT be issued unless sender-constrained | issuer | `unverified` |  |  |
 | VCI-0164 | Security / Protecting the Access Token (L1529) | Bearer Access Tokens stored by the Wallet MUST be stored securely | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
-| VCI-0165 | Format Profile / jwt_vc_json (L2116) | With format `jwt_vc_json` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `unverified` |  |  |
-| VCI-0166 | Format Profile / jwt_vc_json (L2124) | `credential_definition` is REQUIRED | issuer | `unverified` |  |  |
-| VCI-0167 | Format Profile / jwt_vc_json (L2125) | `credential_definition.type` is REQUIRED | issuer | `unverified` |  |  |
-| VCI-0168 | Format Profile / jwt_vc_json (L2139) | The `credential` claim MUST be a JWT and MUST NOT be re-encoded | issuer | `unverified` |  |  |
-| VCI-0169 | Format Profile / ldp_vc (L2155) | With format `ldp_vc` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `unverified` |  |  |
-| VCI-0170 | Format Profile / ldp_vc (L2167) | `credential_definition` is REQUIRED | issuer | `unverified` |  |  |
-| VCI-0171 | Format Profile / ldp_vc (L2168) | `credential_definition.@context` is REQUIRED | issuer | `unverified` |  |  |
-| VCI-0172 | Format Profile / ldp_vc (L2169) | `credential_definition.type` is REQUIRED | issuer | `unverified` |  |  |
-| VCI-0173 | Format Profile / ldp_vc (L2183) | The `credential` claim MUST be a JSON object and MUST NOT be re-encoded | issuer | `unverified` |  |  |
-| VCI-0174 | Format Profile / jwt_vc_json-ld (L2195) | With format `jwt_vc_json-ld` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `unverified` |  |  |
+| VCI-0165 | Format Profile / jwt_vc_json (L2116) | With format `jwt_vc_json` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0166 | Format Profile / jwt_vc_json (L2124) | `credential_definition` is REQUIRED | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0167 | Format Profile / jwt_vc_json (L2125) | `credential_definition.type` is REQUIRED | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0168 | Format Profile / jwt_vc_json (L2139) | The `credential` claim MUST be a JWT and MUST NOT be re-encoded | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0169 | Format Profile / ldp_vc (L2155) | With format `ldp_vc` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0170 | Format Profile / ldp_vc (L2167) | `credential_definition` is REQUIRED | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0171 | Format Profile / ldp_vc (L2168) | `credential_definition.@context` is REQUIRED | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0172 | Format Profile / ldp_vc (L2169) | `credential_definition.type` is REQUIRED | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0173 | Format Profile / ldp_vc (L2183) | The `credential` claim MUST be a JSON object and MUST NOT be re-encoded | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0174 | Format Profile / jwt_vc_json-ld (L2195) | With format `jwt_vc_json-ld` the Offer, Authorization Details, Credential Request and Issuer metadata MUST NOT be processed using JSON-LD rules | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry issues only `dc+sd-jwt` and `mso_mdoc` (`crates/foundry-core/src/config/validate.rs`); the W3C VC format-profile clause set would adjudicate uniformly to not-implemented |  |
 | VCI-0175 | Format Profile / mdoc (L2235) | `doctype` is REQUIRED and identifies the Credential type per ISO 18013-5 | issuer | `unverified` |  |  |
 | VCI-0176 | Format Profile / mdoc (L2249) | The `credential` claim MUST be the base64url-encoded CBOR `IssuerSigned` structure | issuer | `unverified` |  |  |
 | VCI-0177 | Format Profile / SD-JWT VC (L2270) | `vct` is REQUIRED and designates the Credential type | issuer | `unverified` |  |  |
@@ -300,7 +302,7 @@ strings, commit messages, and follow-up work.
 | VCI-0194 | Attack Potential Resistance (L2549) | Specifications extending the resistance list MUST choose collision-resistant values | other | `out-of-scope` | Obligation falls on specification authors, not on an implementation |  |
 | VCI-0195 | Wallet Attestation (L2600) | Wallet MUST generate a proof of possession per Client Attestation PoP JWT | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | VCI-0196 | Proof Types (L2610) | A `jwt` proof object MUST include a `jwt` parameter whose value is a non-empty array of JWTs | issuer | `unverified` |  |  |
-| VCI-0197 | Proof Types (L2611) | A `di_vp` proof object MUST include a `di_vp` parameter whose value is a non-empty array of W3C Verifiable Presentations | issuer | `unverified` |  |  |
+| VCI-0197 | Proof Types (L2611) | A `di_vp` proof object MUST include a `di_vp` parameter whose value is a non-empty array of W3C Verifiable Presentations | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
 | VCI-0198 | Proof Types (L2612) | An `attestation` proof object MUST include an `attestation` parameter containing exactly one key attestation JWT | issuer | `unverified` |  |  |
 | VCI-0199 | jwt Proof Type (L2625) | The proof JWT MUST contain the header and payload elements defined for the `jwt` proof type | issuer | `unverified` |  |  |
 | VCI-0200 | jwt Proof Type (L2628) | Proof `alg` is REQUIRED and MUST NOT be `none` or a symmetric algorithm | issuer | `unverified` |  |  |
@@ -316,15 +318,15 @@ strings, commit messages, and follow-up work.
 | VCI-0210 | jwt Proof Type (L2640) | `nonce` MUST be present when the Issuer has a Nonce Endpoint and MUST carry the server-provided `c_nonce` | issuer | `unverified` |  |  |
 | VCI-0211 | jwt Proof Type (L2642) | The Credential Issuer MUST validate that the proof JWT is signed by the key identified in the JOSE header via `kid`, `jwk` or `x5c` | issuer | `unverified` |  |  |
 | VCI-0212 | jwt Proof Type (L2647) | The proof `alg`, and the `alg` of `key_attestation` and `trust_chain` when present, MUST match `proof_signing_alg_values_supported` | issuer | `unverified` |  |  |
-| VCI-0213 | di_vp Proof Type (L2704) | A Data Integrity secured W3C VP used as key proof MUST contain the defined properties | issuer | `unverified` |  |  |
-| VCI-0214 | di_vp Proof Type (L2706) | `holder`, when present, MUST equal the controller identifier of the `proof.verificationMethod` | issuer | `unverified` |  |  |
-| VCI-0215 | di_vp Proof Type (L2707) | `proof` is REQUIRED and MUST be a Data Integrity Proof | issuer | `unverified` |  |  |
-| VCI-0216 | di_vp Proof Type (L2708) | `cryptosuite` is REQUIRED and MUST match `proof_signing_alg_values_supported` | issuer | `unverified` |  |  |
-| VCI-0217 | di_vp Proof Type (L2709) | `proofPurpose` is REQUIRED and MUST be `authentication` | issuer | `unverified` |  |  |
-| VCI-0218 | di_vp Proof Type (L2710) | `domain` is REQUIRED and MUST be the Credential Issuer Identifier | issuer | `unverified` |  |  |
-| VCI-0219 | di_vp Proof Type (L2711) | `challenge` is REQUIRED when a `c_nonce` was provided and MUST NOT be used otherwise | issuer | `unverified` |  |  |
-| VCI-0220 | di_vp Proof Type (L2713) | The Credential Issuer MUST validate the W3C VP proof is signed with a key held by the Holder | issuer | `unverified` |  |  |
-| VCI-0221 | di_vp Proof Type (L2715) | Additional properties not understood MUST be ignored | issuer | `unverified` |  |  |
+| VCI-0213 | di_vp Proof Type (L2704) | A Data Integrity secured W3C VP used as key proof MUST contain the defined properties | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0214 | di_vp Proof Type (L2706) | `holder`, when present, MUST equal the controller identifier of the `proof.verificationMethod` | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0215 | di_vp Proof Type (L2707) | `proof` is REQUIRED and MUST be a Data Integrity Proof | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0216 | di_vp Proof Type (L2708) | `cryptosuite` is REQUIRED and MUST match `proof_signing_alg_values_supported` | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0217 | di_vp Proof Type (L2709) | `proofPurpose` is REQUIRED and MUST be `authentication` | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0218 | di_vp Proof Type (L2710) | `domain` is REQUIRED and MUST be the Credential Issuer Identifier | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0219 | di_vp Proof Type (L2711) | `challenge` is REQUIRED when a `c_nonce` was provided and MUST NOT be used otherwise | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0220 | di_vp Proof Type (L2713) | The Credential Issuer MUST validate the W3C VP proof is signed with a key held by the Holder | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
+| VCI-0221 | di_vp Proof Type (L2715) | Additional properties not understood MUST be ignored | issuer | `out-of-scope` | Excluded 2026-07-31 by scope decision: foundry implements only the `jwt` proof type (`crates/foundry-issuer/src/proof.rs`); the `di_vp` clause set would adjudicate uniformly to not-implemented |  |
 | VCI-0222 | attestation Proof Type (L2756) | When the Issuer has a Nonce Endpoint the `c_nonce` MUST be provided in the key attestation `nonce` | issuer | `unverified` |  |  |
 | VCI-0223 | attestation Proof Type (L2772) | The key attestation `alg` MUST match one of `proof_signing_alg_values_supported` | issuer | `unverified` |  |  |
 | VCI-0224 | Verifying Proof (L2777) | All required claims for the proof type MUST be present | issuer | `unverified` |  |  |
