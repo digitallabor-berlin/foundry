@@ -133,6 +133,12 @@ Rules:
 - When dispatching a subagent to protocol work, point it at the specific spec
   file and section — it does not inherit this table.
 
+The clause-by-clause record of where foundry stands against these three specs —
+verdicts, evidence, and the register of known gaps — lives in
+[`docs/conformance/openid4vc-conformance.md`](docs/conformance/openid4vc-conformance.md).
+It is a living document: closing a gap means updating the affected rows there,
+not only changing the code.
+
 ---
 
 ## 5. Verification Gates
@@ -212,6 +218,10 @@ file's routing table.
 - **Protocol behaviour change** → verify it against the pinned specs in
   `docs/specs/` (§4.4) and cite the section in a code comment. **New or replaced
   spec file in `docs/specs/`** → add or update its row in the §4.4 table.
+- **Closing a conformance gap** → update the affected rows in
+  `docs/conformance/openid4vc-conformance.md` and remove the `#[ignore]` from
+  the test that cites that gap ID. The report is a living document, not a
+  historical record.
 - **No line counts, test counts, or other per-commit-drifting numbers** in any
   AGENTS.md — stale numbers erode trust in the whole file.
 - Design rationale for this structure: `docs/superpowers/specs/2026-07-28-agents-md-discovery-design.md`.
