@@ -671,11 +671,27 @@ each proof's contents.
 
 **Verify:** `cargo test -p foundry-issuer -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 479 workspace tests pass, clippy and fmt clean. 9 instrument
+attributes in `foundry-issuer`, 5 in `foundry-verifier`, all with `skip_all` —
+enforced by the Task 9 hygiene test, not by inspection.
+
+Two field names in the plan did not match the actual structs and were corrected:
+`CreateOfferRequest` has `credential_type_id`, not `credential_type`; and
+`CredentialRequest::credential_configuration_id` is an `Option`, so it needs `?`
+rather than `%` formatting. Both were compile errors, which is the good outcome —
+but they are a reminder that plan-level field names are hypotheses.
+
+As in Task 9, behavioural event assertions are Task 11's job (the capture layer
+cannot be reached from inside `foundry-issuer` without a forbidden
+dev-dependency).
+
+---
 
 ---
 
@@ -786,3 +802,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 7 (error logging at mappers) — 1779ce6
 - 2026-07-31 — Task 8 (persist failure reason) — 06185e6
 - 2026-07-31 — Task 9 (verifier instrumentation) — 2363be6
+- 2026-07-31 — Task 10 (issuer instrumentation) — b392689
