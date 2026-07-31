@@ -105,7 +105,7 @@ strings, commit messages, and follow-up work.
 |---|---|---|---|---|---|---|---|---|
 | OpenID4VCI | 230 | 0 | 0 | 0 | 0 | 49 | 0 | 181 |
 | OpenID4VP | 266 | 0 | 0 | 0 | 0 | 105 | 0 | 161 |
-| HAIP | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| HAIP | 96 | 0 | 0 | 0 | 0 | 19 | 0 | 77 |
 
 ## Gap Register
 
@@ -622,6 +622,102 @@ strings, commit messages, and follow-up work.
 
 | ID | § | Requirement | Applies to | Verdict | Evidence | Test |
 |---|---|---|---|---|---|---|
+| HAIP-0001 | Scope (L97) | Implementations MUST comply with all requirements of every flow they choose to implement and with the non-flow-specific sections | other | `unverified` |  |  |
+| HAIP-0002 | Scope (L99) | For each flow at least one of the Credential profiles IETF SD-JWT VC or ISO mdoc MUST be supported | other | `unverified` |  |  |
+| HAIP-0003 | OpenID4VCI (L157) | MUST support the authorization code flow | issuer | `unverified` |  |  |
+| HAIP-0004 | OpenID4VCI (L158) | MUST support at least one of the Credential Format Profiles IETF SD-JWT VC or ISO mdoc | issuer | `unverified` |  |  |
+| HAIP-0005 | OpenID4VCI (L159) | MUST comply with the provisions of FAPI 2.0 Security Profile applicable to this specification | issuer | `unverified` |  |  |
+| HAIP-0006 | OpenID4VCI (L159) | MUST use PKCE with `S256` as the code challenge method | issuer | `unverified` |  |  |
+| HAIP-0007 | OpenID4VCI (L159) | MUST use Pushed Authorization Requests where applicable | issuer | `unverified` |  |  |
+| HAIP-0008 | OpenID4VCI (L159) | MUST return the `iss` value in the Authorization response per RFC9207 | issuer | `unverified` |  |  |
+| HAIP-0009 | OpenID4VCI (L163) | MUST support DPoP per RFC9449 for sender-constrained access tokens | issuer | `unverified` |  |  |
+| HAIP-0010 | OpenID4VCI (L173) | If Issuer-initiated flows are supported they MUST use the Credential Offer | issuer | `unverified` | Narrows OpenID4VCI Section 4.1 |  |
+| HAIP-0011 | OpenID4VCI (L177) | The Issuer MUST indicate whether batch issuance is supported by including or omitting `batch_credential_issuance` | issuer | `unverified` |  |  |
+| HAIP-0012 | OpenID4VCI / Issuer Metadata (L183) | The Authorization Server MUST support metadata according to RFC8414 | issuer | `unverified` |  |  |
+| HAIP-0013 | OpenID4VCI / Issuer Metadata (L185) | The Credential Issuer MUST support metadata retrieval | issuer | `unverified` | Narrows OpenID4VCI Section 12.2.2 |  |
+| HAIP-0014 | OpenID4VCI / Issuer Metadata (L186) | The Credential Issuer metadata MUST include a scope for every Credential Configuration it supports | issuer | `unverified` |  |  |
+| HAIP-0015 | OpenID4VCI / Issuer Metadata (L189) | Where Ecosystem policy requires issuer authentication stronger than TLS, signed Credential Issuer Metadata MUST be supported by both Wallet and Issuer | issuer | `unverified` | Narrows OpenID4VCI Section 11.2.3 |  |
+| HAIP-0016 | OpenID4VCI / Issuer Metadata (L189) | Key resolution to validate signed Issuer Metadata MUST be supported using the `x5c` JOSE header parameter | issuer | `unverified` |  |  |
+| HAIP-0017 | OpenID4VCI / Issuer Metadata (L190) | The X.509 certificate of the trust anchor MUST NOT be included in the `x5c` JOSE header of the signed request | issuer | `unverified` |  |  |
+| HAIP-0018 | OpenID4VCI / Issuer Metadata (L190) | The X.509 certificate signing the request MUST NOT be self-signed | issuer | `unverified` |  |  |
+| HAIP-0019 | OpenID4VCI / Issuer Metadata (L192) | Wallets that render Credential Issuer metadata images MUST support both the SVG and PNG formats | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0020 | OpenID4VCI / Issuer Metadata (L192) | Such Wallets MUST support images conveyed through both data URIs and HTTPS URLs | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0021 | OpenID4VCI / Issuer Metadata (L194) | If the Issuer supports Credential Configurations requiring key binding the `nonce_endpoint` MUST be present in the Credential Issuer Metadata | issuer | `unverified` |  |  |
+| HAIP-0022 | OpenID4VCI / Credential Offer (L198) | The Grant Type `authorization_code` MUST be supported | issuer | `unverified` | Narrows OpenID4VCI Section 4.1.1 |  |
+| HAIP-0023 | OpenID4VCI / Credential Offer (L199) | For Grant Type `authorization_code` the Issuer MUST include a scope value so the Wallet can identify the desired Credential Type | issuer | `unverified` |  |  |
+| HAIP-0024 | OpenID4VCI / Credential Offer (L199) | The Wallet MUST use that scope value in the `scope` Authorization parameter | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0025 | OpenID4VCI / Credential Offer (L204) | Both Issuer and Wallet MUST support the Credential Offer in same-device and cross-device flows | issuer | `unverified` |  |  |
+| HAIP-0026 | OpenID4VCI / Authorization Endpoint (L208) | Wallets MUST authenticate themselves at the PAR endpoint using the same rules as for client authentication at the token endpoint | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0027 | OpenID4VCI / Authorization Endpoint (L209) | The `scope` parameter MUST be used to communicate the Credential Types to be issued | issuer | `unverified` |  |  |
+| HAIP-0028 | OpenID4VCI / Authorization Endpoint (L209) | The scope value MUST map to a specific Credential Type | issuer | `unverified` |  |  |
+| HAIP-0029 | OpenID4VCI / Wallet Attestation (L219) | Wallets MUST use an OAuth2 client authentication mechanism at OAuth2 endpoints that support client authentication | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0030 | OpenID4VCI / Wallet Attestation (L219) | Issuers MUST require an OAuth2 client authentication mechanism at OAuth2 endpoints that support client authentication | issuer | `unverified` |  |  |
+| HAIP-0031 | OpenID4VCI / Wallet Attestation (L225) | The public key certificate, and optionally a trust chain excluding the trust anchor, validating the Wallet Attestation signature MUST be included in the `x5c` JOSE header of the Client Attestation JWT | issuer | `unverified` |  |  |
+| HAIP-0032 | OpenID4VCI / Wallet Attestation (L226) | Wallet Attestations MUST NOT be reused across different Issuers | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0033 | OpenID4VCI / Wallet Attestation (L226) | Wallet Attestations MUST NOT introduce a unique identifier specific to a single Wallet instance | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0034 | OpenID4VCI / Wallet Attestation (L226) | The Wallet Attestation subject claim MUST be a value shared by all Wallet instances of that wallet implementation | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0035 | OpenID4VCI / Wallet Attestation (L227) | Where applicable the `client_id` in the PAR request MUST be the `sub` value of the client attestation JWT | issuer | `unverified` |  |  |
+| HAIP-0036 | OpenID4VCI / Wallet Attestation (L228) | Wallets MUST perform client authentication with the Wallet Attestation at OAuth2 endpoints that support client authentication | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0037 | OpenID4VCI / Key Attestation (L234) | Wallets MUST support key attestations | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0038 | OpenID4VCI / Key Attestation (L241) | The public key validating the key attestation signature MUST be included in the `x5c` JOSE header of the key attestation | issuer | `unverified` |  |  |
+| HAIP-0039 | OpenID4VCI / Key Attestation (L242) | The X.509 certificate of the trust anchor MUST NOT be included in the `x5c` JOSE header of the key attestation | issuer | `unverified` |  |  |
+| HAIP-0040 | OpenID4VCI / Key Attestation (L243) | The X.509 certificate signing the key attestation MUST NOT be self-signed | issuer | `unverified` |  |  |
+| HAIP-0041 | OpenID4VP (L254) | The Wallet and Verifier MUST support at least one of the Credential Format Profiles IETF SD-JWT VC or ISO mdoc | verifier | `unverified` |  |  |
+| HAIP-0042 | OpenID4VP (L255) | The Response Type MUST be `vp_token` | verifier | `unverified` |  |  |
+| HAIP-0043 | OpenID4VP (L256) | For signed requests the Verifier MUST use the Client Identifier Prefix `x509_hash` | verifier | `unverified` | Narrows OpenID4VP Section 5.9.3 |  |
+| HAIP-0044 | OpenID4VP (L256) | For signed requests the Wallet MUST accept the Client Identifier Prefix `x509_hash` | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0045 | OpenID4VP (L256) | The X.509 certificate of the trust anchor MUST NOT be included in the `x5c` JOSE header of the signed request | verifier | `unverified` |  |  |
+| HAIP-0046 | OpenID4VP (L256) | The X.509 certificate signing the request MUST NOT be self-signed | verifier | `unverified` |  |  |
+| HAIP-0047 | OpenID4VP (L257) | The DCQL query and response MUST be used | verifier | `unverified` | Narrows OpenID4VP Section 6 |  |
+| HAIP-0048 | OpenID4VP (L258) | Response encryption MUST be performed as specified for encrypted responses | verifier | `unverified` | Narrows OpenID4VP Section 8.3 |  |
+| HAIP-0049 | OpenID4VP (L258) | The JWE `alg` value `ECDH-ES` with key agreement on the `P-256` curve MUST be supported | verifier | `unverified` |  |  |
+| HAIP-0050 | OpenID4VP (L258) | The JWE `enc` values `A128GCM` and `A256GCM` MUST be supported by Verifiers | verifier | `unverified` |  |  |
+| HAIP-0051 | OpenID4VP (L258) | Wallets MUST support `A128GCM` or `A256GCM`, or both | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0052 | OpenID4VP (L258) | Verifiers MUST list both `A128GCM` and `A256GCM` in `encrypted_response_enc_values_supported` in their client metadata | verifier | `unverified` |  |  |
+| HAIP-0053 | OpenID4VP (L259) | Verifiers MUST supply ephemeral encryption public keys specific to each Authorization Request via client metadata | verifier | `unverified` | Narrows OpenID4VP Section 8.3 |  |
+| HAIP-0054 | OpenID4VP (L260) | The Authority Key Identifier based Trusted Authorities Query MUST be supported | verifier | `unverified` | Narrows OpenID4VP Section 6.1.1.1 |  |
+| HAIP-0055 | OpenID4VP / via Redirects (L274) | Signed Authorization Requests MUST be used, using JAR with the `request_uri` parameter | verifier | `unverified` |  |  |
+| HAIP-0056 | OpenID4VP / via Redirects (L275) | Response encryption MUST be used via response mode `direct_post.jwt` | verifier | `unverified` | Narrows OpenID4VP Section 8.3 |  |
+| HAIP-0057 | OpenID4VP / via Redirects (L275) | The security considerations for encrypted responses MUST be applied | verifier | `unverified` | Narrows OpenID4VP Section 14.3 |  |
+| HAIP-0058 | OpenID4VP / via Redirects (L276) | Verifiers and Wallets MUST support the same-device flow | verifier | `unverified` |  |  |
+| HAIP-0059 | OpenID4VP / via Redirects (L277) | For the same-device flow Verifiers MUST include `redirect_uri` in the HTTP response to the Wallet's POST to the `response_uri` | verifier | `unverified` | Narrows OpenID4VP Section 8.2 |  |
+| HAIP-0060 | OpenID4VP / via Redirects (L277) | Wallets MUST follow the redirect to `redirect_uri` | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0061 | OpenID4VP / via Redirects (L278) | Verifiers MUST reject presentations if the Wallet does not follow the redirect back or the redirect arrives in a different user session than the one the request was initiated in | verifier | `unverified` |  |  |
+| HAIP-0062 | OpenID4VP / via the W3C DC API (L285) | The Wallet MUST support Wallet Invocation via the W3C Digital Credentials API or an equivalent platform API | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0063 | OpenID4VP / via the W3C DC API (L285) | The Verifier MUST use Wallet Invocation via the W3C Digital Credentials API or an equivalent platform API | verifier | `unverified` |  |  |
+| HAIP-0064 | OpenID4VP / via the W3C DC API (L286) | The Wallet MUST support the Response Mode `dc_api.jwt` | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0065 | OpenID4VP / via the W3C DC API (L286) | The Verifier MUST use the Response Mode `dc_api.jwt` | verifier | `unverified` |  |  |
+| HAIP-0066 | OpenID4VP / via the W3C DC API (L287) | The Verifier and Wallet MUST follow the OpenID4VP appendix defining OpenID4VP over the W3C Digital Credentials API | verifier | `unverified` |  |  |
+| HAIP-0067 | OpenID4VP / via the W3C DC API (L288) | The Wallet MUST support unsigned, signed and multi-signed requests | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0068 | OpenID4VP / via the W3C DC API (L288) | The Verifier MUST support at least one of unsigned, signed or multi-signed requests | verifier | `unverified` |  |  |
+| HAIP-0069 | OpenID4VP / mdoc (L298) | The Credential Format identifier MUST be `mso_mdoc` | verifier | `unverified` |  |  |
+| HAIP-0070 | OpenID4VP / mdoc (L299) | When multiple ISO mdocs are returned each MUST be returned in a separate `DeviceResponse` matching its respective DCQL query | verifier | `unverified` |  |  |
+| HAIP-0071 | OpenID4VP / mdoc (L300) | A Credential Issuer including an MSO revocation mechanism MUST use one of the mechanisms defined in ISO/IEC 18013-5 | issuer | `unverified` |  |  |
+| HAIP-0072 | OpenID4VP / IETF SD-JWT VC (L306) | The Credential Format identifier MUST be `dc+sd-jwt` | verifier | `unverified` |  |  |
+| HAIP-0073 | SD-JWT VC Profile (L323) | Compact serialization MUST be supported | issuer | `unverified` |  |  |
+| HAIP-0074 | SD-JWT VC Profile (L324) | An Issuer limiting the validity period MUST use an `exp` claim, a `status` claim, or both | issuer | `unverified` |  |  |
+| HAIP-0075 | SD-JWT VC Profile (L325) | The `cnf` claim MUST conform to the definition given in IETF SD-JWT VC | issuer | `unverified` |  |  |
+| HAIP-0076 | SD-JWT VC Profile (L325) | Implementations MUST include the JSON Web Key in the `jwk` member when the Credential Configuration requires cryptographic holder binding | issuer | `unverified` |  |  |
+| HAIP-0077 | SD-JWT VC Profile (L326) | The `status` claim, if present, MUST contain `status_list` | issuer | `unverified` |  |  |
+| HAIP-0078 | SD-JWT VC Profile (L327) | The public key validating the Status List Token signature MUST be included in the `x5c` JOSE header of the Token | issuer | `unverified` |  |  |
+| HAIP-0079 | SD-JWT VC Profile (L327) | The X.509 certificate of the trust anchor MUST NOT be included in the `x5c` JOSE header of the Status List Token | issuer | `unverified` |  |  |
+| HAIP-0080 | SD-JWT VC Profile (L327) | The X.509 certificate signing the request MUST NOT be self-signed | issuer | `unverified` |  |  |
+| HAIP-0081 | SD-JWT VC Profile (L329) | Each Credential MUST have its own unique, unpredictable status list index even when multiple Credentials reference the same status list URI | issuer | `unverified` |  |  |
+| HAIP-0082 | SD-JWT VC Profile / Issuer key resolution (L341) | X.509 certificate-based key resolution to validate the issuer signature of an SD-JWT VC MUST be supported by all entities | other | `unverified` |  |  |
+| HAIP-0083 | SD-JWT VC Profile / Issuer key resolution (L341) | The SD-JWT VC MUST contain the credential issuer's signing certificate along with a trust chain in the `x5c` JOSE header parameter | issuer | `unverified` |  |  |
+| HAIP-0084 | SD-JWT VC Profile / Issuer key resolution (L341) | The X.509 certificate of the trust anchor MUST NOT be included in the `x5c` JOSE header of the SD-JWT VC | issuer | `unverified` |  |  |
+| HAIP-0085 | SD-JWT VC Profile / Issuer key resolution (L341) | The X.509 certificate signing the request MUST NOT be self-signed | issuer | `unverified` |  |  |
+| HAIP-0086 | SD-JWT VC Profile / Cryptographic Holder Binding (L345) | If the credential has cryptographic holder binding a KB-JWT MUST always be present when presenting an SD-JWT VC | verifier | `unverified` |  |  |
+| HAIP-0087 | Requirements for Digital Signatures (L350) | Issuers, Verifiers and Wallets MUST at a minimum support ECDSA with P-256 and SHA-256 (`ES256`; COSE `-7` or `-9`) for the validations listed below | other | `unverified` |  |  |
+| HAIP-0088 | Requirements for Digital Signatures (L353) | Issuers MUST support `ES256` for validating Wallet Attestations including proof of possession | issuer | `unverified` |  |  |
+| HAIP-0089 | Requirements for Digital Signatures (L354) | Issuers MUST support `ES256` for validating Key Attestations | issuer | `unverified` |  |  |
+| HAIP-0090 | Requirements for Digital Signatures (L355) | Issuers MUST support `ES256` for validating the `jwt` proof type | issuer | `unverified` |  |  |
+| HAIP-0091 | Requirements for Digital Signatures (L357) | Verifiers MUST support `ES256` for validating the signature of the Verifiable Presentation, such as the KB-JWT of an SD-JWT VC or the `deviceSignature` of an ISO mdoc | verifier | `unverified` |  |  |
+| HAIP-0092 | Requirements for Digital Signatures (L358) | Verifiers MUST support `ES256` for validating the status information of the Verifiable Credential or Wallet Attestation | verifier | `unverified` |  |  |
+| HAIP-0093 | Requirements for Digital Signatures (L360) | Wallets MUST support `ES256` for validating signed presentation requests | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0094 | Requirements for Digital Signatures (L361) | Wallets MUST support `ES256` for validating signed Issuer metadata | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
+| HAIP-0095 | Hash Algorithms (L369) | SHA-256 MUST be supported by all entities to generate and validate the digests in IETF SD-JWT VC and ISO mdoc | other | `unverified` |  |  |
+| HAIP-0096 | Privacy / Interoperable Key Attestations (L458) | A backend service transforming platform attestation data into the key attestation format MUST be designed considering the privacy of its users | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 
 ## Unresolved Ambiguities
 

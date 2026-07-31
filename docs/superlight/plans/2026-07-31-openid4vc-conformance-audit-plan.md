@@ -225,9 +225,9 @@ implements neither, and the rows make that visible rather than absent.
 
 **Verify:** `cargo test -p foundry --test conformance_report`
 
-- [ ] Extract clauses per convention
-- [ ] Verify — consistency test green, IDs sequential and unique
-- [ ] Commit
+- [x] Extract clauses per convention — 96 rows (issuer 44, verifier 28, wallet 19, other 5; 77 `unverified`, 19 `out-of-scope`; 12 rows record the provision they narrow)
+- [x] Verify — consistency test green, IDs sequential and unique
+- [x] Commit
 
 ---
 
