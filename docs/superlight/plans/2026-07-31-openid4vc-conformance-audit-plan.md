@@ -457,11 +457,11 @@ immediately.
 
 **Verify:** `cargo test -p foundry-verifier --test conformance_vp && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (59 VP rows: 21 conforming, 2 gap, 33 not-implemented, 3 not-unit-testable; 10 HAIP §4 rows: 6 conforming, 2 not-implemented, 2 not-unit-testable)
+- [x] Red / Green / Refactor per behavior (9 new tests in a new `crates/foundry-verifier/tests/conformance_vp.rs`)
+- [x] Record gaps — GAP-VP-01 (Important: signed Request Object never carries an `aud` claim), GAP-VP-02 (Important: `x509_san_dns` client_id host never cross-checked against the configured x5c leaf certificate's SAN)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -698,4 +698,5 @@ to green over the completed report.
 - 2026-07-31 — Task 8 (adjudicate Token/Nonce Endpoint: 13 rows — 10 conforming, 3 not-implemented; no new gaps) — `d6452c5`
 - 2026-07-31 — Task 9 (adjudicate Credential Endpoint incl. Deferred/Encrypted/Notification/Key Attestation: 60 rows — 15 conforming, 3 gap, 38 not-implemented, 3 not-unit-testable, 1 ambiguous; GAP-VCI-02/03/04) — `8156a96`
 - 2026-07-31 — Task 10 (adjudicate Proof Types, Key and Wallet Attestation: 37 rows — 23 conforming (22 VCI + HAIP-0090), 6 gap (5 VCI citing GAP-VCI-05/06 + HAIP-0088 citing the existing GAP-HAIP-04), 4 not-implemented, 4 out-of-scope; new gaps GAP-VCI-05 (iat unvalidated in proof JWT and Key Attestation JWT) and GAP-VCI-06 (iss never validated); no Critical found — aud, nonce/replay, and plural-proofs validation are all conforming) — `747d573`
-- 2026-07-31 — Task 11 (adjudicate Issuer and Authorization Server Metadata: 35 VCI rows + 8 HAIP rows — 11 conforming, 11 gap, 21 not-implemented; new gaps GAP-VCI-07 (Minor: binding/proof-type fields never omitted when key binding not required), GAP-VCI-08 (Minor: no https-scheme validation for credential_issuer-derived URLs), GAP-VCI-09 (Important: no cross-check between public_base_url and credential_issuer, allowing metadata to silently misidentify the issuer), GAP-VCI-10 (Minor: credential display objects — name/locale-uniqueness/logo/background_image — never structurally validated); confirmed batch issuance (HAIP-0011) works functionally via plural proofs even though never advertised in metadata)
+- 2026-07-31 — Task 11 (adjudicate Issuer and Authorization Server Metadata: 35 VCI rows + 8 HAIP rows — 11 conforming, 11 gap, 21 not-implemented; new gaps GAP-VCI-07 (Minor: binding/proof-type fields never omitted when key binding not required), GAP-VCI-08 (Minor: no https-scheme validation for credential_issuer-derived URLs), GAP-VCI-09 (Important: no cross-check between public_base_url and credential_issuer, allowing metadata to silently misidentify the issuer), GAP-VCI-10 (Minor: credential display objects — name/locale-uniqueness/logo/background_image — never structurally validated); confirmed batch issuance (HAIP-0011) works functionally via plural proofs even though never advertised in metadata) — `441f24b`
+- 2026-07-31 — Task 12 (first Verifier task; adjudicate Authorization Request, Client Identifier Prefixes, Wallet/Verifier Metadata against crates/foundry-verifier/src/request.rs: 59 VP rows + 10 HAIP §4 rows — 27 conforming, 2 gap, 35 not-implemented, 5 not-unit-testable; new gaps GAP-VP-01 (Important: signed Request Object never carries a required aud claim under Static Discovery) and GAP-VP-02 (Important: x509_san_dns client_id host never cross-checked against the configured x5c leaf certificate's SAN, even though foundry_core::trust::match_san_dns already exists to do it); confirmed the Presentations-without-Holder-Binding (nkb) flow, scope-based DCQL aliasing, and every Client Identifier Prefix except x509_san_dns are simply not implemented, narrowing this audit's live surface to a single supported prefix; new test file crates/foundry-verifier/tests/conformance_vp.rs)
