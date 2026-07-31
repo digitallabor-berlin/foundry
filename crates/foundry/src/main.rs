@@ -6,13 +6,35 @@ use foundry_core::config::Config;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    logging::init(&cli.log_level, cli.log_format);
+
+    // The subscriber has to be installed before anything worth logging happens,
+    // but the `logging:` block lives in the config file. So: load it here on a
+    // best-effort basis purely to shape the subscriber, and discard any error.
+    // The authoritative load still runs inside the matched arm below, so a
+    // broken config still fails loudly with its typed `ConfigError` — it is just
+    // reported by a subscriber built from defaults.
+    let preloaded = cli.command.config_path().and_then(|p| Config::load(p).ok());
+    let logging_cfg = preloaded.as_ref().map(|c| &c.logging);
+    logging::init(
+        &logging::resolve_level(
+            std::env::var("RUST_LOG").ok().as_deref(),
+            cli.log_level.as_deref(),
+            logging_cfg,
+        ),
+        logging::resolve_format(cli.log_format, logging_cfg),
+        logging::resolve_sensitive(cli.log_sensitive, logging_cfg),
+    );
 
     match cli.command {
         Command::Config {
             action: ConfigAction::Validate { config },
         } => {
-            let cfg = Config::load(&config)?;
+            // Reuse the preload where it succeeded; otherwise load again so the
+            // real error surfaces.
+            let cfg = match preloaded {
+                Some(cfg) => cfg,
+                None => Config::load(&config)?,
+            };
             cfg.validate()?;
             let base_dir = config.parent().unwrap_or_else(|| std::path::Path::new("."));
             cfg.validate_key_material(base_dir)?;
@@ -21,7 +43,10 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Serve { config } => {
-            let cfg = Config::load(&config)?;
+            let cfg = match preloaded {
+                Some(cfg) => cfg,
+                None => Config::load(&config)?,
+            };
             cfg.validate()?;
             let base_dir = config.parent().unwrap_or_else(|| std::path::Path::new("."));
             cfg.validate_key_material(base_dir)?;

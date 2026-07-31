@@ -185,11 +185,18 @@ from the clap enum in `cli.rs`.
 
 **Verify:** `cargo test -p foundry-core`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 7 tests. `Config` is constructed as a struct literal in 21 places
+across tests and engine doc examples, all of which needed the new field — the
+plan did not anticipate that blast radius. Verified `--workspace` rather than
+just `-p foundry-core`: 428 passed, 0 failed, clippy and fmt clean. Declined to
+derive `Default` for `Config` to avoid the churn: a default `Config` would be a
+semantically meaningless object and a footgun.
 
 ---
 
@@ -654,3 +661,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Phase 2 spec committed — cff20ec
 - 2026-07-31 — Phase 3 plan committed — 842c37d
 - 2026-07-31 — Task 1 (foundry_core::obs) — 718b2e6
+- 2026-07-31 — Task 2 (LoggingConfig) — 66673d6
