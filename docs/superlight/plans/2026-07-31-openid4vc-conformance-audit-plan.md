@@ -37,6 +37,15 @@ internal consistency so the ledger cannot silently rot.
 
 Two, both deliberate, both flagged at the Phase 3 handoff:
 
+3. **A fifth test file**, `crates/foundry/tests/conformance_http.rs`, seeded a
+   task early (Task 7, not Task 18 which formally owns it): two clauses
+   discovered during Authorization Endpoint adjudication — VCI-0030 (ignore
+   unrecognized params) and HAIP-0008 (RFC9207 `iss`) — are only observable at
+   the HTTP boundary in `crates/foundry/src/server.rs`, since neither
+   `AuthorizeParams` nor `AuthorizeOutcome` (foundry-issuer's domain API)
+   carries the data needed to test them. Task 18 will add to this file rather
+   than create a competing one.
+
 1. **A fourth test file**, `crates/foundry/tests/conformance_report.rs`, not
    listed in the spec's Testing Strategy table. It parses the report and
    enforces its internal consistency. Rationale: the spec makes report/test
@@ -284,11 +293,11 @@ implements neither, and the rows make that visible rather than absent.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (22 rows: 5 conforming, 4 gap, 10 not-implemented, 2 not-unit-testable, 1 ambiguous)
+- [x] Red / Green / Refactor per behavior (3 new gap tests + 1 new HTTP-level conforming test confirmed against real code; no production changes)
+- [x] Record gaps — GAP-HAIP-02 (missing `iss` per RFC9207), GAP-HAIP-03 (no DPoP; always Bearer), GAP-HAIP-04 (Critical: Wallet Attestation never cryptographically validated, presence-check only)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 

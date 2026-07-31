@@ -400,3 +400,89 @@ async fn haip_0025_credential_offer_uri_format_is_transport_agnostic() {
         .credential_offer_uri
         .starts_with("openid-credential-offer://?credential_offer="));
 }
+
+// ---------------------------------------------------------------------------
+// HAIP-0009 — HAIP OpenID4VCI (L163): MUST support DPoP per RFC9449 for
+// sender-constrained access tokens.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-HAIP-03: HAIP OpenID4VCI (L163) — MUST support DPoP per RFC9449 for sender-constrained access tokens"]
+async fn haip_0009_token_response_uses_dpop_token_type() {
+    let cfg = test_config();
+    let storage = test_storage().await;
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        token.token_type, "DPoP",
+        "sender-constrained access tokens use token_type=DPoP, not Bearer"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HAIP-0031 — HAIP OpenID4VCI / Wallet Attestation (L225): the public key
+// certificate validating the Wallet Attestation signature MUST be included
+// in the `x5c` JOSE header of the Client Attestation JWT, i.e. the presented
+// attestation MUST be a validly signed JWT, not an arbitrary opaque string.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-HAIP-04: HAIP OpenID4VCI / Wallet Attestation (L225) — the Wallet Attestation MUST be a validly signed JWT with an x5c-verified chain, not merely present"]
+async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
+    let cfg = test_config();
+    let storage = test_storage().await;
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+
+    // Not a JWT at all — no dots, no header, no signature. A conformant
+    // issuer requiring Wallet Attestation must reject this.
+    let result = handle_token_request(
+        &storage,
+        &token_req,
+        Mode::Required,
+        Some("not-a-jwt-at-all"),
+        1_700_000_010,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "an unsigned, non-JWT-shaped value must not be accepted as a valid Wallet Attestation"
+    );
+}
