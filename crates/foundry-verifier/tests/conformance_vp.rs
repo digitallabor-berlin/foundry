@@ -548,3 +548,81 @@ async fn haip_0052_encrypted_response_enc_values_supported_lists_only_one_value(
          A256GCM per HAIP-0052, got: {values:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GAP-VP-06 — OpenID4VP Format / mdoc / Invocation via Redirects (L2833,
+// L2865); Invocation via the DC API (L2963, L2994): the mdoc `SessionTranscript`'s
+// `Handover` element MUST be the spec-defined `OpenID4VPHandover` (redirects)
+// or `OpenID4VPDCAPIHandover` (DC API) CBOR structure, whose first element is
+// the literal text string naming that structure and whose remaining elements
+// are SHA-256 hashes of a CBOR-encoded `HandoverInfo` structure — not raw
+// request parameter values placed directly in the array.
+//
+// Code under audit: `foundry_mdoc::types::serialize_session_transcript`
+// (`crates/foundry-mdoc/src/types.rs`), the *only* SessionTranscript builder
+// in this workspace, used identically by both invocation methods (it does not
+// even distinguish between them). Its own doc comment already flags this:
+// "TODO(interop): simplified handover; not the hashed OID4VPHandover from
+// 18013-7."
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VP-06: OpenID4VP Format / mdoc / Invocation via Redirects (L2833, L2865) — the Handover CBOR structure's first element MUST be the literal string 'OpenID4VPHandover', but serialize_session_transcript places the raw client_id text there instead and never constructs the spec-defined hashed HandoverInfo structure at all"]
+fn gap_vp_06_mdoc_session_transcript_handover_should_contain_the_spec_defined_literal() {
+    // Exactly the shape `serialize_session_transcript` is called with for a
+    // redirect-based mdoc presentation (foundry_mdoc::verifier::verify_mdoc).
+    let bytes = foundry_mdoc::types::serialize_session_transcript(
+        Some("x509_san_dns:issuer.example.com".to_string()),
+        Some("https://issuer.example.com/vp/response/tx1".to_string()),
+        "some-nonce-value".to_string(),
+    )
+    .unwrap();
+
+    // OpenID4VP L2865: "The first element of `OpenID4VPHandover` MUST be the
+    // string `OpenID4VPHandover`." ciborium's definite-length encoding for a
+    // short (<24-byte) CBOR text string is a single major-type-3 length byte
+    // immediately followed by the UTF-8 bytes verbatim, so if this literal
+    // were present anywhere in the Handover element, its raw ASCII bytes
+    // would appear somewhere in the encoded SessionTranscript.
+    let needle = b"OpenID4VPHandover";
+    assert!(
+        bytes.windows(needle.len()).any(|w| w == needle),
+        "OpenID4VP mdoc profile (L2865) requires the Handover's first element to be the \
+         literal string 'OpenID4VPHandover', but the encoded SessionTranscript bytes never \
+         contain it -- serialize_session_transcript's ad-hoc 3-element array places the raw \
+         client_id/response_uri/nonce values there instead of the spec-defined hashed \
+         HandoverInfo structure"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VP-0198 / VP-0201 — OpenID4VP DC API / Request (L2433, L2438): `client_id`
+// MUST be omitted in unsigned DC API requests, and `response_mode` MUST be
+// `dc_api.jwt` when the response is encrypted (always, in this workspace).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vp_0198_0201_dc_api_unsigned_request_shape() {
+    let storage = test_storage().await;
+    let config = sample_config("/tmp/fake_key.pem", None);
+
+    let req = CreateVerificationRequest {
+        dcql_query: Some(serde_json::json!({
+            "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+        })),
+        named_query_ref: None,
+        transport: "dc_api".to_string(),
+        transaction_data: None,
+    };
+    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+
+    let dc_req = res.dc_api_request.unwrap();
+    assert!(
+        dc_req.as_object().unwrap().get("client_id").is_none(),
+        "VP-0198: client_id MUST be omitted in an unsigned DC API request, got: {dc_req}"
+    );
+    assert_eq!(
+        dc_req["response_mode"], "dc_api.jwt",
+        "VP-0201: response_mode MUST be dc_api.jwt when the response is encrypted"
+    );
+}

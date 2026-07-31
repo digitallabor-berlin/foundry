@@ -1376,4 +1376,81 @@ mod tests {
         assert!(msg.contains("jwt_vc_json"), "{msg}");
         assert!(msg.contains("does not implement"), "{msg}");
     }
+
+    /// GAP-VP-07 / VP-0265 (OpenID4VP mdoc-adjacent IETF SD-JWT VC Presentation
+    /// Response, L3179): "Over the DC API the `aud` claim MUST instead be the
+    /// Origin prefixed with `origin:`." `do_verify_vp_response` always computes
+    /// `expected_audience` as `x509_san_dns:<host>` (the Client Identifier),
+    /// regardless of `tx.transport` -- there is no branch anywhere that
+    /// switches to an Origin-prefixed audience for `dc_api` transport. A
+    /// spec-conformant wallet responding to an *unsigned* DC API request (the
+    /// only kind foundry's `dc_api` transport ever issues, since `client_id` is
+    /// never included -- see VP-0198/VP-0200) is required by this same clause
+    /// to bind its KB-JWT to the Origin, not the Client Identifier -- so this
+    /// verifier would reject every genuinely conformant wallet's dc_api
+    /// presentation.
+    #[tokio::test]
+    #[ignore = "GAP-VP-07: OpenID4VP IETF SD-JWT VC Presentation Response (L3179) — over the DC API the KB-JWT `aud` claim MUST be the Origin prefixed with `origin:`, but do_verify_vp_response always expects the x509_san_dns Client Identifier instead, regardless of tx.transport"]
+    async fn gap_vp_07_dc_api_transport_never_accepts_origin_prefixed_kb_jwt_audience() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        // Same shape `create_verification_request` builds for `transport: "dc_api"`
+        // (request.rs): `dc_api.jwt` response_mode, no `client_id` ever emitted.
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // OpenID4VP L3179: over the DC API the KB-JWT `aud` MUST be the Origin
+        // prefixed with `origin:`, not the Client Identifier -- exactly what a
+        // conformant wallet would send back for this unsigned dc_api request.
+        let origin_audience = "origin:https://verifier-website.example";
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(
+            res.verified,
+            "a conformant wallet's Origin-prefixed KB-JWT audience for a dc_api presentation \
+             should verify, but do_verify_vp_response rejected it: {:?}",
+            res.checks
+        );
+    }
 }

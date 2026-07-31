@@ -610,6 +610,114 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
 }
 
 // ---------------------------------------------------------------------------
+// GAP-VCI-12 — OpenID4VCI Format Profile / mdoc (L2235): `doctype` is
+// REQUIRED and identifies the Credential type per ISO 18013-5.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-12: OpenID4VCI Format Profile / mdoc (L2235) — when a mso_mdoc credential_type config carries both `vct` and `doctype`, handle_credential_request's docType resolution prefers `vct` over `doctype`, producing a docType that is not a valid ISO 18013-5 identifier"]
+async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let mut cfg = credential_test_config(&key_path);
+    // Mutate the existing "mdl" fixture to carry BOTH fields -- an unusual
+    // but entirely config-legal state nothing in Config::validate() rejects.
+    for ct in cfg.credential_types.iter_mut() {
+        if ct.id == "mdl" {
+            ct.vct = Some("https://issuer.example.com/vct/mdl-should-not-be-used".to_string());
+        }
+    }
+    let storage = test_storage().await;
+    let req = CreateOfferRequest {
+        credential_type_id: "mdl".to_string(),
+        claims: claims_with("given_name", "Alice"),
+        tx_code_required: false,
+        redirect_uri: None,
+    };
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
+        .await
+        .unwrap();
+    let access_token = token.access_token;
+    let secret = NonceSecret::from_bytes([7u8; 32]);
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("mdl".to_string()),
+        format: Some("mso_mdoc".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+    let res =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await
+            .expect("mdoc issuance must succeed");
+    let credential = &res.credentials[0].credential;
+    let cbor_bytes = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .expect("mdoc credential must be valid base64 (GAP-VCI-03's own encoding)");
+
+    let doctype_needle = b"org.iso.18013.5.1.mDL";
+    assert!(
+        cbor_bytes
+            .windows(doctype_needle.len())
+            .any(|w| w == doctype_needle),
+        "OpenID4VCI Format Profile / mdoc (L2235) requires docType to identify the Credential \
+         type per ISO 18013-5 -- the configured `doctype` ('org.iso.18013.5.1.mDL') should \
+         appear in the encoded mdoc, but handle_credential_request's docType resolution \
+         prefers `vct` over `doctype` whenever both are configured, so the encoded docType is \
+         the vct string instead"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-13 — OpenID4VCI Claims Path Pointer (L2366); Claims Description /
+// Issuer Metadata (L2323): a claims path pointer MUST be a non-empty array of
+// strings, nulls and integers.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-13: OpenID4VCI Claims Path Pointer (L2366) — a claims path pointer MUST be a non-empty array, but Config::validate() never checks this, and ClaimDef.path's Vec<String> type cannot represent the null/integer path segments the spec's claims path pointer grammar allows at all"]
+async fn gap_vci_13_claims_path_pointer_emptiness_and_shape_are_never_validated() {
+    let mut cfg = test_config();
+    cfg.keys.insert(
+        "verifier_signing".to_string(),
+        KeyEntry {
+            private_key: "unused".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    // An empty claims path pointer -- the Claims Path Pointer section (L2366)
+    // requires a claims path pointer to be a *non-empty* array.
+    cfg.credential_types[0].claims[0].path = vec![];
+
+    assert!(
+        cfg.validate().is_err(),
+        "Config::validate() should reject a claims description object whose `path` is an empty \
+         array, per the Claims Path Pointer section's non-empty requirement, but it accepted it"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // HAIP-0025 — HAIP OpenID4VCI (L204): both Issuer and Wallet MUST support the
 // Credential Offer in same-device and cross-device flows.
 // ---------------------------------------------------------------------------
