@@ -73,6 +73,13 @@ Applied by Tasks 3–5, relied on by every later task.
   accepts only `dc+sd-jwt` and `mso_mdoc` and only the `jwt` proof type, so these
   clauses would adjudicate uniformly to `not-implemented`. Rows are retained,
   never deleted — identifiers are never renumbered.
+- **Clarified 2026-07-31 (Task 4):** clauses constraining the *content* of a
+  presentation without naming an actor — KB-JWT `nonce`/`aud`, the mdoc
+  `SessionTranscript`/`OpenID4VPHandover` structure — are attributed to
+  `verifier`, because foundry's testable obligation is recomputing and comparing
+  those values. Clauses governing how a response is *constructed* (body encoding,
+  `vp_token` assembly, JWE header selection) stay `wallet`. Recorded in the
+  report's Audit Boundary.
 - `Requirement` is abridged to one line but must preserve the normative verb and
   the condition. Where abridging would change the meaning, quote the clause.
 
@@ -194,9 +201,9 @@ implements neither, and the rows make that visible rather than absent.
 
 **Verify:** `cargo test -p foundry --test conformance_report`
 
-- [ ] Extract clauses per convention
-- [ ] Verify — consistency test green, IDs sequential and unique
-- [ ] Commit
+- [x] Extract clauses per convention — 266 rows (verifier 170, wallet 92, http 4; 161 `unverified`, 105 `out-of-scope`)
+- [x] Verify — consistency test green, IDs sequential and unique
+- [x] Commit
 
 ---
 
@@ -674,3 +681,5 @@ to green over the completed report.
 - 2026-07-31 — Task 1 (report scaffold + AGENTS.md pointer) — `f3cd3ad`
 - 2026-07-31 — Task 2 (report consistency test, 11 checks, all mutation-verified) — `a377536`
 - 2026-07-31 — Task 3 (extract OpenID4VCI: 230 clauses, 201 in scope) — `f25b9f1`
+- 2026-07-31 — scope amendment: W3C VC profiles + `di_vp` marked `out-of-scope`, VCI in-scope 201 → 181 — `443c830`
+- 2026-07-31 — Task 4 (extract OpenID4VP: 266 clauses, 161 in scope; attribution rule for presentation-binding clauses recorded in the report's Audit Boundary) — `6693298`
