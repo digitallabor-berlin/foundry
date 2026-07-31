@@ -793,11 +793,31 @@ explicit checks)
 **Verify:**
 `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** all three gates clean — 485 tests pass, clippy silent, fmt clean.
+
+**OpenAPI prediction confirmed by measurement, not assumption:** both
+`openapi.json` and `openapi-wallet.json` regenerate **byte identical**, and the
+existing drift test passes. `docs/conformance/` is untouched.
+
+Beyond the plan's list of files:
+- **Root `AGENTS.md` §4.5 "Observability Must Not Leak"** was added. Root §8
+  requires a new global invariant to be registered in §4 with a number, and the
+  `skip_all` rule, the never-logged list, the two-condition payload gate,
+  one-record-per-error and the stable field names each bind two crates. Skipping
+  this would have left the rules living only in a spec nobody reads at edit time.
+- `crates/foundry-core/AGENTS.md` (module map: `obs.rs`, `LoggingConfig`,
+  `LogFormat`) and `crates/foundry/tests/AGENTS.md` (the two new test files) —
+  neither was in the plan's file list, but both are required by root §8.
+- The README documents the `EnvFilter` typo trap from Task 3, since "no output"
+  is precisely the symptom this whole change set exists to eliminate.
+
+No drifting counts were added to any `AGENTS.md`, per root §8; verified by grep.
 
 ---
 
@@ -827,3 +847,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 9 (verifier instrumentation) — 2363be6
 - 2026-07-31 — Task 10 (issuer instrumentation) — b392689
 - 2026-07-31 — Task 11 (redaction gate) — e26ab8f
+- 2026-07-31 — Task 12 (docs, OpenAPI, gates) — 1dd5f8e
