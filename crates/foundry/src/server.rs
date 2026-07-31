@@ -191,6 +191,63 @@ pub(crate) async fn create_offer_handler(
         .map_err(|e| admin_error_response(&e))
 }
 
+/// Cap on `error.detail` in log records and persisted verdicts. Long enough for
+/// a real diagnostic, short enough that a pathological error string cannot fill
+/// the log.
+pub(crate) const DETAIL_MAX: usize = 512;
+
+/// Log an error that is about to be collapsed into a bare [`StatusCode`],
+/// losing the error object.
+///
+/// Handlers returning `Result<_, StatusCode>` cannot carry a typed error into a
+/// mapper, so without this the only trace of the failure would be the status
+/// code — which is exactly the condition that made the original defect
+/// undiagnosable.
+///
+/// `op` names what was being attempted; `kind` is the failure class, mirroring
+/// the `error.kind` field the typed mappers emit.
+/// Emit the single log record for a typed error on its way out as an HTTP
+/// response.
+///
+/// Called from inside each of the four error mappers rather than at their call
+/// sites. Every typed error passes through exactly one mapper exactly once, so
+/// this placement gives complete coverage with no possibility of
+/// double-logging — and inherits `request_id`, `route` and `listener` from the
+/// access-log span for free.
+///
+/// Level follows the status class, the same rule the access log uses: `error!`
+/// for 5xx (including 502 and 503 — an unreachable status list or an exhausted
+/// list needs operator attention), `warn!` for 4xx.
+fn log_typed_error(
+    surface: &'static str,
+    kind: &'static str,
+    detail: impl std::fmt::Display,
+    status: StatusCode,
+) {
+    let detail = foundry_core::obs::truncate(&detail.to_string(), DETAIL_MAX);
+    let code = status.as_u16();
+    if status.is_server_error() {
+        tracing::error!(surface, error.kind = kind, error.detail = %detail, http.status = code, "request failed");
+    } else {
+        tracing::warn!(surface, error.kind = kind, error.detail = %detail, http.status = code, "request rejected");
+    }
+}
+
+fn internal_error(
+    op: &'static str,
+    kind: &'static str,
+    detail: impl std::fmt::Display,
+) -> StatusCode {
+    tracing::error!(
+        op,
+        error.kind = kind,
+        error.detail = %foundry_core::obs::truncate(&detail.to_string(), DETAIL_MAX),
+        http.status = 500,
+        "request failed"
+    );
+    StatusCode::INTERNAL_SERVER_ERROR
+}
+
 fn admin_error_response(
     e: &foundry_issuer::IssuanceError,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -200,6 +257,7 @@ fn admin_error_response(
         StatusListExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
+    log_typed_error("admin", e.kind(), e, status);
     (
         status,
         Json(serde_json::json!({ "error": e.to_string(), "message": e.to_string() })),
@@ -220,6 +278,7 @@ fn wallet_error_response(
         StatusListExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
+    log_typed_error("wallet", e.kind(), e, status);
     (
         status,
         Json(serde_json::json!({
@@ -473,6 +532,7 @@ fn verifier_admin_error_response(
         Dcql(_) | InvalidRequest(_) | Serialization(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
+    log_typed_error("admin", e.kind(), e, status);
     (
         status,
         Json(serde_json::json!({ "error": e.to_string(), "message": e.to_string() })),
@@ -490,6 +550,7 @@ fn verifier_wallet_error_response(
         StatusUnavailable(_) => (StatusCode::BAD_GATEWAY, "status_unavailable"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
+    log_typed_error("wallet", e.kind(), e, status);
     (
         status,
         Json(serde_json::json!({
@@ -530,7 +591,7 @@ pub(crate) async fn get_verification_handler(
 ) -> Result<Json<VerificationTransaction>, StatusCode> {
     let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("load_verification_transaction", e.kind(), e))?;
     match tx {
         Some(tx) => Ok(Json(tx)),
         None => Err(StatusCode::NOT_FOUND),
@@ -551,13 +612,13 @@ async fn get_request_object_handler(
 ) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), StatusCode> {
     let tx = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("load_verification_transaction", e.kind(), e))?;
     let tx = match tx {
         Some(tx) => tx,
         None => return Err(StatusCode::NOT_FOUND),
     };
     let jws_str = foundry_verifier::build_signed_request_object(&state.config, &tx)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("build_signed_request_object", e.kind(), e))?;
     Ok((
         [(
             axum::http::header::CONTENT_TYPE,
@@ -657,13 +718,26 @@ async fn post_response_handler(
         foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str, &resolver)
             .await;
 
-    let _ = foundry_verifier::save_verification_transaction(
+    // Losing this write is its own defect: it makes the admin API and the console
+    // disagree with what actually happened. It must not change the response the
+    // wallet receives, so it is logged rather than propagated.
+    if let Err(e) = foundry_verifier::save_verification_transaction(
         state.storage.as_ref(),
         &tx,
         state.config.storage.transaction_ttl_secs,
         now,
     )
-    .await;
+    .await
+    {
+        tracing::error!(
+            op = "save_verification_transaction",
+            tx_id = %tx.id,
+            error.kind = e.kind(),
+            error.detail = %foundry_core::obs::truncate(&e.to_string(), DETAIL_MAX),
+            "failed to persist the verification verdict; the admin API will not \
+             reflect this transaction's outcome"
+        );
+    }
 
     match verify_res {
         Ok(result) => Ok(Json(result)),
@@ -689,31 +763,41 @@ async fn status_list_handler(
 
     let persistent = foundry_core::status_list::load_status_list(state.storage.as_ref(), &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("load_status_list", "storage", e))?;
     let persistent = match persistent {
         Some(p) => p,
         None => return Err(StatusCode::NOT_FOUND),
     };
     let status_list = persistent
         .to_status_list(None)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("to_status_list", "status_list", e))?;
 
+    // These two are misconfigurations, not runtime faults: without a log line a
+    // status-list request 500s with no explanation anywhere.
     let key_name = state
         .config
         .issuer
         .status_list
         .signing_key
         .as_deref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let key_entry = state
-        .config
-        .keys
-        .get(key_name)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or_else(|| {
+            internal_error(
+                "status_list_signing_key",
+                "config",
+                "issuer.status_list.signing_key is not set but status lists are enabled",
+            )
+        })?;
+    let key_entry = state.config.keys.get(key_name).ok_or_else(|| {
+        internal_error(
+            "status_list_signing_key",
+            "config",
+            format_args!("issuer.status_list.signing_key '{key_name}' is not present in keys"),
+        )
+    })?;
     let alg: foundry_core::crypto::SignatureAlgorithm = key_entry
         .alg
         .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| internal_error("parse_signing_alg", "config", e))?;
 
     let base_url = state
         .config
@@ -737,7 +821,7 @@ async fn status_list_handler(
         alg,
         key_entry.x5c.as_deref().map(std::path::Path::new),
     )
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| internal_error("sign_status_list_token", "crypto", e))?;
 
     Ok((
         [(
@@ -811,4 +895,227 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
         axum::serve(wallet_listener, wallet_app).into_future(),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log_capture;
+    use foundry_issuer::IssuanceError;
+    use foundry_verifier::VerificationError;
+    use tracing::Level;
+
+    /// Run `body` under a capture layer and return what it logged.
+    fn captured(body: impl FnOnce()) -> Vec<log_capture::CapturedEvent> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let (layer, handle) = log_capture::capture_layer();
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(layer);
+        tracing::subscriber::with_default(subscriber, body);
+        handle.events()
+    }
+
+    /// Every mapper must emit exactly one record. More than one would
+    /// double-count in an alert; none is the defect this work exists to fix.
+    #[test]
+    fn each_mapper_logs_exactly_one_record() {
+        let events = captured(|| {
+            let _ = admin_error_response(&IssuanceError::Internal("boom".into()));
+        });
+        assert_eq!(events.len(), 1, "admin issuance mapper: {events:?}");
+
+        let events = captured(|| {
+            let _ = wallet_error_response(&IssuanceError::InvalidGrant("bad code".into()));
+        });
+        assert_eq!(events.len(), 1, "wallet issuance mapper: {events:?}");
+
+        let events = captured(|| {
+            let _ = verifier_admin_error_response(&VerificationError::Dcql("no match".into()));
+        });
+        assert_eq!(events.len(), 1, "admin verification mapper: {events:?}");
+
+        let events = captured(|| {
+            let _ = verifier_wallet_error_response(&VerificationError::Decryption("nope".into()));
+        });
+        assert_eq!(events.len(), 1, "wallet verification mapper: {events:?}");
+    }
+
+    #[test]
+    fn mapper_records_kind_detail_and_status() {
+        let events = captured(|| {
+            let _ = verifier_wallet_error_response(&VerificationError::Decryption(
+                "cek unwrap failed".into(),
+            ));
+        });
+        let e = &events[0];
+        assert_eq!(
+            e.fields.get("error.kind").map(String::as_str),
+            Some("decryption")
+        );
+        assert_eq!(e.fields.get("http.status").map(String::as_str), Some("400"));
+        assert_eq!(e.fields.get("surface").map(String::as_str), Some("wallet"));
+        assert!(
+            e.fields
+                .get("error.detail")
+                .is_some_and(|d| d.contains("cek unwrap failed")),
+            "detail should carry the diagnostic: {e:?}"
+        );
+    }
+
+    /// Level follows the status class, matching the access log's rule.
+    #[test]
+    fn level_follows_status_class() {
+        // 400 -> WARN
+        let events = captured(|| {
+            let _ = verifier_wallet_error_response(&VerificationError::Decryption("x".into()));
+        });
+        assert_eq!(events[0].level, Level::WARN);
+
+        // 500 -> ERROR
+        let events = captured(|| {
+            let _ = admin_error_response(&IssuanceError::Internal("x".into()));
+        });
+        assert_eq!(events[0].level, Level::ERROR);
+
+        // 502 -> ERROR: an unreachable status list needs operator attention.
+        let events = captured(|| {
+            let _ =
+                verifier_wallet_error_response(&VerificationError::StatusUnavailable("dns".into()));
+        });
+        assert_eq!(events[0].level, Level::ERROR);
+        assert_eq!(
+            events[0].fields.get("http.status").map(String::as_str),
+            Some("502")
+        );
+
+        // 503 -> ERROR
+        let events = captured(|| {
+            let _ = wallet_error_response(&IssuanceError::StatusListExhausted("pid".into()));
+        });
+        assert_eq!(events[0].level, Level::ERROR);
+    }
+
+    /// The status mapping is spec-governed (root AGENTS.md §4.3). Adding logging
+    /// must not have perturbed it.
+    #[test]
+    fn status_mapping_is_unchanged_by_logging() {
+        assert_eq!(
+            admin_error_response(&IssuanceError::UnknownCredentialType("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            admin_error_response(&IssuanceError::StatusListExhausted("x".into())).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            admin_error_response(&IssuanceError::Internal("x".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            wallet_error_response(&IssuanceError::InvalidProof("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            verifier_admin_error_response(&VerificationError::Dcql("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            verifier_admin_error_response(&VerificationError::Crypto("x".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            verifier_wallet_error_response(&VerificationError::Decryption("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            verifier_wallet_error_response(&VerificationError::StatusUnavailable("x".into())).0,
+            StatusCode::BAD_GATEWAY
+        );
+    }
+
+    #[test]
+    fn detail_is_length_capped() {
+        let long = "z".repeat(DETAIL_MAX * 3);
+        let events = captured(|| {
+            let _ = verifier_wallet_error_response(&VerificationError::Failed(long.clone()));
+        });
+        let detail = events[0]
+            .fields
+            .get("error.detail")
+            .expect("detail present");
+        assert!(
+            detail.len() < DETAIL_MAX * 2,
+            "detail was not capped: {} bytes",
+            detail.len()
+        );
+        assert!(detail.contains("truncated"));
+    }
+
+    /// `internal_error` exists so that a handler collapsing to a bare StatusCode
+    /// still leaves a diagnostic behind.
+    #[test]
+    fn internal_error_logs_and_returns_500() {
+        let mut status = None;
+        let events = captured(|| {
+            status = Some(internal_error(
+                "load_status_list",
+                "storage",
+                "disk on fire",
+            ));
+        });
+        assert_eq!(status, Some(StatusCode::INTERNAL_SERVER_ERROR));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].level, Level::ERROR);
+        assert_eq!(
+            events[0].fields.get("op").map(String::as_str),
+            Some("load_status_list")
+        );
+        assert_eq!(
+            events[0].fields.get("error.kind").map(String::as_str),
+            Some("storage")
+        );
+        assert!(events[0]
+            .fields
+            .get("error.detail")
+            .is_some_and(|d| d.contains("disk on fire")));
+    }
+
+    /// No production path in this file may throw an error object away on its way
+    /// to a bare `StatusCode` — that is precisely the shape that made the
+    /// original defect undiagnosable.
+    ///
+    /// Scans only the code above this test module, and assembles the needles at
+    /// runtime, so the assertion cannot match its own source text.
+    #[test]
+    fn no_error_is_silently_discarded_in_production_code() {
+        let src = include_str!("server.rs");
+        let production = src
+            .split_once("\n#[cfg(test)]")
+            .map(|(before, _)| before)
+            .unwrap_or(src);
+
+        let discarding_map_err = format!("map_err(|_| {}::", "StatusCode");
+        assert!(
+            !production.contains(&discarding_map_err),
+            "found a map_err that discards the error object; use internal_error() so \
+             the failure leaves a diagnostic behind"
+        );
+
+        let bare_ok_or = format!("ok_or({}::", "StatusCode");
+        assert!(
+            !production.contains(&bare_ok_or),
+            "found an ok_or that yields a bare status with no diagnostic; use \
+             ok_or_else(|| internal_error(..))"
+        );
+
+        let swallowed_save = format!(
+            "let _ = {}::save_verification_transaction",
+            "foundry_verifier"
+        );
+        assert!(
+            !production.contains(&swallowed_save),
+            "the verification verdict save must not be silently discarded"
+        );
+    }
 }

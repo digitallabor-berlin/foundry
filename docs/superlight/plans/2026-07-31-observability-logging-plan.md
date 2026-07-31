@@ -423,11 +423,21 @@ functions. Do not change any `#[error(...)]` message.
 
 **Verify:** `cargo test -p foundry-verifier -p foundry-issuer`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 4 tests (2 per crate); 465 workspace tests pass, clippy and fmt
+clean. Both enums have 12 variants; exhaustiveness verified structurally as well
+as by test — 12 arms each, zero `_ =>` arms. Kind strings are `snake_case`
+(`status_unavailable`, `unknown_credential_type`) rather than the Rust variant
+spelling, since they are consumed by log tooling. Added a test per enum asserting
+`kind()` never contains the error's detail, which is what makes it safe as a
+grouping key.
+
+---
 
 ---
 
@@ -713,3 +723,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 3 (CLI/precedence/startup order) — 88d30b4
 - 2026-07-31 — Task 4 (log_capture test layer) — b298f07
 - 2026-07-31 — Task 5 (http_log access log) — e0a88d8
+- 2026-07-31 — Task 6 (error kind()) — bb57a73
