@@ -568,6 +568,76 @@ mod tests {
             .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
     }
 
+    /// VP-0125 (OpenID4VP 1.0 Response / Response Parameters, L1172): the
+    /// Client MUST ignore any unrecognized response parameters.
+    /// `do_verify_vp_response` reads only `vp_token` out of the decrypted JWE
+    /// payload; any other top-level member is never inspected, so a response
+    /// carrying an unrecognized parameter alongside a valid `vp_token` must
+    /// verify identically to one without it.
+    #[tokio::test]
+    async fn vp_0125_unrecognized_response_parameters_are_ignored() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx.nonce,
+        )
+        .unwrap();
+
+        // `code`, `iss`, and a made-up future parameter alongside `vp_token`.
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({
+                "vp_token": { "c1": [presentation] },
+                "code": "unused-by-this-verifier",
+                "iss": "https://verifier.example.com",
+                "some_future_response_parameter": { "nested": true }
+            }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "unrecognized response parameters must not affect verification: checks={:?}",
+            res.checks
+        );
+    }
+
     #[tokio::test]
     async fn test_verify_vp_response_missing_vp_token() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();

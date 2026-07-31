@@ -733,6 +733,61 @@ mod tests {
         );
     }
 
+    /// VP-0128, VP-0130, VP-0132 (OpenID4VP 1.0 Response / Response Mode
+    /// `direct_post`, L1222): `response_uri` is REQUIRED when Response Mode
+    /// `direct_post` is used; `redirect_uri` MUST NOT be present alongside it;
+    /// and `response_uri` MUST be a value the client would be permitted to use
+    /// as `redirect_uri`. `build_signed_request_object` always emits
+    /// `response_uri` (never `redirect_uri`, which this codebase has no field
+    /// for at all), derived from the same `public_base_url` host as `client_id`
+    /// -- so it is always same-origin with the client's own identity, the
+    /// strictest form of "permitted to use as redirect_uri".
+    #[tokio::test]
+    async fn vp_0128_0130_0132_response_uri_present_no_redirect_uri_same_origin_as_client_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let jws_str = build_signed_request_object(&config, &tx).unwrap();
+        let payload_bytes = B64URL.decode(jws_str.split('.').nth(1).unwrap()).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+
+        // VP-0128: response_uri is present.
+        let response_uri = payload["response_uri"].as_str().unwrap();
+        assert!(!response_uri.is_empty());
+
+        // VP-0130: redirect_uri is never present alongside it.
+        assert!(payload.get("redirect_uri").is_none());
+
+        // VP-0132: response_uri is same-origin with client_id's own host.
+        let client_id = payload["client_id"].as_str().unwrap();
+        let client_host = client_id.strip_prefix("x509_san_dns:").unwrap();
+        assert!(
+            response_uri.starts_with(&format!("https://{client_host}/")),
+            "response_uri {response_uri} must be same-origin as client_id host {client_host}"
+        );
+    }
+
     /// The ephemeral response-encryption JWK must carry the metadata a wallet
     /// needs to *select* it: OpenID4VP wallets filter candidate encryption keys
     /// on `kid` and `alg` being present and non-empty, and locate the reader key
