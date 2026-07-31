@@ -372,11 +372,27 @@ degrades to `"<unmatched>"`.
 
 **Verify:** `cargo test -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 10 tests; 461 workspace tests pass, clippy and fmt clean.
+
+The plan's open question — whether `MatchedPath` is visible to middleware added
+with `Router::layer` — was resolved **empirically** rather than from memory: it
+is, in axum 0.7, so no `route_layer` split was needed.
+
+Exposed as `with_access_log(router, listener) -> Router` rather than a `layer()`
+function, because naming the concrete `FromFnLayer` type would have leaked an
+unnameable generic parameter into the signature.
+
+Also verified against a **running server**, not only by unit test: four requests
+(200 / 200 / 404 / 401) each produced exactly one correctly-levelled record with
+the right route template and listener label, and the `x-request-id` response
+header matched the logged `request_id`. This is the point at which the original
+"foundry logs show nothing" symptom stops being true.
 
 ---
 
@@ -696,3 +712,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 2 (LoggingConfig) — 66673d6
 - 2026-07-31 — Task 3 (CLI/precedence/startup order) — 88d30b4
 - 2026-07-31 — Task 4 (log_capture test layer) — b298f07
+- 2026-07-31 — Task 5 (http_log access log) — e0a88d8
