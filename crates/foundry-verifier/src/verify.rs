@@ -216,8 +216,70 @@ pub async fn verify_vp_response(
         }
         Err(err) => {
             tx.state = VerificationState::Failed;
+
+            // Record *why*. Previously this arm set the state and dropped the
+            // reason on the floor: the detail existed only inside `err`, which
+            // the HTTP layer turned into a 400 body for the wallet. An operator
+            // watching the admin console saw a bare red "failed" with no
+            // explanation, because the console renders its checks list only when
+            // `tx.result` is present.
+            //
+            // `verified` stays derived — one check, not passed — so the
+            // invariant `verified == checks.iter().all(|c| c.passed)` holds
+            // (root AGENTS.md §4.2).
+            let checks = vec![CheckResult {
+                check: check_name_for(&err).to_string(),
+                passed: false,
+                detail: Some(foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX)),
+            }];
+            tx.result = Some(VerificationResult {
+                verified: checks.iter().all(|c| c.passed),
+                checks,
+                claims: serde_json::Value::Null,
+            });
+
+            tracing::warn!(
+                tx_id = %tx.id,
+                error.kind = err.kind(),
+                error.detail = %foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX),
+                check = check_name_for(&err),
+                "vp response verification failed"
+            );
+
             Err(err)
         }
+    }
+}
+
+/// Cap on the `detail` string persisted into `tx.result` and logged.
+///
+/// This value is served over the admin API and rendered in a browser, so it is
+/// bounded rather than trusted to be short.
+const DETAIL_MAX: usize = 512;
+
+/// The verification stage that aborted, named to match the `CheckResult` names
+/// the success path already produces.
+///
+/// Using the same vocabulary matters: the console renders whatever check names it
+/// is given, so a failure should appear in the same list position an operator
+/// already knows how to read.
+///
+/// Exhaustive with no catch-all: a new error variant should be a deliberate
+/// decision about which stage it belongs to, not a silent fallthrough.
+fn check_name_for(err: &VerificationError) -> &'static str {
+    match err {
+        VerificationError::Decryption(_) => "jwe_decryption",
+        VerificationError::StatusUnavailable(_) => "status_check",
+        VerificationError::Dcql(_) => "dcql_match",
+        VerificationError::NotFound(_)
+        | VerificationError::InvalidState(_)
+        | VerificationError::InvalidRequest(_)
+        | VerificationError::Crypto(_)
+        | VerificationError::Failed(_)
+        | VerificationError::Storage(_)
+        | VerificationError::CoreCrypto(_)
+        | VerificationError::Trust(_)
+        | VerificationError::Serialization(_) => "verification_error",
     }
 }
 
@@ -823,6 +885,118 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
         assert_eq!(tx.state, VerificationState::Failed);
+    }
+
+    /// The defect this task exists to fix: the error path used to set the state
+    /// and drop the reason, so the admin console showed a bare red "failed".
+    #[tokio::test]
+    async fn a_structural_failure_records_why_in_tx_result() {
+        let (root_pem, _leaf_cert, _leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, VerificationError::Decryption(_)));
+        assert_eq!(tx.state, VerificationState::Failed);
+
+        let result = tx
+            .result
+            .as_ref()
+            .expect("the failure reason must be persisted, not discarded");
+        assert!(!result.verified);
+        assert_eq!(result.checks.len(), 1, "checks={:?}", result.checks);
+        let check = &result.checks[0];
+        assert_eq!(check.check, "jwe_decryption");
+        assert!(!check.passed);
+        let detail = check.detail.as_deref().expect("detail must be present");
+        assert!(!detail.is_empty());
+
+        // Root AGENTS.md §4.2: `verified` is derived, never hardcoded.
+        assert_eq!(
+            result.verified,
+            result.checks.iter().all(|c| c.passed),
+            "verified must equal the conjunction of the checks"
+        );
+    }
+
+    /// A non-decryption failure lands under a generic stage name rather than
+    /// being mislabelled as a decryption problem.
+    #[tokio::test]
+    async fn a_non_decryption_failure_uses_the_generic_check_name() {
+        let (root_pem, _leaf_cert, _leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "other_field": "no_vp_token" }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let _ = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+
+        let result = tx.result.as_ref().expect("failure reason persisted");
+        assert_eq!(result.checks[0].check, "verification_error");
+        assert!(!result.verified);
+    }
+
+    #[test]
+    fn check_name_maps_each_stage_to_the_success_paths_vocabulary() {
+        let s = || "x".to_string();
+        assert_eq!(
+            check_name_for(&VerificationError::Decryption(s())),
+            "jwe_decryption"
+        );
+        assert_eq!(
+            check_name_for(&VerificationError::StatusUnavailable(s())),
+            "status_check"
+        );
+        assert_eq!(check_name_for(&VerificationError::Dcql(s())), "dcql_match");
+        assert_eq!(
+            check_name_for(&VerificationError::Crypto(s())),
+            "verification_error"
+        );
+        assert_eq!(
+            check_name_for(&VerificationError::Failed(s())),
+            "verification_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_detail_is_length_capped() {
+        let (root_pem, _leaf_cert, _leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        // A pathologically long JWE yields a long error string; the persisted
+        // detail is served over the admin API and rendered in a browser, so it
+        // must be bounded.
+        let junk = "j".repeat(DETAIL_MAX * 8);
+        let resolver = MockResolver { token: None };
+        let _ = verify_vp_response(&config, &mut tx, &junk, &resolver)
+            .await
+            .unwrap_err();
+
+        let detail = tx.result.as_ref().unwrap().checks[0]
+            .detail
+            .as_deref()
+            .unwrap();
+        assert!(
+            detail.len() <= DETAIL_MAX + 32,
+            "detail was not capped: {} bytes",
+            detail.len()
+        );
     }
 
     #[tokio::test]

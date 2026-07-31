@@ -474,11 +474,32 @@ arms or alter any mapped status.
 
 **Verify:** `cargo test -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 7 tests; 472 workspace tests pass, clippy and fmt clean.
+
+**Nine** error-discarding sites, not the five the plan listed: seven
+`map_err(|_| INTERNAL_SERVER_ERROR)` plus two `.ok_or(INTERNAL_SERVER_ERROR)`.
+The two extra are misconfiguration paths in `status_list_handler` — a status-list
+request 500s with no explanation anywhere when `signing_key` is unset or names a
+key absent from `keys`. They now name the missing key.
+
+Two deviations from the plan:
+- **502 and 503 log at `ERROR`, not `WARN`.** The plan specified `WARN` for 502,
+  but the access-log middleware already uses "level follows status class", and
+  two different rules for one status class invites confusion. An unreachable
+  status list or an exhausted list does need operator attention.
+- Added a `no_error_is_silently_discarded_in_production_code` guard test, which
+  the plan did not call for. It scans only the code above the test module and
+  assembles its needles at runtime, because a naive version matched its own
+  source text — caught by the test failing on itself in the red phase.
+
+Surfaced a shared `internal_error(op, kind, detail)` helper and a `DETAIL_MAX`
+cap. Status mapping asserted unchanged across eight variant/status pairs.
 
 ---
 
@@ -724,3 +745,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Task 4 (log_capture test layer) — b298f07
 - 2026-07-31 — Task 5 (http_log access log) — e0a88d8
 - 2026-07-31 — Task 6 (error kind()) — bb57a73
+- 2026-07-31 — Task 7 (error logging at mappers) — 1779ce6
