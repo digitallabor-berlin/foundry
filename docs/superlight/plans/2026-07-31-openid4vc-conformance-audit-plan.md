@@ -253,13 +253,13 @@ implements neither, and the rows make that visible rather than absent.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (14 rows: 7 conforming, 2 gap, 5 not-implemented)
+- [x] Red — failing test per behavior above (both gap tests confirmed failing for the right reason before being marked `#[ignore]`)
+- [x] Green — minimal implementation (no production changes; this task is evidence-only per the Global Constraints)
+- [x] Refactor — clean while green
+- [x] Record gaps — GAP-VCI-01 (pre-authorized_code not single-use at /token) and GAP-HAIP-01 (authorization_code grant never conveys a `scope` value)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 

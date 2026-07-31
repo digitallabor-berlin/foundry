@@ -103,14 +103,16 @@ strings, commit messages, and follow-up work.
 
 | Spec | Total | conforming | gap | not-implemented | not-unit-testable | out-of-scope | ambiguous | unverified |
 |---|---|---|---|---|---|---|---|---|
-| OpenID4VCI | 230 | 0 | 0 | 0 | 0 | 49 | 0 | 181 |
+| OpenID4VCI | 230 | 4 | 1 | 5 | 0 | 49 | 0 | 171 |
 | OpenID4VP | 266 | 0 | 0 | 0 | 0 | 105 | 0 | 161 |
-| HAIP | 96 | 0 | 0 | 0 | 0 | 19 | 0 | 77 |
+| HAIP | 96 | 3 | 1 | 0 | 0 | 19 | 0 | 73 |
 
 ## Gap Register
 
 | ID | Severity | Spec § | Requirement | Impact | Test |
 |---|---|---|---|---|---|
+| GAP-VCI-01 | Important | Credential Offer (L396) | `pre-authorized_code` MUST be short lived and single use | `handle_pre_authorized_code_grant` (token.rs) never invalidates the code or transitions transaction state after minting an access_token, unlike the symmetric `authorization_code` branch which explicitly burns its code. A held or intercepted `pre-authorized_code` can be redeemed for a fresh access_token any number of times before the credential is claimed at `/credential` (which does gate on transaction state). | vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance |
+| GAP-HAIP-01 | Important | OpenID4VCI (L199) | For Grant Type `authorization_code` the Issuer MUST include a scope value so the Wallet can identify the desired Credential Type | foundry's `authorization_code` flow identifies the Credential Type solely via the opaque `issuer_state` bound to the transaction at `create_offer` time; `CredentialConfigurationSupported` (metadata.rs) carries no `scope` field and `AuthorizeParams` (authorize.rs) has no `scope` parameter. A HAIP-conformant Wallet expecting to learn the Credential Type via `scope` receives none. | haip_0023_credential_configuration_metadata_carries_a_scope_value |
 
 ## Clause Inventory — OpenID4VCI
 
@@ -119,22 +121,22 @@ strings, commit messages, and follow-up work.
 | VCI-0001 | Overview / Core Concepts (L181) | Credentials batched in one response MUST share the same Credential Format and Credential Dataset | issuer | `unverified` |  |  |
 | VCI-0002 | Overview / Core Concepts (L183) | To issue Credentials of differing Formats or Datasets, multiple requests MUST be sent to the Credential Endpoint | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | VCI-0003 | Pre-Authorized Code Flow (L354) | Implementers MUST implement mitigations suitable to the use case against pre-authorized code theft | issuer | `unverified` |  |  |
-| VCI-0004 | Credential Offer (L374) | `credential_offer` MUST NOT be present when `credential_offer_uri` is present | issuer | `unverified` |  |  |
-| VCI-0005 | Credential Offer (L375) | `credential_offer_uri` MUST NOT be present when `credential_offer` is present | issuer | `unverified` |  |  |
-| VCI-0006 | Credential Offer (L383) | `credential_issuer` is REQUIRED in the Credential Offer | issuer | `unverified` |  |  |
-| VCI-0007 | Credential Offer (L384) | `credential_configuration_ids` is REQUIRED and MUST be a non-empty array of unique strings keyed into `credential_configurations_supported` | issuer | `unverified` |  |  |
+| VCI-0004 | Credential Offer (L374) | `credential_offer` MUST NOT be present when `credential_offer_uri` is present | issuer | `conforming` | `build_offer_uri` (offer.rs) always emits exactly one `credential_offer=` query parameter and never emits `credential_offer_uri=`; foundry has no by-reference offer delivery mode | vci_0004_0005_offer_uri_carries_exactly_one_delivery_parameter |
+| VCI-0005 | Credential Offer (L375) | `credential_offer_uri` MUST NOT be present when `credential_offer` is present | issuer | `conforming` | Same evidence as VCI-0004: `build_offer_uri` never emits `credential_offer_uri=` | vci_0004_0005_offer_uri_carries_exactly_one_delivery_parameter |
+| VCI-0006 | Credential Offer (L383) | `credential_issuer` is REQUIRED in the Credential Offer | issuer | `conforming` | `CredentialOffer.credential_issuer` (offer.rs) is a non-optional field, always populated from `cfg.issuer.credential_issuer` in `create_offer` | vci_0006_credential_issuer_is_always_present_and_matches_config |
+| VCI-0007 | Credential Offer (L384) | `credential_configuration_ids` is REQUIRED and MUST be a non-empty array of unique strings keyed into `credential_configurations_supported` | issuer | `conforming` | `create_offer` sets `credential_configuration_ids` to a single-element vec containing the resolved credential type's id, which `build_issuer_metadata` (metadata.rs) always keys into `credential_configurations_supported` | vci_0007_credential_configuration_ids_are_nonempty_and_resolve_against_metadata |
 | VCI-0008 | Credential Offer (L385) | Wallet MUST use the grant per its parameters; if `grants` is absent or empty the Wallet MUST determine grant types from metadata | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | VCI-0009 | Credential Offer (L388) | Wallet MUST ignore unrecognized Credential Offer parameters | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | VCI-0010 | Credential Offer (L393) | If `issuer_state` was received the Wallet MUST include it in the subsequent Authorization Request | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
-| VCI-0011 | Credential Offer (L394) | `authorization_server` (authorization_code grant) MUST NOT be used unless metadata `authorization_servers` has multiple entries, and MUST match one of its values | issuer | `unverified` |  |  |
-| VCI-0012 | Credential Offer (L396) | `pre-authorized_code` is REQUIRED and MUST be short lived and single use | issuer | `unverified` |  |  |
+| VCI-0011 | Credential Offer (L394) | `authorization_server` (authorization_code grant) MUST NOT be used unless metadata `authorization_servers` has multiple entries, and MUST match one of its values | issuer | `not-implemented` | foundry supports a single implicit Authorization Server: `CredentialIssuerMetadata.authorization_servers` (metadata.rs) is always empty, and neither `AuthorizationCodeGrant` nor `PreAuthorizedCodeGrant` (offer.rs) carries an `authorization_server` field |  |
+| VCI-0012 | Credential Offer (L396) | `pre-authorized_code` is REQUIRED and MUST be short lived and single use | issuer | `gap` | Presence and per-offer distinctness are conforming (`vci_0012_pre_authorized_code_is_present_and_distinct_per_offer`); single use is not — GAP-VCI-01 |  |
 | VCI-0013 | Credential Offer (L396) | Wallet MUST include the `pre-authorized_code` value in the subsequent Token Request | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | VCI-0014 | Credential Offer (L397) | If a `tx_code` object was present the Wallet MUST send the Transaction Code in the `tx_code` Token Request parameter | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
-| VCI-0015 | Credential Offer (L400) | `tx_code.description` length MUST NOT exceed 300 characters | issuer | `unverified` |  |  |
-| VCI-0016 | Credential Offer (L401) | `authorization_server` (pre-authorized_code grant) MUST NOT be used unless metadata has multiple entries, and MUST match one of its values | issuer | `unverified` |  |  |
+| VCI-0015 | Credential Offer (L400) | `tx_code.description` length MUST NOT exceed 300 characters | issuer | `not-implemented` | `TxCodeDefinition` (offer.rs) has only `input_mode` and `length`; no `description` field is ever emitted, so the 300-character constraint has no value to violate |  |
+| VCI-0016 | Credential Offer (L401) | `authorization_server` (pre-authorized_code grant) MUST NOT be used unless metadata has multiple entries, and MUST match one of its values | issuer | `not-implemented` | Same evidence as VCI-0011: single implicit Authorization Server, no `authorization_server` field ever emitted |  |
 | VCI-0017 | Credential Offer (L434) | Wallet MUST send an HTTP GET to `credential_offer_uri` to retrieve the Credential Offer Object | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
-| VCI-0018 | Credential Offer (L445) | The response carrying a Credential Offer Object MUST use media type `application/json` | http | `unverified` |  |  |
-| VCI-0019 | Credential Offer (L465) | Credential Offer retrieval MUST use `application/json` and MUST NOT use `application/jwt` with `alg: none` | http | `unverified` |  |  |
+| VCI-0018 | Credential Offer (L445) | The response carrying a Credential Offer Object MUST use media type `application/json` | http | `not-implemented` | foundry has no HTTP endpoint serving a Credential Offer Object by reference — `build_offer_uri` (offer.rs) always inlines the offer via the `credential_offer` deep-link parameter; the by-reference retrieval flow (VCI §4.2) is not implemented |  |
+| VCI-0019 | Credential Offer (L465) | Credential Offer retrieval MUST use `application/json` and MUST NOT use `application/jwt` with `alg: none` | http | `not-implemented` | Same evidence as VCI-0018: no by-reference retrieval endpoint exists |  |
 | VCI-0020 | Authorization Request (L489) | `authorization_details` MUST be used to convey the details of the Credentials requested | issuer | `unverified` |  |  |
 | VCI-0021 | Authorization Request (L491) | `type` is REQUIRED and MUST be set to `openid_credential` | issuer | `unverified` |  |  |
 | VCI-0022 | Authorization Request (L492) | `credential_configuration_id` is REQUIRED and MUST identify an entry in `credential_configurations_supported` | issuer | `unverified` |  |  |
@@ -631,7 +633,7 @@ strings, commit messages, and follow-up work.
 | HAIP-0007 | OpenID4VCI (L159) | MUST use Pushed Authorization Requests where applicable | issuer | `unverified` |  |  |
 | HAIP-0008 | OpenID4VCI (L159) | MUST return the `iss` value in the Authorization response per RFC9207 | issuer | `unverified` |  |  |
 | HAIP-0009 | OpenID4VCI (L163) | MUST support DPoP per RFC9449 for sender-constrained access tokens | issuer | `unverified` |  |  |
-| HAIP-0010 | OpenID4VCI (L173) | If Issuer-initiated flows are supported they MUST use the Credential Offer | issuer | `unverified` | Narrows OpenID4VCI Section 4.1 |  |
+| HAIP-0010 | OpenID4VCI (L173) | If Issuer-initiated flows are supported they MUST use the Credential Offer | issuer | `conforming` | Narrows OpenID4VCI Section 4.1. `create_offer` is foundry's only issuer-initiated issuance entry point and always produces a well-formed `CredentialOffer` plus its deep-link | haip_0010_issuer_initiated_flow_always_produces_a_credential_offer |
 | HAIP-0011 | OpenID4VCI (L177) | The Issuer MUST indicate whether batch issuance is supported by including or omitting `batch_credential_issuance` | issuer | `unverified` |  |  |
 | HAIP-0012 | OpenID4VCI / Issuer Metadata (L183) | The Authorization Server MUST support metadata according to RFC8414 | issuer | `unverified` |  |  |
 | HAIP-0013 | OpenID4VCI / Issuer Metadata (L185) | The Credential Issuer MUST support metadata retrieval | issuer | `unverified` | Narrows OpenID4VCI Section 12.2.2 |  |
@@ -643,10 +645,10 @@ strings, commit messages, and follow-up work.
 | HAIP-0019 | OpenID4VCI / Issuer Metadata (L192) | Wallets that render Credential Issuer metadata images MUST support both the SVG and PNG formats | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | HAIP-0020 | OpenID4VCI / Issuer Metadata (L192) | Such Wallets MUST support images conveyed through both data URIs and HTTPS URLs | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | HAIP-0021 | OpenID4VCI / Issuer Metadata (L194) | If the Issuer supports Credential Configurations requiring key binding the `nonce_endpoint` MUST be present in the Credential Issuer Metadata | issuer | `unverified` |  |  |
-| HAIP-0022 | OpenID4VCI / Credential Offer (L198) | The Grant Type `authorization_code` MUST be supported | issuer | `unverified` | Narrows OpenID4VCI Section 4.1.1 |  |
-| HAIP-0023 | OpenID4VCI / Credential Offer (L199) | For Grant Type `authorization_code` the Issuer MUST include a scope value so the Wallet can identify the desired Credential Type | issuer | `unverified` |  |  |
+| HAIP-0022 | OpenID4VCI / Credential Offer (L198) | The Grant Type `authorization_code` MUST be supported | issuer | `conforming` | Narrows OpenID4VCI Section 4.1.1. `AuthorizationServerMetadata.grant_types_supported` (metadata.rs) advertises `authorization_code`, and the full offer → `/authorize` → `/token` flow succeeds end to end | haip_0022_authorization_code_grant_type_is_supported_end_to_end |
+| HAIP-0023 | OpenID4VCI / Credential Offer (L199) | For Grant Type `authorization_code` the Issuer MUST include a scope value so the Wallet can identify the desired Credential Type | issuer | `gap` | foundry identifies the Credential Type via `issuer_state`, not `scope` — GAP-HAIP-01 |  |
 | HAIP-0024 | OpenID4VCI / Credential Offer (L199) | The Wallet MUST use that scope value in the `scope` Authorization parameter | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
-| HAIP-0025 | OpenID4VCI / Credential Offer (L204) | Both Issuer and Wallet MUST support the Credential Offer in same-device and cross-device flows | issuer | `unverified` |  |  |
+| HAIP-0025 | OpenID4VCI / Credential Offer (L204) | Both Issuer and Wallet MUST support the Credential Offer in same-device and cross-device flows | issuer | `conforming` | The offer is a self-contained deep link with no device-mode signal, so the identical value serves a QR-scanned cross-device flow and a directly-opened same-device flow alike | haip_0025_credential_offer_uri_format_is_transport_agnostic |
 | HAIP-0026 | OpenID4VCI / Authorization Endpoint (L208) | Wallets MUST authenticate themselves at the PAR endpoint using the same rules as for client authentication at the token endpoint | wallet | `out-of-scope` | Obligation falls on the Wallet or a third party, not on foundry's issuer/verifier surface |  |
 | HAIP-0027 | OpenID4VCI / Authorization Endpoint (L209) | The `scope` parameter MUST be used to communicate the Credential Types to be issued | issuer | `unverified` |  |  |
 | HAIP-0028 | OpenID4VCI / Authorization Endpoint (L209) | The scope value MUST map to a specific Credential Type | issuer | `unverified` |  |  |
