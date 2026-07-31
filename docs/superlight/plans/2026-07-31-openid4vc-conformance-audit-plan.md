@@ -97,10 +97,10 @@ pointing at the report — no counts, per the §8 constraint.
 
 **Verify:** `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 
-- [ ] Write scaffold
-- [ ] Add AGENTS.md §4.4 pointer
-- [ ] Verify — gates clean
-- [ ] Commit
+- [x] Write scaffold
+- [x] Add AGENTS.md §4.4 pointer
+- [x] Verify — gates clean
+- [x] Commit
 
 ---
 
@@ -662,3 +662,5 @@ to green over the completed report.
 ## Progress Log
 
 *Append one line per completed task: date, task, commit SHA.*
+
+- 2026-07-31 — Task 1 (report scaffold + AGENTS.md pointer) — `f3cd3ad`
