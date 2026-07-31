@@ -13,11 +13,13 @@ use foundry_core::config::{
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
+use foundry_core::trust::TrustStore;
+use foundry_issuer::attestation::verify_key_attestation_jwt;
 use foundry_issuer::{
     build_authorization_server_metadata, build_issuer_metadata, create_offer,
     handle_authorize_request, handle_credential_request, handle_token_request, issue_nonce,
-    AuthorizeOutcome, AuthorizeParams, CreateOfferRequest, CredentialRequest, NonceSecret,
-    ProofsRequest, TokenRequest,
+    verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest, CredentialRequest,
+    NonceSecret, ProofsRequest, TokenRequest,
 };
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
@@ -865,4 +867,665 @@ fn vci_0038_token_request_ignores_unrecognized_parameters() {
         .expect("unrecognized fields must not cause deserialization to fail");
 
     assert_eq!(req.pre_authorized_code.as_deref(), Some("abc123"));
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 fixtures: builders that vary specific header/payload fields the
+// happy-path helpers above (`generate_proof_jwt`, `signed_key_attestation` in
+// attestation.rs's own unit tests) hold fixed, to exercise the jwt-proof-type
+// and Key-Attestation-JWT structural requirements (VCI Proof Types, Key
+// Attestation JWT, Verifying Proof; HAIP Requirements for Digital Signatures).
+// ---------------------------------------------------------------------------
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn sample_attested_jwk() -> serde_json::Value {
+    let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut jwk = kp.to_jwk_public_key();
+    jwk.set_algorithm("ES256");
+    serde_json::to_value(&jwk).unwrap()
+}
+
+/// Builds a Key Attestation JWT ((#keyattestation-jwt)) with full control
+/// over header `alg`/`typ` and payload claim presence, chained to a fresh
+/// CA, to exercise the structural requirements in VCI-0184 through VCI-0189
+/// that the happy-path `signed_key_attestation` builder in attestation.rs's
+/// own unit tests does not vary. Returns (jwt, ca_cert_pem).
+fn key_attestation_jwt_custom(
+    alg: &str,
+    typ: &str,
+    iat: Option<i64>,
+    exp: Option<i64>,
+    nonce: Option<&str>,
+    attested_keys: Vec<serde_json::Value>,
+) -> (String, String) {
+    use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
+    use foundry_core::pki::{issue_leaf, new_ca};
+
+    let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let leaf_der = {
+        let cert = foundry_core::trust::parse_cert_pem(leaf.cert_pem.as_bytes()).unwrap();
+        use x509_cert::der::Encode;
+        cert.to_der().unwrap()
+    };
+    let x5c = vec![base64::engine::general_purpose::STANDARD.encode(&leaf_der)];
+
+    let header = serde_json::json!({"typ": typ, "alg": alg, "x5c": x5c});
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "iss".to_string(),
+        serde_json::json!("https://wallet-provider.example.com"),
+    );
+    if let Some(v) = iat {
+        payload.insert("iat".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = exp {
+        payload.insert("exp".to_string(), serde_json::json!(v));
+    }
+    if let Some(v) = nonce {
+        payload.insert("nonce".to_string(), serde_json::json!(v));
+    }
+    payload.insert(
+        "attested_keys".to_string(),
+        serde_json::Value::Array(attested_keys),
+    );
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 =
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::Value::Object(payload)).unwrap());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let signer = FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signer.sign(signing_input.as_bytes()).unwrap());
+    (format!("{signing_input}.{sig_b64}"), ca.cert_pem)
+}
+
+/// Builds a `jwt`-proof-type JWT with an overridable `typ` header and `aud`
+/// claim, otherwise identical to `generate_proof_jwt`'s happy path.
+fn generate_proof_jwt_with_typ(typ: &str, aud: &str, nonce: &str) -> String {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type(typ);
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(aud)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(nonce)))
+        .unwrap();
+
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Builds a `jwt`-proof-type JWT actually signed with HS256 rather than
+/// ES256, to prove the alg requirement is enforced by attempted signature
+/// verification, not merely assumed because every other fixture in this
+/// suite happens to use ES256.
+fn generate_proof_jwt_signed_with_hs256(aud: &str, nonce: &str) -> String {
+    use josekit::jws::HS256;
+
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(aud)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(nonce)))
+        .unwrap();
+
+    let signer = HS256
+        .signer_from_bytes(b"a-shared-symmetric-secret-irrelevant-to-ec-keys")
+        .unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Builds a `jwt`-proof-type JWT whose payload includes an `iss` claim,
+/// exercising VCI-0207's "MUST be the client_id ... MUST be omitted [when
+/// obtained through] anonymous access" rule.
+fn generate_proof_jwt_with_iss(aud: &str, nonce: &str, iss: &str) -> String {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("iss", Some(serde_json::json!(iss)))
+        .unwrap();
+    payload
+        .set_claim("aud", Some(serde_json::json!(aud)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(nonce)))
+        .unwrap();
+
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Builds a `jwt`-proof-type JWT whose `jwk` header carries the full private
+/// key (including `d`), exercising Verifying Proof's "the header parameter
+/// does not contain a private key" rule.
+fn generate_proof_jwt_with_private_key_in_header(aud: &str, nonce: &str) -> String {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut private_jwk = keypair.to_jwk_private_key();
+    private_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&private_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(aud)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(nonce)))
+        .unwrap();
+
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Builds a `jwt`-proof-type JWT whose header carries both `jwk` and `kid`,
+/// violating the header key-material mutual-exclusivity rule.
+fn generate_proof_jwt_with_jwk_and_kid(aud: &str, nonce: &str) -> String {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+    header
+        .set_claim("kid", Some(serde_json::json!("0")))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(aud)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(nonce)))
+        .unwrap();
+
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0184 — Key Attestation JWT (L2497): `alg` is REQUIRED and MUST NOT be
+// `none` or a symmetric algorithm.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0184_key_attestation_rejects_symmetric_alg() {
+    let secret = NonceSecret::from_bytes([11u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let (jwt_str, ca_pem) = key_attestation_jwt_custom(
+        "HS256",
+        "key-attestation+jwt",
+        Some(now),
+        Some(now + 100_000),
+        Some(&nonce),
+        vec![sample_attested_jwk()],
+    );
+    let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+    let err = verify_key_attestation_jwt(&jwt_str, &store, &secret, now).unwrap_err();
+    assert!(
+        err.to_string().contains("alg"),
+        "a symmetric (HS256) key attestation alg must be rejected, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0185 — Key Attestation JWT (L2498): `typ` is REQUIRED and MUST be
+// `key-attestation+jwt`.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0185_key_attestation_requires_correct_typ() {
+    let secret = NonceSecret::from_bytes([12u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let (jwt_str, ca_pem) = key_attestation_jwt_custom(
+        "ES256",
+        "some-other-type+jwt",
+        Some(now),
+        Some(now + 100_000),
+        Some(&nonce),
+        vec![sample_attested_jwk()],
+    );
+    let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+    let err = verify_key_attestation_jwt(&jwt_str, &store, &secret, now).unwrap_err();
+    assert!(err.to_string().contains("typ"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0186 — Key Attestation JWT (L2503): `iat` is REQUIRED.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-05: OpenID4VCI Key Attestation JWT (L2503) — iat is REQUIRED in the Key Attestation JWT payload"]
+fn vci_0186_key_attestation_without_iat_is_rejected() {
+    let secret = NonceSecret::from_bytes([13u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let (jwt_str, ca_pem) = key_attestation_jwt_custom(
+        "ES256",
+        "key-attestation+jwt",
+        None, // no iat at all
+        Some(now + 100_000),
+        Some(&nonce),
+        vec![sample_attested_jwk()],
+    );
+    let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+    let result = verify_key_attestation_jwt(&jwt_str, &store, &secret, now);
+    assert!(
+        result.is_err(),
+        "a Key Attestation JWT with no `iat` claim at all must be rejected — iat is REQUIRED"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0187 — Key Attestation JWT (L2504): `exp` MUST be present when the
+// attestation is used with the `jwt` proof type (foundry requires it
+// unconditionally, a superset of this rule).
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0187_key_attestation_without_exp_is_rejected() {
+    let secret = NonceSecret::from_bytes([14u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let (jwt_str, ca_pem) = key_attestation_jwt_custom(
+        "ES256",
+        "key-attestation+jwt",
+        Some(now),
+        None, // no exp
+        Some(&nonce),
+        vec![sample_attested_jwk()],
+    );
+    let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+    let err = verify_key_attestation_jwt(&jwt_str, &store, &secret, now).unwrap_err();
+    assert!(err.to_string().contains("exp"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0196 — Proof Types (L2610): a `jwt` proof object MUST include a `jwt`
+// parameter whose value is a *non-empty* array of JWTs.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0196_proofs_jwt_array_must_be_non_empty() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("pid".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest { jwt: vec![] }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "an empty `jwt` array in the proofs object must be rejected, not treated as no proof"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0200 / VCI-0212 / VCI-0226 / HAIP-0090 — jwt Proof Type (L2628, L2647);
+// Verifying Proof (L2779); HAIP Requirements for Digital Signatures (L355):
+// the proof `alg` MUST NOT be `none` or symmetric, and MUST match
+// `proof_signing_alg_values_supported` (`["ES256"]`).
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0200_0212_0226_haip_0090_proof_alg_must_be_es256() {
+    let secret = NonceSecret::from_bytes([15u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let jwt_str = generate_proof_jwt_signed_with_hs256("https://issuer.example.com", &nonce);
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let result = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    );
+
+    assert!(
+        result.is_err(),
+        "a proof JWT actually signed with HS256 must be rejected — only ES256 is in \
+         proof_signing_alg_values_supported"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0201 / VCI-0225 — jwt Proof Type (L2629); Verifying Proof (L2778): the
+// proof MUST be explicitly typed via `typ: openid4vci-proof+jwt`.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0201_0225_proof_requires_correct_typ_header() {
+    let secret = NonceSecret::from_bytes([16u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let jwt_str =
+        generate_proof_jwt_with_typ("some-other-type+jwt", "https://issuer.example.com", &nonce);
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let err = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("typ"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0202 / VCI-0203 / VCI-0204 — jwt Proof Type (L2630-2632): `kid`, `jwk`
+// and `x5c` header claims are mutually exclusive.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0202_0203_0204_proof_header_key_fields_are_mutually_exclusive() {
+    let secret = NonceSecret::from_bytes([17u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let jwt_str = generate_proof_jwt_with_jwk_and_kid("https://issuer.example.com", &nonce);
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let result = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    );
+
+    assert!(
+        result.is_err(),
+        "a proof JWT header carrying both `jwk` and `kid` must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0205 — jwt Proof Type (L2633): when a `c_nonce` was provided, the
+// `nonce` claim in a header key attestation MUST be set to that `c_nonce` —
+// i.e. it must match the outer proof's own (independently valid) nonce.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0205_proof_nonce_must_match_key_attestation_nonce() {
+    let secret = NonceSecret::from_bytes([18u8; 32]);
+    let now = now_secs();
+    let attestation_nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let proof_nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    assert_ne!(
+        attestation_nonce, proof_nonce,
+        "the two minted nonces must differ to exercise a genuine mismatch"
+    );
+
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut holder_pub = keypair.to_jwk_public_key();
+    holder_pub.set_algorithm("ES256");
+    let holder_pub_json = serde_json::to_value(&holder_pub).unwrap();
+
+    let (attestation_jwt, ca_pem) = key_attestation_jwt_custom(
+        "ES256",
+        "key-attestation+jwt",
+        Some(now),
+        Some(now + 100_000),
+        Some(&attestation_nonce),
+        vec![holder_pub_json],
+    );
+    let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("kid", Some(serde_json::json!("0")))
+        .unwrap();
+    header
+        .set_claim("key_attestation", Some(serde_json::json!(attestation_jwt)))
+        .unwrap();
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(proof_nonce)))
+        .unwrap();
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+    let result = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Required,
+        &store,
+    );
+
+    assert!(
+        result.is_err(),
+        "a proof whose own nonce differs from the key attestation's nonce must be rejected, \
+         even though both are independently valid minted nonces"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0207 — jwt Proof Type (L2637): `iss` MUST be omitted if the access
+// token authorizing the issuance call was obtained from a Pre-Authorized
+// Code Flow through anonymous access to the token endpoint.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-06: OpenID4VCI jwt Proof Type (L2637) — iss MUST be omitted when the access token came from anonymous pre-authorized_code access"]
+async fn vci_0207_proof_iss_must_be_omitted_after_anonymous_pre_auth_access() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    // setup_credential_flow's TokenRequest carries client_id: None, i.e. this
+    // access token was minted via anonymous pre-authorized_code access.
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt_with_iss(
+        "https://issuer.example.com",
+        &nonce,
+        "attacker-supplied-client-id",
+    );
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("pid".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "a proof JWT carrying `iss` after anonymous pre-authorized_code access must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0208 — jwt Proof Type (L2638): `aud` is REQUIRED and MUST be the
+// Credential Issuer Identifier.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0208_proof_aud_mismatch_is_rejected() {
+    let secret = NonceSecret::from_bytes([19u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let jwt_str = generate_proof_jwt_with_typ(
+        "openid4vci-proof+jwt",
+        "https://wrong-issuer.example.com",
+        &nonce,
+    );
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let err = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("aud"), "got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0199 / VCI-0209 / VCI-0224 — jwt Proof Type (L2625, L2639); Verifying
+// Proof (L2777): `iat` is REQUIRED in the jwt proof type payload.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-05: OpenID4VCI jwt Proof Type (L2639) — iat is REQUIRED in the jwt proof type payload"]
+fn vci_0199_0209_0224_proof_jwt_without_iat_is_rejected() {
+    let secret = NonceSecret::from_bytes([20u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    // generate_proof_jwt never sets `iat` at all — this is the happy-path
+    // builder every other (non-ignored) test in this suite relies on, which
+    // is itself evidence of how unenforced this requirement is.
+    let jwt_str = generate_proof_jwt(&nonce, "https://issuer.example.com");
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let result = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    );
+
+    assert!(
+        result.is_err(),
+        "a proof JWT with no `iat` claim at all must be rejected — iat is REQUIRED"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0228 — Verifying Proof (L2781): the header parameter MUST NOT contain
+// a private key. A JWK header carrying `d` (the private scalar) fails
+// verification here — josekit's `verifier_from_jwk` rejects building an
+// ES256 verifier from a JWK that includes private-key material, so this
+// turned out to already be conforming (the initial hypothesis of a gap was
+// disproved by running this test before writing the `#[ignore]`).
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0228_proof_jwk_header_must_not_contain_private_key() {
+    let secret = NonceSecret::from_bytes([21u8; 32]);
+    let now = now_secs();
+    let nonce = issue_nonce(&secret, now).unwrap().c_nonce;
+    let jwt_str =
+        generate_proof_jwt_with_private_key_in_header("https://issuer.example.com", &nonce);
+    let empty_store = TrustStore::from_pems(&[]).unwrap();
+
+    let result = verify_holder_proof(
+        &jwt_str,
+        "https://issuer.example.com",
+        &secret,
+        now,
+        Mode::Optional,
+        &empty_store,
+    );
+
+    assert!(
+        result.is_err(),
+        "a proof JWT whose `jwk` header contains the private key (a `d` component) must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plural `proofs`: every proof in the array MUST be validated, not just the
+// first — a later invalid proof must still cause rejection.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let good = generate_proof_jwt(&nonce, "https://issuer.example.com");
+    // aud mismatch — invalid, and placed *after* a valid proof.
+    let bad = generate_proof_jwt(&nonce, "https://wrong-issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("pid".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![good, bad],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "a later invalid proof must still cause rejection, even though an earlier proof in the \
+         same request was valid"
+    );
 }

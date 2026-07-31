@@ -396,11 +396,11 @@ immediately.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (37 rows: 22 conforming/5 gap/4 not-implemented/4 out-of-scope VCI split as Key Attestation JWT, Attack Potential Resistance, Proof Types, jwt/di_vp/attestation Proof Type, Verifying Proof; 2 HAIP rows — 1 conforming, 1 gap citing the existing GAP-HAIP-04)
+- [x] Red / Green / Refactor per behavior (14 new tests; one hypothesized gap — a private key in the `jwk` header — was disproved by the red step itself: josekit's `verifier_from_jwk` already rejects it, so that row was adjudicated `conforming` instead)
+- [x] Record gaps — GAP-VCI-05 (Minor: `iat` unvalidated in both the proof JWT and the Key Attestation JWT), GAP-VCI-06 (Minor: `iss` never validated for the jwt proof type)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -697,3 +697,4 @@ to green over the completed report.
 - 2026-07-31 — Task 7 (adjudicate Authorization Endpoint: 22 rows — 5 conforming, 4 gap, 10 not-implemented, 2 not-unit-testable, 1 ambiguous; GAP-HAIP-02 missing RFC9207 iss, GAP-HAIP-03 no DPoP, GAP-HAIP-04 Critical — Wallet Attestation JWT never cryptographically validated) — `470bf2f`
 - 2026-07-31 — Task 8 (adjudicate Token/Nonce Endpoint: 13 rows — 10 conforming, 3 not-implemented; no new gaps) — `d6452c5`
 - 2026-07-31 — Task 9 (adjudicate Credential Endpoint incl. Deferred/Encrypted/Notification/Key Attestation: 60 rows — 15 conforming, 3 gap, 38 not-implemented, 3 not-unit-testable, 1 ambiguous; GAP-VCI-02/03/04) — `8156a96`
+- 2026-07-31 — Task 10 (adjudicate Proof Types, Key and Wallet Attestation: 37 rows — 23 conforming (22 VCI + HAIP-0090), 6 gap (5 VCI citing GAP-VCI-05/06 + HAIP-0088 citing the existing GAP-HAIP-04), 4 not-implemented, 4 out-of-scope; new gaps GAP-VCI-05 (iat unvalidated in proof JWT and Key Attestation JWT) and GAP-VCI-06 (iss never validated); no Critical found — aud, nonce/replay, and plural-proofs validation are all conforming)
