@@ -733,6 +733,49 @@ mod tests {
         );
     }
 
+    /// GAP-HAIP-05 -- HAIP OpenID4VP (L256): for signed requests the
+    /// Verifier MUST use the Client Identifier Prefix `x509_hash` (the
+    /// leaf certificate's hash), not `x509_san_dns`. `build_signed_request_object`
+    /// always emits `client_id: "x509_san_dns:<host>"` regardless of whether
+    /// the request is signed (the `request_uri` transport, HAIP-0055, always
+    /// produces a signed JAR Request Object) -- `x509_hash` is not implemented
+    /// anywhere in this workspace (same evidence as VP-0068/VP-0069, Task 12).
+    #[tokio::test]
+    #[ignore = "GAP-HAIP-05: HAIP OpenID4VP (L256) -- for signed requests the Verifier MUST use the Client Identifier Prefix x509_hash, but build_signed_request_object always emits x509_san_dns and x509_hash is not implemented anywhere in this workspace"]
+    async fn gap_haip_05_signed_request_object_never_uses_x509_hash_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let jws_str = build_signed_request_object(&config, &tx).unwrap();
+        let payload_bytes = B64URL.decode(jws_str.split('.').nth(1).unwrap()).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+        let client_id = payload["client_id"].as_str().unwrap();
+        assert!(
+            client_id.starts_with("x509_hash:"),
+            "HAIP-0043 requires the x509_hash Client Identifier Prefix for signed \
+             requests, got: {client_id}"
+        );
+    }
+
     /// VP-0128, VP-0130, VP-0132 (OpenID4VP 1.0 Response / Response Mode
     /// `direct_post`, L1222): `response_uri` is REQUIRED when Response Mode
     /// `direct_post` is used; `redirect_uri` MUST NOT be present alongside it;

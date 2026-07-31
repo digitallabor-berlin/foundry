@@ -16,10 +16,10 @@ use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::TrustStore;
 use foundry_issuer::attestation::verify_key_attestation_jwt;
 use foundry_issuer::{
-    build_authorization_server_metadata, build_issuer_metadata, create_offer,
-    handle_authorize_request, handle_credential_request, handle_token_request, issue_nonce,
-    verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest, CredentialRequest,
-    NonceSecret, ProofsRequest, TokenRequest,
+    allocate_status_index, build_authorization_server_metadata, build_issuer_metadata,
+    create_offer, handle_authorize_request, handle_credential_request, handle_token_request,
+    issue_nonce, verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest,
+    CredentialRequest, NonceSecret, ProofsRequest, TokenRequest,
 };
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
@@ -1803,5 +1803,43 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
     assert!(
         value.get("batch_credential_issuance").is_none(),
         "batch_credential_issuance has no corresponding struct field and can never be present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HAIP-0081 -- HAIP SD-JWT VC Profile (L329): Each Credential MUST have its
+// own unique, unpredictable status list index even when multiple Credentials
+// reference the same status list URI.
+// ---------------------------------------------------------------------------
+
+/// GAP-HAIP-06: `credential.rs` always embeds the same literal status list
+/// URI `".../1"` for every credential regardless of `credential_type_id`
+/// (see `create_offer.rs`'s own comment: "The embedded status URI is always
+/// '.../1' ... regardless of credential_type_id") -- so every credential of
+/// every type shares one physical status list. But `allocate_status_index`
+/// deduplicates its CSPRNG draw against the storage key
+/// `"{credential_type_id}:{idx}"`, which is scoped *per credential type*,
+/// not against the shared physical list. Two credentials of different
+/// types can therefore be assigned the *same* index in the *same* physical
+/// status list -- revoking one silently revokes the other.
+/// `status_index.rs`'s own `different_credential_types_do_not_collide` test
+/// already demonstrates the mechanism (both `pid` and `mdl` independently
+/// draw index 0 with `list_size=1`) but frames it as correct by reasoning
+/// about the storage key, not the physical bit position the index maps to
+/// in the one shared list every credential actually uses.
+#[tokio::test]
+#[ignore = "GAP-HAIP-06: HAIP SD-JWT VC Profile (L329) -- allocate_status_index deduplicates per credential_type_id, but every credential type shares the same physical status list URI ('.../1'), so two different credential types can be allocated the same index in the same physical list"]
+async fn gap_haip_06_status_index_can_collide_across_credential_types_sharing_one_list() {
+    let storage = test_storage().await;
+    // Both draws target list_size=1, forcing a deterministic collision if
+    // (as in production) "pid" and "mdl" both ultimately point at the same
+    // physical status list URI (".../1").
+    let pid_idx = allocate_status_index(&storage, "pid", 1).await.unwrap();
+    let mdl_idx = allocate_status_index(&storage, "mdl", 1).await.unwrap();
+    assert_ne!(
+        pid_idx, mdl_idx,
+        "two credentials of different types that both embed the shared status \
+         list URI '.../1' must never be allocated the same index in that \
+         physical list, but both drew {pid_idx}"
     );
 }
