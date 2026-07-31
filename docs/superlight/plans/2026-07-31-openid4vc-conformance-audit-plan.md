@@ -695,3 +695,4 @@ to green over the completed report.
 - 2026-07-31 — Task 5 (extract HAIP: 96 clauses, 77 in scope; extraction phase complete, 592 clauses total, 419 awaiting adjudication) — `8fb33d0`
 - 2026-07-31 — Task 6 (adjudicate Credential Offer: 14 rows — 7 conforming, 5 not-implemented, 2 gap; GAP-VCI-01 pre-authorized_code reuse, GAP-HAIP-01 missing scope value) — `b0243dd`
 - 2026-07-31 — Task 7 (adjudicate Authorization Endpoint: 22 rows — 5 conforming, 4 gap, 10 not-implemented, 2 not-unit-testable, 1 ambiguous; GAP-HAIP-02 missing RFC9207 iss, GAP-HAIP-03 no DPoP, GAP-HAIP-04 Critical — Wallet Attestation JWT never cryptographically validated) — `470bf2f`
+- 2026-07-31 — Task 8 (adjudicate Token/Nonce Endpoint: 13 rows — 10 conforming, 3 not-implemented; no new gaps) — `d6452c5`
