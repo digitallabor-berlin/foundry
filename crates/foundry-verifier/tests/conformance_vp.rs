@@ -17,8 +17,8 @@ use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
 use foundry_core::storage::SqliteStorage;
 use foundry_verifier::{
-    build_signed_request_object, create_verification_request, load_verification_transaction,
-    CreateVerificationRequest,
+    build_signed_request_object, check_dcql_match, create_verification_request,
+    load_verification_transaction, CreateVerificationRequest, PresentedFormat,
 };
 use std::collections::BTreeMap;
 
@@ -387,5 +387,118 @@ async fn vp_0063_client_id_host_not_validated_against_x5c_certificate_san() {
         result.is_err(),
         "signing a request object whose x509_san_dns client_id host does not match any \
          dNSName SAN entry in the configured x5c leaf certificate must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 13 — DCQL and Claims Path Pointer (OpenID4VP 1.0 §6, §7).
+// Code under audit: `crates/foundry-verifier/src/dcql.rs` and
+// `crates/foundry-verifier/src/dcql_model.rs`, exercised through the public
+// `check_dcql_match` entry point (`dcql_model` itself is a private module).
+// ---------------------------------------------------------------------------
+
+// VP-0091, VP-0105, VP-0109 — DCQL / Credential Query (L739): entries in
+// `credentials` MUST be objects with the defined properties. DCQL / Claims
+// Query (L900): entries in `claims` MUST be objects with the defined
+// properties. DCQL / Claims Query (L910): `path` is REQUIRED. All three are
+// enforced at deserialization (`DcqlCredentialQuery`/`DcqlClaimsQuery` have no
+// permissive fallback), and `check_dcql_match` fails closed -- it never
+// panics on a malformed query, it reports a failed `dcql_match` check.
+#[test]
+fn vp_0091_0105_0109_malformed_dcql_shapes_fail_closed() {
+    let claims = serde_json::json!({"vct": "x", "given_name": "Alice"});
+
+    // VP-0091: a `credentials` entry that is not an object.
+    let q = serde_json::json!({"credentials": ["not-an-object"]});
+    let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
+    assert!(!r.passed, "non-object credentials entry must be rejected");
+
+    // VP-0105: a `claims` entry that is not an object.
+    let q = serde_json::json!({"credentials": [{
+        "id": "pid", "format": "dc+sd-jwt", "meta": {},
+        "claims": ["not-an-object"]
+    }]});
+    let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
+    assert!(!r.passed, "non-object claims entry must be rejected");
+
+    // VP-0109: `path` missing entirely (not just present-and-empty) from a
+    // Claims Query.
+    let q = serde_json::json!({"credentials": [{
+        "id": "pid", "format": "dc+sd-jwt", "meta": {},
+        "claims": [{"values": ["x"]}]
+    }]});
+    let r = check_dcql_match(&q, "pid", PresentedFormat::SdJwtVc, &claims, None);
+    assert!(!r.passed, "a Claims Query missing `path` must be rejected");
+}
+
+// VP-0110 — DCQL / Claims Query (L920): value matching against an ISO mdoc
+// Credential requires the CBOR value to first be converted to JSON per
+// RFC8949 §6.1. That conversion itself happens in
+// `foundry_mdoc::verifier::cbor_value_to_json`, upstream of `check_dcql_match`
+// (see `verify.rs`, which builds `disclosed_claims` from
+// `foundry_mdoc::verifier::verify_mdoc`'s already-JSON-converted output before
+// ever calling `check_dcql_match`). This test exercises the boundary
+// `check_dcql_match` itself owns: that a `values` constraint correctly
+// matches (and rejects a mismatch of) the JSON types that conversion
+// produces for an mdoc claim.
+#[test]
+fn vp_0110_mdoc_value_matching_matches_converted_json_types() {
+    let q = serde_json::json!({"credentials":[{"id":"mdl","format":"mso_mdoc",
+        "meta":{"doctype_value":"org.iso.18013.5.1.mDL"},
+        "claims":[{"path":["org.iso.18013.5.1","age_over_18"],"values":[true]}]}]});
+
+    let claims = serde_json::json!({"org.iso.18013.5.1":{"age_over_18": true}});
+    let r = check_dcql_match(
+        &q,
+        "mdl",
+        PresentedFormat::MsoMdoc,
+        &claims,
+        Some("org.iso.18013.5.1.mDL"),
+    );
+    assert!(r.passed, "detail={:?}", r.detail);
+
+    let claims_mismatch = serde_json::json!({"org.iso.18013.5.1":{"age_over_18": false}});
+    let r2 = check_dcql_match(
+        &q,
+        "mdl",
+        PresentedFormat::MsoMdoc,
+        &claims_mismatch,
+        Some("org.iso.18013.5.1.mDL"),
+    );
+    assert!(
+        !r2.passed,
+        "a values mismatch must not be credited as a match"
+    );
+}
+
+// GAP-VP-03 — DCQL / Credential Query (L743, L745, L756); DCQL / Claims Query
+// (L780): a Credential Query `id` MUST be a non-empty string of alphanumeric,
+// underscore or hyphen characters (VP-0093) and MUST NOT repeat within one
+// Authorization Request (VP-0094); `meta` is REQUIRED, even if empty
+// (VP-0096); and Verifiers MUST NOT point to the same claim more than once in
+// a single query's `claims` array (VP-0097). None of these four constraints
+// is validated by `DcqlCredentialQuery`/`DcqlClaimsQuery` deserialization --
+// `id` is an unconstrained `String`, `meta` is `Option<Value>` with
+// `#[serde(default)]` (so it may be entirely absent, not merely empty), and
+// neither `credentials` nor `claims` checks its entries for duplicates. This
+// query violates all four simultaneously and parses and evaluates as if it
+// were a well-formed request.
+#[test]
+#[ignore = "GAP-VP-03: OpenID4VP DCQL / Credential Query (L743, L745, L756); DCQL / Claims Query (L780) — id character-class and uniqueness, meta required-presence, and claims duplicate-path uniqueness are never validated"]
+fn vp_0093_0094_0096_0097_dcql_structural_constraints_not_validated() {
+    let q = serde_json::json!({"credentials": [
+        {"id": "dup!", "format": "dc+sd-jwt",
+         "claims": [{"path": ["given_name"]}, {"path": ["given_name"]}]},
+        {"id": "dup!", "format": "mso_mdoc", "meta": {}}
+    ]});
+    let claims = serde_json::json!({"given_name": "Alice"});
+    let r = check_dcql_match(&q, "dup!", PresentedFormat::SdJwtVc, &claims, None);
+    assert!(
+        !r.passed,
+        "expected the malformed query (duplicate/invalid-charset ids, a \
+         credential query missing `meta` entirely, and a claims array \
+         repeating the same path) to be rejected before matching; instead \
+         it evaluated successfully: detail={:?}",
+        r.detail
     );
 }
