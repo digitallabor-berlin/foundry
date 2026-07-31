@@ -9,15 +9,20 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, Mode,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry, Mode,
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use foundry_issuer::{
     build_authorization_server_metadata, build_issuer_metadata, create_offer,
-    handle_authorize_request, handle_token_request, AuthorizeOutcome, AuthorizeParams,
-    CreateOfferRequest, TokenRequest,
+    handle_authorize_request, handle_credential_request, handle_token_request, issue_nonce,
+    AuthorizeOutcome, AuthorizeParams, CreateOfferRequest, CredentialRequest, NonceSecret,
+    ProofsRequest, TokenRequest,
 };
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use josekit::jwk::KeyPair as _;
+use josekit::jws::{JwsHeader, ES256};
+use josekit::jwt::{self, JwtPayload};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -378,6 +383,227 @@ async fn haip_0023_credential_configuration_metadata_carries_a_scope_value() {
     assert!(
         json.as_object().unwrap().contains_key("scope"),
         "HAIP requires a scope value the Wallet can use to identify the Credential Type"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Task 9 fixtures: a signing-key-backed Config and a proof-JWT generator,
+// needed to reach handle_credential_request's happy path (Tasks 6-8's
+// fixtures never configure key material).
+// ---------------------------------------------------------------------------
+fn credential_test_config(key_path: &str) -> Config {
+    let mut cfg = test_config();
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        "issuer_key".to_string(),
+        KeyEntry {
+            private_key: key_path.to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    cfg.keys = keys;
+    cfg.issuer.status_list.signing_key = Some("issuer_key".to_string());
+    cfg.credential_types.push(CredentialType {
+        id: "mdl".to_string(),
+        format: "mso_mdoc".to_string(),
+        vct: None,
+        doctype: Some("org.iso.18013.5.1.mDL".to_string()),
+        cryptographic_holder_binding: true,
+        display: vec![],
+        claims: vec![ClaimDef {
+            path: vec!["given_name".to_string()],
+            selectively_disclosable: true,
+            display: vec![],
+        }],
+    });
+    cfg
+}
+
+fn generate_proof_jwt(c_nonce: &str, issuer: &str) -> String {
+    let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let mut public_jwk = keypair.to_jwk_public_key();
+    public_jwk.set_algorithm("ES256");
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("openid4vci-proof+jwt");
+    header
+        .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+        .unwrap();
+
+    let mut payload = JwtPayload::new();
+    payload
+        .set_claim("aud", Some(serde_json::json!(issuer)))
+        .unwrap();
+    payload
+        .set_claim("nonce", Some(serde_json::json!(c_nonce)))
+        .unwrap();
+
+    let private_jwk = keypair.to_jwk_private_key();
+    let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Runs a full offer -> token exchange for `credential_type_id` against a
+/// signing-key-backed config, returning everything a Credential Request needs.
+async fn setup_credential_flow(
+    key_path: &str,
+    credential_type_id: &str,
+) -> (Config, SqliteStorage, String, NonceSecret) {
+    let cfg = credential_test_config(key_path);
+    let storage = test_storage().await;
+    let req = CreateOfferRequest {
+        credential_type_id: credential_type_id.to_string(),
+        claims: claims_with("given_name", "Alice"),
+        tx_code_required: false,
+        redirect_uri: None,
+    };
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
+        .await
+        .unwrap();
+
+    let secret = NonceSecret::from_bytes([7u8; 32]);
+    (cfg, storage, token.access_token, secret)
+}
+
+fn write_test_issuer_key() -> (tempfile::TempDir, String) {
+    let key_dir = tempfile::tempdir().unwrap();
+    let key_path = key_dir.path().join("issuer.pem");
+    let km = foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+        .unwrap();
+    std::fs::write(&key_path, km.private_pem).unwrap();
+    let path_str = key_path.to_str().unwrap().to_string();
+    (key_dir, path_str)
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0058 — OpenID4VCI Credential Request (L864): `proofs` MUST be present
+// when `proof_types_supported` is present for the requested Credential.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0058_proofs_are_required_when_proof_types_supported() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("pid".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: None,
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "a Credential Request with no proofs must be rejected when proof_types_supported is present"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0059 — OpenID4VCI Credential Request (L869): the Credential Issuer
+// MUST ignore unrecognized Credential Request parameters.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0059_credential_request_ignores_unrecognized_parameters() {
+    let json = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": ["abc.def.ghi"] },
+        "some_unrecognized_field": "whatever",
+    });
+
+    let req: CredentialRequest = serde_json::from_value(json)
+        .expect("unrecognized fields must not cause deserialization to fail");
+
+    assert_eq!(req.credential_configuration_id.as_deref(), Some("pid"));
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0052 — OpenID4VCI Credential Request (L851): `credential_configuration_id`
+// is REQUIRED when `credential_identifiers` was not returned (i.e. always, per
+// Task 8's finding that `authorization_details`/`credential_identifiers` are
+// not implemented) and MUST identify the Credential this Access Token binds to.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-02: OpenID4VCI Credential Request (L851) — credential_configuration_id MUST identify the Credential the Access Token was issued for"]
+async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    // The access token was issued for "pid"; requesting an unrelated
+    // configuration id must be rejected, not silently served as "pid".
+    let req = CredentialRequest {
+        credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        result.is_err(),
+        "a credential_configuration_id mismatched with the Access Token's bound Credential Type must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0071 — OpenID4VCI Credential Response (L976): Credential Formats
+// expressed as binary data MUST be base64url-encoded and returned as a string.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-03: OpenID4VCI Credential Response (L976) — binary Credential Formats MUST be base64url-encoded"]
+async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "mdl").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("mdl".to_string()),
+        format: Some("mso_mdoc".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+
+    let res =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await
+            .expect("mdoc issuance must succeed");
+    let credential = &res.credentials[0].credential;
+
+    assert!(
+        !credential.contains('+') && !credential.contains('/') && !credential.contains('='),
+        "the mdoc credential string must be base64url-encoded (no +, /, or = padding), got: {credential}"
     );
 }
 
