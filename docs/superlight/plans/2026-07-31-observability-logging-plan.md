@@ -246,11 +246,33 @@ the file twice. `logging::init` calls `obs::set_sensitive` and emits the
 
 **Verify:** `cargo test -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
+
+**Outcome:** 14 tests; 442 workspace tests pass, clippy and fmt clean.
+Verified end-to-end against the built binary, not just by unit test:
+`RUST_LOG=error` now suppresses the `info` line and beats an explicit
+`--log-level trace`.
+
+Three deviations from the plan, all deliberate:
+- `config_path()` returns `Some` for `status-list token` as well. The plan
+  listed it under `None`, but that subcommand does take `--config`; excluding it
+  would have been an inconsistency, not a simplification.
+- Added `build_filter(level) -> (EnvFilter, bool)` so the fallback is observable
+  and testable, rather than testing `init` (which installs a global subscriber
+  and panics on a second call, so it cannot be unit-tested at all).
+- `resolve_sensitive` is documented as **one-way**: a bare boolean flag cannot
+  express "explicitly off", so `--log-sensitive` turns payloads on and its
+  absence defers to the config.
+
+One limitation found while verifying, now documented in code and to be repeated
+in the README (Task 12): `EnvFilter` accepts a *misspelled* level as a target
+name, so `--log-level infoo` builds a valid filter matching nothing and the
+process logs silence with no warning. `build_filter` catches syntax errors only.
+A test pins this so nobody reads the fallback and assumes typos are covered.
 
 ---
 
@@ -662,3 +684,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-07-31 — Phase 3 plan committed — 842c37d
 - 2026-07-31 — Task 1 (foundry_core::obs) — 718b2e6
 - 2026-07-31 — Task 2 (LoggingConfig) — 66673d6
+- 2026-07-31 — Task 3 (CLI/precedence/startup order) — 88d30b4
