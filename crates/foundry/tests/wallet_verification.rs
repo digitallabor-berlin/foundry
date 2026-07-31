@@ -6,8 +6,8 @@ use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, Mode, ServerConfig,
-    StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
+    ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::crypto::jwe::encrypt_compact;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
@@ -170,6 +170,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));

@@ -2,8 +2,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use foundry::server::{wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, Mode,
-    ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
+    Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use std::collections::BTreeMap;
@@ -70,6 +70,7 @@ fn test_config() -> Config {
             named_queries: Vec::new(),
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     }
 }
 

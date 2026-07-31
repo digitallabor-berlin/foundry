@@ -14,8 +14,8 @@ use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, Mode,
-    ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
+    Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use sha2::{Digest, Sha256};
@@ -98,6 +98,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));

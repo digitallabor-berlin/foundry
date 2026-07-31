@@ -181,8 +181,8 @@ mod tests {
     use super::*;
     use crate::transaction::load_transaction;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, Mode, ServerConfig,
-        StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, LoggingConfig, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
     };
     use foundry_core::storage::SqliteStorage;
     use std::collections::BTreeMap as StdBTreeMap;
@@ -254,6 +254,7 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 

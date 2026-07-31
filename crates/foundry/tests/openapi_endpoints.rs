@@ -3,8 +3,8 @@ use axum::http::{Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
-    StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
+    StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use std::collections::BTreeMap;
@@ -59,6 +59,7 @@ fn test_config(swagger_ui_enabled: bool) -> Config {
             named_queries: Vec::new(),
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     }
 }
 

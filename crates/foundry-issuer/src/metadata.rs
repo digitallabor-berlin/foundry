@@ -140,8 +140,8 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
 mod tests {
     use super::*;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, Mode, ServerConfig,
-        StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, LoggingConfig, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
     };
     use std::collections::BTreeMap as StdBTreeMap;
 
@@ -205,6 +205,7 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 

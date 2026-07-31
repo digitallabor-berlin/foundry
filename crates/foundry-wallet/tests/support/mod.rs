@@ -8,8 +8,9 @@
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry, Mode,
-    ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry,
+    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
+    VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::pki::{issue_leaf, new_ca};
 use foundry_core::storage::SqliteStorage;
@@ -157,6 +158,7 @@ pub async fn spawn_test_server() -> TestServer {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));

@@ -370,8 +370,8 @@ mod tests {
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
-        StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
+        StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
     };
     use foundry_core::crypto::jwe::encrypt_compact;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
@@ -473,6 +473,7 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         };
         (config, dir)
     }

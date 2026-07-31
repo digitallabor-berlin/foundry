@@ -26,8 +26,8 @@ use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, Mode,
-    ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
+    Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use josekit::jwk::alg::ec::EcKeyPair;
@@ -135,6 +135,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));
@@ -614,6 +615,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));
@@ -754,6 +756,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     };
 
     let state = AppState::new(Arc::new(storage), Arc::new(config));

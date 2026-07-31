@@ -81,6 +81,7 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     }
 }
 

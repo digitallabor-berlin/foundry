@@ -9,8 +9,9 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry, Mode,
-    ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry,
+    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+    WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::TrustStore;
@@ -88,6 +89,7 @@ fn test_config() -> Config {
             named_queries: vec![],
             webhook: None,
         },
+        logging: LoggingConfig::default(),
     }
 }
 

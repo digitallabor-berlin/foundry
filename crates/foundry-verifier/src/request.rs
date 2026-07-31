@@ -496,6 +496,7 @@ mod tests {
                 })],
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 

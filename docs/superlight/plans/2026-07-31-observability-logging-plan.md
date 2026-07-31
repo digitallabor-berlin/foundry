@@ -652,4 +652,5 @@ not something a test can assert.
 Append one line per completed task: date, task, commit SHA.
 
 - 2026-07-31 — Phase 2 spec committed — cff20ec
-- 2026-07-31 — Phase 3 plan committed — 842c37d- 2026-07-31 — Task 1 (foundry_core::obs) — 718b2e6
+- 2026-07-31 — Phase 3 plan committed — 842c37d
+- 2026-07-31 — Task 1 (foundry_core::obs) — 718b2e6

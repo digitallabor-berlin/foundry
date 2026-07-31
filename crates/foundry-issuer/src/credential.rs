@@ -221,8 +221,9 @@ mod tests {
         load_transaction, save_transaction_with_indices, IssuanceTransaction,
     };
     use foundry_core::config::{
-        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, KeyEntry, Mode,
-        ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, KeyEntry,
+        LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+        WalletFacingConfig,
     };
     use foundry_core::crypto::SignatureAlgorithm;
     use foundry_core::storage::SqliteStorage;
@@ -309,6 +310,7 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 

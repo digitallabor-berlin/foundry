@@ -158,8 +158,8 @@ fn validate_trust_anchor_list(
 #[cfg(test)]
 mod tests {
     use crate::config::model::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, Mode, ServerConfig, StatusListConfig,
-        StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
+        StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
     };
     use std::collections::BTreeMap;
 
@@ -211,6 +211,7 @@ mod tests {
                 named_queries: Vec::new(),
                 webhook: None,
             },
+            logging: LoggingConfig::default(),
         }
     }
 
