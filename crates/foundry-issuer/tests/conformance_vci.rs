@@ -1529,3 +1529,279 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
          same request was valid"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 11 fixtures and tests: Issuer and Authorization Server Metadata
+// (VCI §12, HAIP §3.1 Issuer Metadata). Code under audit:
+// `crates/foundry-issuer/src/metadata.rs`.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// VCI-0118 — Credential Issuer Metadata (L1325): the Credential Issuer MUST
+// support returning metadata in an unsigned form as `application/json`.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0118_metadata_round_trips_as_plain_json() {
+    let cfg = test_config();
+    let meta = build_issuer_metadata(&cfg);
+
+    // metadata.rs never signs or wraps the document; it is a plain `Serialize`
+    // struct that always round-trips as ordinary JSON, which is exactly what
+    // `issuer_metadata` (crates/foundry/src/server.rs) returns via `Json<..>`.
+    let value = serde_json::to_value(&meta).expect("metadata must serialize as plain JSON");
+    assert!(value.is_object());
+    assert_eq!(
+        value["credential_issuer"],
+        serde_json::json!("https://issuer.example.com")
+    );
+
+    // VCI-0141: issuer-level `display` is hardcoded to `Vec::new()` in
+    // `build_issuer_metadata` (metadata.rs) and thus always omitted — zero
+    // objects trivially satisfies "at most one object per language
+    // identifier".
+    assert!(value.get("display").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0129 — Credential Issuer Metadata (L1367): `authorization_servers`,
+// when present, MUST be a non-empty array of Authorization Server
+// identifiers. foundry never populates this field (it always acts as its
+// own implicit Authorization Server — the same single-AS topology already
+// established for VCI-0011/0016), so the field is always omitted rather than
+// present-and-empty, and the conditional MUST is vacuously satisfied.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0129_authorization_servers_omitted_when_empty() {
+    let cfg = test_config();
+    let meta = build_issuer_metadata(&cfg);
+    let value = serde_json::to_value(&meta).unwrap();
+
+    assert!(
+        value.get("authorization_servers").is_none(),
+        "authorization_servers must be omitted entirely, not serialized as an empty array, \
+         since it is never populated with a non-empty set of identifiers"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0155 — Credential Issuer Metadata (L1420): the Authorization Server
+// MUST be able to determine from Issuer metadata which claims the requested
+// Credentials disclose.
+// ---------------------------------------------------------------------------
+#[test]
+fn vci_0155_credential_configuration_claims_reveal_disclosed_paths() {
+    let cfg = test_config();
+    let meta = build_issuer_metadata(&cfg);
+    let pid = meta.credential_configurations_supported.get("pid").unwrap();
+
+    assert_eq!(pid.claims.len(), 1);
+    assert_eq!(pid.claims[0]["path"], serde_json::json!(["given_name"]));
+    assert_eq!(
+        pid.claims[0]["selectively_disclosable"],
+        serde_json::json!(true)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0130 / VCI-0131 — Credential Issuer Metadata (L1368, L1369):
+// `credential_endpoint` is REQUIRED and MUST use the `https` scheme;
+// `nonce_endpoint`, when present, MUST use the `https` scheme. Both are
+// derived unconditionally from `issuer.credential_issuer` (`build_issuer_metadata`,
+// metadata.rs), but `Config::validate()` (foundry-core/src/config/validate.rs)
+// never inspects its scheme — an operator-supplied `http://` (or any
+// non-`https`) `credential_issuer` passes validation and is silently baked
+// into both derived endpoint URLs.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-08: OpenID4VCI Credential Issuer Metadata (L1368, L1369) — credential_endpoint and nonce_endpoint MUST use the https scheme, but Config::validate() never checks the scheme of issuer.credential_issuer"]
+fn vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls() {
+    let mut cfg = test_config();
+    // Satisfy the *only* other check `Config::validate()` performs (that
+    // `verifier.signing_key` resolves in `keys`) so that a failure here can
+    // only be attributed to the https-scheme hypothesis under test.
+    cfg.keys.insert(
+        "verifier_signing".to_string(),
+        KeyEntry {
+            private_key: "unused.pem".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    cfg.issuer.credential_issuer = "http://issuer.example.com".to_string();
+    cfg.server.wallet_facing.public_base_url = "http://issuer.example.com".to_string();
+
+    let result = cfg.validate();
+
+    assert!(
+        result.is_err(),
+        "a non-https credential_issuer must be rejected by config validation, since both \
+         credential_endpoint and nonce_endpoint are derived from it and MUST use https"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0128 — Credential Issuer Metadata (L1366): `credential_issuer` is
+// REQUIRED and MUST be identical to the identifier used to build the
+// well-known URL. foundry has two independently configurable values —
+// `server.wallet_facing.public_base_url` (what the wallet-facing router is
+// actually served under) and `issuer.credential_issuer` (what
+// `build_issuer_metadata` puts in the `credential_issuer` field) — and
+// `Config::validate()` never checks that they match.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-09: OpenID4VCI Credential Issuer Metadata (L1366) — credential_issuer MUST be identical to the identifier used to build the well-known URL, but Config::validate() never checks server.wallet_facing.public_base_url against issuer.credential_issuer"]
+fn vci_0128_config_validation_does_not_enforce_credential_issuer_identity_match() {
+    let mut cfg = test_config();
+    // Satisfy the *only* other check `Config::validate()` performs (that
+    // `verifier.signing_key` resolves in `keys`) so that a failure here can
+    // only be attributed to the identity-mismatch hypothesis under test.
+    cfg.keys.insert(
+        "verifier_signing".to_string(),
+        KeyEntry {
+            private_key: "unused.pem".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    cfg.server.wallet_facing.public_base_url = "https://different-host.example.com".to_string();
+    // cfg.issuer.credential_issuer is left at "https://issuer.example.com" —
+    // the two values now diverge.
+
+    let result = cfg.validate();
+
+    assert!(
+        result.is_err(),
+        "a credential_issuer that diverges from the wallet-facing router's own public_base_url \
+         must be rejected by config validation, since the served metadata's credential_issuer \
+         field would not match the identifier used to reach it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0146 / VCI-0147 — Credential Issuer Metadata (L1394, L1395):
+// `cryptographic_binding_methods_supported` MUST be present when
+// Cryptographic Key Binding is required and omitted otherwise;
+// `proof_types_supported` MUST be present if
+// `cryptographic_binding_methods_supported` is present, and omitted
+// otherwise. `build_issuer_metadata` (metadata.rs) always serializes both
+// fields regardless of `ct.cryptographic_holder_binding` — neither field
+// carries a `skip_serializing_if` annotation, and `proof_types_supported`
+// is unconditionally populated with a `jwt` entry.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-07: OpenID4VCI Credential Issuer Metadata (L1394, L1395) — cryptographic_binding_methods_supported and proof_types_supported MUST be omitted when Cryptographic Key Binding is not required, but build_issuer_metadata always serializes both"]
+fn vci_0146_0147_metadata_omits_binding_and_proof_fields_when_key_binding_not_required() {
+    let mut cfg = test_config();
+    cfg.credential_types[0].cryptographic_holder_binding = false;
+
+    let meta = build_issuer_metadata(&cfg);
+    let value = serde_json::to_value(&meta).unwrap();
+    let pid = &value["credential_configurations_supported"]["pid"];
+
+    assert!(
+        pid.get("cryptographic_binding_methods_supported").is_none(),
+        "cryptographic_binding_methods_supported must be omitted when key binding is not \
+         required, not serialized as an empty array"
+    );
+    assert!(
+        pid.get("proof_types_supported").is_none(),
+        "proof_types_supported must be omitted when cryptographic_binding_methods_supported is \
+         absent, since key binding is not required for this credential configuration"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0150 / VCI-0151 / VCI-0152 / VCI-0153 / VCI-0154 — Credential Issuer
+// Metadata (L1402-1410): credential `display` objects are subject to several
+// structural MUSTs — `name` is REQUIRED, at most one `display` object per
+// language identifier, logo `uri` is REQUIRED, `background_image` MUST carry
+// a `uri`. `ct.display` (config.rs) is untyped `Vec<serde_json::Value>`
+// passed straight through by `build_issuer_metadata` into
+// `CredentialConfigurationSupported.display`, and `Config::validate()`
+// performs no structural check on it at all.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-10: OpenID4VCI Credential Issuer Metadata (L1402-1410) — credential display objects MUST carry a required name, at most one object per locale, and required logo/background_image uri fields, but Config::validate() never structurally validates the display array"]
+fn vci_0150_0151_0152_0153_0154_credential_display_objects_are_not_structurally_validated() {
+    let mut cfg = test_config();
+    // Satisfy the *only* other check `Config::validate()` performs (that
+    // `verifier.signing_key` resolves in `keys`) so that a failure here can
+    // only be attributed to the display-shape hypothesis under test.
+    cfg.keys.insert(
+        "verifier_signing".to_string(),
+        KeyEntry {
+            private_key: "unused.pem".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    // Two objects that violate every one of the clauses above: duplicate
+    // locale, no `name`, a logo with no `uri`, and a background_image with
+    // no `uri`.
+    cfg.credential_types[0].display = vec![
+        serde_json::json!({"locale": "en-US", "logo": {}, "background_image": {}}),
+        serde_json::json!({"locale": "en-US"}),
+    ];
+
+    let result = cfg.validate();
+
+    assert!(
+        result.is_err(),
+        "malformed credential display objects (duplicate locale, missing name, logo without \
+         uri, background_image without uri) must be rejected by config validation"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HAIP-0011 — OpenID4VCI (L177): the Issuer MUST indicate whether batch
+// issuance is supported by including or omitting `batch_credential_issuance`.
+// foundry always omits the field (the struct has no such member at all —
+// see VCI-0140, `not-implemented`), which is itself a fully valid indication
+// under the letter of this clause. As positive evidence that this omission
+// is at least a coherent design choice and not an oversight that silently
+// breaks multi-proof requests, this test confirms `handle_credential_request`
+// (credential.rs) actually accepts more than one proof and issues one
+// Credential per proof for the same Credential Dataset in a single
+// request/response — i.e. batch issuance functionally works even though it
+// is never advertised via `batch_credential_issuance`.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let first = generate_proof_jwt(&nonce, "https://issuer.example.com");
+    let second = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("pid".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![first, second],
+        }),
+    };
+
+    let res =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await
+            .expect(
+                "two independently valid proofs for the same Credential Dataset must be accepted",
+            );
+
+    assert_eq!(
+        res.credentials.len(),
+        2,
+        "one Credential must be issued per proof in the plural `proofs` array"
+    );
+
+    // And yet the metadata for this very configuration never advertises
+    // batch support at all (VCI-0140, not-implemented) — the field does not
+    // exist as a struct member, so it can never be serialized.
+    let meta = build_issuer_metadata(&cfg);
+    let value = serde_json::to_value(&meta).unwrap();
+    assert!(
+        value.get("batch_credential_issuance").is_none(),
+        "batch_credential_issuance has no corresponding struct field and can never be present"
+    );
+}

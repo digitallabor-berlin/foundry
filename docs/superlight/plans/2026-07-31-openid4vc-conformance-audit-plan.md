@@ -425,11 +425,11 @@ immediately.
 
 **Verify:** `cargo test -p foundry-issuer --test conformance_vci && cargo test -p foundry --test conformance_report`
 
-- [ ] Adjudicate clauses — verdict + evidence for every row in scope
-- [ ] Red / Green / Refactor per behavior
-- [ ] Record gaps — register rows + `#[ignore]` attributes
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Adjudicate clauses — verdict + evidence for every row in scope (35 VCI rows: 8 conforming, 10 gap, 17 not-implemented; 8 HAIP rows: 3 conforming, 1 gap citing existing GAP-HAIP-01, 4 not-implemented)
+- [x] Red / Green / Refactor per behavior (10 new tests; 4 hypothesized gaps were confirmed genuinely red only after fixing a broken test fixture — `test_config()`'s empty `keys` map made `Config::validate()` fail trivially regardless of the real hypothesis, which TDD caught before any gap was wrongly attributed)
+- [x] Record gaps — GAP-VCI-07 (Minor: cryptographic_binding_methods_supported/proof_types_supported never omitted), GAP-VCI-08 (Minor: no https-scheme validation for issuer URLs), GAP-VCI-09 (Important: no cross-check between public_base_url and credential_issuer), GAP-VCI-10 (Minor: credential display objects not structurally validated)
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -697,4 +697,5 @@ to green over the completed report.
 - 2026-07-31 — Task 7 (adjudicate Authorization Endpoint: 22 rows — 5 conforming, 4 gap, 10 not-implemented, 2 not-unit-testable, 1 ambiguous; GAP-HAIP-02 missing RFC9207 iss, GAP-HAIP-03 no DPoP, GAP-HAIP-04 Critical — Wallet Attestation JWT never cryptographically validated) — `470bf2f`
 - 2026-07-31 — Task 8 (adjudicate Token/Nonce Endpoint: 13 rows — 10 conforming, 3 not-implemented; no new gaps) — `d6452c5`
 - 2026-07-31 — Task 9 (adjudicate Credential Endpoint incl. Deferred/Encrypted/Notification/Key Attestation: 60 rows — 15 conforming, 3 gap, 38 not-implemented, 3 not-unit-testable, 1 ambiguous; GAP-VCI-02/03/04) — `8156a96`
-- 2026-07-31 — Task 10 (adjudicate Proof Types, Key and Wallet Attestation: 37 rows — 23 conforming (22 VCI + HAIP-0090), 6 gap (5 VCI citing GAP-VCI-05/06 + HAIP-0088 citing the existing GAP-HAIP-04), 4 not-implemented, 4 out-of-scope; new gaps GAP-VCI-05 (iat unvalidated in proof JWT and Key Attestation JWT) and GAP-VCI-06 (iss never validated); no Critical found — aud, nonce/replay, and plural-proofs validation are all conforming)
+- 2026-07-31 — Task 10 (adjudicate Proof Types, Key and Wallet Attestation: 37 rows — 23 conforming (22 VCI + HAIP-0090), 6 gap (5 VCI citing GAP-VCI-05/06 + HAIP-0088 citing the existing GAP-HAIP-04), 4 not-implemented, 4 out-of-scope; new gaps GAP-VCI-05 (iat unvalidated in proof JWT and Key Attestation JWT) and GAP-VCI-06 (iss never validated); no Critical found — aud, nonce/replay, and plural-proofs validation are all conforming) — `747d573`
+- 2026-07-31 — Task 11 (adjudicate Issuer and Authorization Server Metadata: 35 VCI rows + 8 HAIP rows — 11 conforming, 11 gap, 21 not-implemented; new gaps GAP-VCI-07 (Minor: binding/proof-type fields never omitted when key binding not required), GAP-VCI-08 (Minor: no https-scheme validation for credential_issuer-derived URLs), GAP-VCI-09 (Important: no cross-check between public_base_url and credential_issuer, allowing metadata to silently misidentify the issuer), GAP-VCI-10 (Minor: credential display objects — name/locale-uniqueness/logo/background_image — never structurally validated); confirmed batch issuance (HAIP-0011) works functionally via plural proofs even though never advertised in metadata)
