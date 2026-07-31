@@ -502,3 +502,49 @@ fn vp_0093_0094_0096_0097_dcql_structural_constraints_not_validated() {
         r.detail
     );
 }
+
+// ---------------------------------------------------------------------------
+// Task 15 — Encrypted Responses and Transaction Data (OpenID4VP 1.0 §8.3,
+// §8.4; HAIP OpenID4VP encryption requirements).
+// ---------------------------------------------------------------------------
+
+// GAP-VP-05 — HAIP OpenID4VP (L258): Verifiers MUST list both `A128GCM` and
+// `A256GCM` in `encrypted_response_enc_values_supported` in their client
+// metadata. `response_encryption_params` (request.rs) resolves to exactly one
+// `enc` value (the configured value, defaulting to `A128GCM`), and both the
+// `request_uri` and `dc_api` transports advertise
+// `"encrypted_response_enc_values_supported": [response_enc_method]` -- a
+// single-element array. `A256GCM` decryption itself works fine when a wallet
+// chooses to use it (see `haip_0049_0050_0053_ecdh_es_p256_and_a256gcm_supported`
+// in verify.rs), but the Verifier never *advertises* it as supported, so a
+// wallet consulting client_metadata alone would not know to try it.
+#[tokio::test]
+#[ignore = "GAP-VP-05: HAIP OpenID4VP (L258) — encrypted_response_enc_values_supported only ever lists the single configured enc value (default A128GCM), never both A128GCM and A256GCM as HAIP-0052 requires"]
+async fn haip_0052_encrypted_response_enc_values_supported_lists_only_one_value() {
+    let storage = test_storage().await;
+    let config = sample_config("/tmp/fake_key.pem", None);
+
+    let req = CreateVerificationRequest {
+        dcql_query: Some(serde_json::json!({
+            "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+        })),
+        named_query_ref: None,
+        transport: "dc_api".to_string(),
+        transaction_data: None,
+    };
+    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+
+    let dc_req = res.dc_api_request.unwrap();
+    let supported = dc_req["client_metadata"]["encrypted_response_enc_values_supported"]
+        .as_array()
+        .unwrap();
+    let values: Vec<&str> = supported.iter().filter_map(|v| v.as_str()).collect();
+
+    assert!(
+        values.contains(&"A128GCM") && values.contains(&"A256GCM"),
+        "encrypted_response_enc_values_supported must list both A128GCM and \
+         A256GCM per HAIP-0052, got: {values:?}"
+    );
+}

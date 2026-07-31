@@ -638,6 +638,169 @@ mod tests {
         );
     }
 
+    /// GAP-VP-04 -- OpenID4VP 1.0 Response / VP Token Validation (L1523),
+    /// Format / IETF SD-JWT VC / Transaction Data (L3144): Verifiers MUST
+    /// check that the set of Presentations satisfies all requirements of the
+    /// Verifier's request (VP-0153), which includes any `transaction_data`
+    /// the Verifier itself requested (VP-0019/VP-0020, conforming --
+    /// `encode_transaction_data` validates and advertises it). The SD-JWT VC
+    /// profile of Transaction Data binds the request to the presentation via
+    /// a `transaction_data_hashes` claim in the Key Binding JWT. Nothing in
+    /// this workspace ever reads or checks that claim: `attach_kb_jwt`
+    /// (foundry-sd-jwt-vc's builder) has no parameter for it at all, and
+    /// `do_verify_vp_response`/`verify_sd_jwt_vc` never look for it either.
+    /// A transaction is requested, but never verified to have been bound to
+    /// the presentation at all.
+    #[tokio::test]
+    #[ignore = "GAP-VP-04: OpenID4VP Response / VP Token Validation (L1523); Format / IETF SD-JWT VC / Transaction Data (L3144) — transaction_data_hashes is never read or validated anywhere, so a presentation is accepted as verified even though it does not bind to the transaction_data the Verifier requested"]
+    async fn gap_vp_04_transaction_data_hashes_never_validated() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        // The Verifier requested transaction_data for this transaction, per
+        // the same base64url-encoded-entry shape `encode_transaction_data`
+        // (request.rs) produces and persists on `VerificationTransaction`.
+        let td_entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["c1"],
+            "amount": 5000
+        });
+        let td_encoded = B64URL.encode(serde_json::to_vec(&td_entry).unwrap());
+        tx.transaction_data = Some(vec![td_encoded]);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // A KB-JWT built the only way this codebase can build one: with no
+        // `transaction_data_hashes` claim at all, since `attach_kb_jwt` has no
+        // parameter for it.
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx.nonce,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            !res.verified,
+            "a presentation with no transaction_data_hashes binding must not verify \
+             when the Verifier requested transaction_data, but it did: checks={:?}",
+            res.checks
+        );
+    }
+
+    /// HAIP-0049, HAIP-0050, HAIP-0053 (HAIP OpenID4VP, L258-259): the JWE
+    /// `alg` value `ECDH-ES` with key agreement on the `P-256` curve MUST be
+    /// supported; the JWE `enc` values `A128GCM` and `A256GCM` MUST be
+    /// supported by Verifiers; and Verifiers MUST supply ephemeral encryption
+    /// public keys specific to each Authorization Request. `sample_tx`
+    /// generates a fresh P-256 `EcKeyPair` per call (HAIP-0053, HAIP-0049);
+    /// `do_verify_vp_response`'s decrypter is generic over the JWE `enc`
+    /// header, so a response encrypted with `A256GCM` decrypts successfully
+    /// alongside the `A128GCM` default already exercised by every other test
+    /// in this module (HAIP-0050).
+    #[tokio::test]
+    async fn haip_0049_0050_0053_ecdh_es_p256_and_a256gcm_supported() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        let (tx2, _) = sample_tx();
+
+        // HAIP-0049: the ephemeral encryption key is always P-256.
+        assert_eq!(tx.ephem_public_jwk["crv"], "P-256");
+        // HAIP-0053: a fresh ephemeral key per Authorization Request.
+        assert_ne!(tx.ephem_public_jwk["x"], tx2.ephem_public_jwk["x"]);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            "x509_san_dns:localhost",
+            &tx.nonce,
+        )
+        .unwrap();
+
+        // HAIP-0050: encrypt with A256GCM rather than the A128GCM default.
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A256GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "A256GCM-encrypted responses must decrypt and verify: checks={:?}",
+            res.checks
+        );
+    }
+
     #[tokio::test]
     async fn test_verify_vp_response_missing_vp_token() {
         let (root_pem, _leaf_cert, _leaf_key) = test_pki();
