@@ -547,11 +547,12 @@ invariant is enforced only by code review:
 
 **Verify:** `cargo test -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — `cargo test -p foundry` and full `cargo test --workspace`
+  (exactly one expected failure, Task 11's job); clippy/fmt clean
+- [x] Commit
 
 ---
 
@@ -619,3 +620,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 7 (`claim_pop_jti` atomic `(iss, jti)` replay claim via `insert_kv_if_absent`, hashed key, `expires_at` derived solely from `claims.iat`; 6 tests; removed the now-unnecessary `#[allow(dead_code)]` from `POP_CLOCK_SKEW_SECS`) — `d7714e4`
 - 2026-08-01 — Task 8 (`verify_wallet_attestation` 9-row mode matrix; all rows tested; minimal placeholder fix to `token.rs`'s call site to keep the crate compiling ahead of Task 9's full wiring) — `39ce70a`
 - 2026-08-01 — Task 9 (`handle_token_request` gains `pop_header`/`issuer_identifier`; wires `claim_pop_jti` + ABCA sect-6.3 `client_id` check; renamed and un-`#[ignore]`d the GAP-VCI-14 gap test; 7 new tests; updated 27 call sites across `token.rs`/`conformance_vci.rs`; minimal placeholder fix to `server.rs`'s call site pending Task 10) — `c00e951`
+- 2026-08-01 — Task 10 (HTTP wiring: `token_handler` reads `OAuth-Client-Attestation-PoP` and sources `issuer_identifier` from `build_authorization_server_metadata`; 4 HTTP-level tests; 2 behavioural redaction tests for the raw pop JWT/jti, positive control reconfirmed) — `5eabfb3`
