@@ -61,6 +61,27 @@ impl Storage for SqliteStorage {
         Ok(row.map(|(v,)| v))
     }
 
+    async fn insert_kv_if_absent(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &str,
+        expires_at: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        let res = sqlx::query(
+            "INSERT INTO kv (namespace, key, value, expires_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(namespace, key) DO NOTHING",
+        )
+        .bind(namespace)
+        .bind(key)
+        .bind(value)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     async fn delete_kv(&self, namespace: &str, key: &str) -> Result<(), StorageError> {
         sqlx::query("DELETE FROM kv WHERE namespace = ?1 AND key = ?2")
             .bind(namespace)
