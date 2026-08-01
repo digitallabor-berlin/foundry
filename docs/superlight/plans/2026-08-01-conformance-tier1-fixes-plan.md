@@ -294,13 +294,13 @@ recount the OpenID4VP Summary row.
 
 **Verify:** `cargo test --workspace && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — un-`#[ignore]` the gap test, confirm the Origin-prefixed audience is rejected
-- [ ] Green — add the config field, widen the audience to a slice, branch on `tx.transport`, normalize trailing slashes with a comment citing OpenID4VP L2543
-- [ ] Refactor — clean while green; log the fallback so it is diagnosable
-- [ ] Document the new setting in `config.yaml` and `README.md`
-- [ ] Bookkeeping — verdicts, register row, Summary counts
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — un-`#[ignore]` the gap test, confirm the Origin-prefixed audience is rejected
+- [x] Green — added `verifier.dc_api_expected_origins`, widened `verify_sd_jwt_vc`'s audience to `&[String]`, branched on `tx.transport == "dc_api"` in `do_verify_vp_response`, normalized trailing slashes in `normalize_audience` citing OpenID4VP L2543/RFC 6454
+- [x] Refactor — clean while green; the fallback origin is logged at `debug` (`fallback_origin` field)
+- [x] Document the new setting — `README.md` has no per-field `VerifierConfig` documentation anywhere (checked: no `named_queries`/`response_encryption`/`client_id_scheme` mentions either), so there was no section to extend; documented instead where every other `VerifierConfig` field already is, in the `quickstart` config template (`commands.rs`'s `QUICKSTART_CONFIG`) with a spec-cited comment. The repo's root `config.yaml`/`wallet.yaml` are gitignored dev artifacts, not tracked files — edited locally to mirror the template but carry no commit
+- [x] Bookkeeping — VP-0265 -> conforming, VP-0209 re-cited to GAP-VP-06 (stays gap), GAP-VP-07 register row deleted, OpenID4VP Summary recounted
+- [x] Verify — `cargo test --workspace`, `cargo test --workspace --no-fail-fast -- --ignored` (23 failing gap tests, 22 gap register rows, `full_flow_issue_verify_revoke_reverify` passing as expected), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean; confirmed `openapi.json`/`openapi-wallet.json` untouched (no endpoint shape change)
+- [x] Commit — `c233c0e`
 
 ---
 
@@ -349,3 +349,4 @@ must not be counted as one.
 - 2026-08-01 — Task 2 (GAP-VCI-01: single-use pre-authorized_code; VCI-0003/VCI-0012 -> conforming) — `07323f7`
 - 2026-08-01 — Task 3 (GAP-HAIP-06: status index dedup keyed on physical list, not credential_type_id; HAIP-0081 -> conforming; corrected the plan's own non-deterministic list_size=2 test design in the process) — `f53dbb5`
 - 2026-08-01 — Task 4 (GAP-HAIP-04: Wallet Attestation JWT now cryptographically validated -- x5c chain, trust anchoring, alg/typ, exp/nbf; HAIP-0031 -> conforming; filed GAP-VCI-14 for the still-unverified PoP JWT and added VCI-0231/VCI-0232 for the L2555 extraction miss found while closing this gap) — `416063d`
+- 2026-08-01 — Task 5 (GAP-VP-07: dc_api transport now accepts an Origin-prefixed KB-JWT audience via new `verifier.dc_api_expected_origins` config with a public_base_url-derived fallback; VP-0265 -> conforming; VP-0209 re-cited to GAP-VP-06, still gap for mdoc) — `c233c0e`
