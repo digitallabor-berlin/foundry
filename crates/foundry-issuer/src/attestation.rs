@@ -202,6 +202,33 @@ fn validate_wallet_attestation_jwt(
     let cnf_jwk: Jwk = serde_json::from_value(cnf_jwk_value.clone()).map_err(|e| {
         IssuanceError::InvalidClient(format!("wallet attestation: invalid cnf.jwk: {e}"))
     })?;
+
+    // ABCA draft -07 §9 rule 6: "The key contained in the cnf claim of the
+    // Client Attestation JWT is not a private key."
+    //
+    // `cnf.jwk` names the key the *client* proves possession of, so it must be
+    // a public key. A private key here means the Attester leaked the client
+    // instance's signing key into a JWT that travels in a plaintext HTTP header
+    // — at which point anyone who observes one attestation can mint PoPs for
+    // that client indefinitely, and the PoP stops being a proof of anything.
+    // Rejecting is cheap and catches a broken Attester before it becomes a
+    // credential-theft vector.
+    //
+    // Checked across every key type's private parameters (RFC 7518 §6.2.2 for
+    // EC, §6.3.2 for RSA, §6.4.1 for oct; RFC 8037 §2 for OKP) rather than only
+    // EC's `d`, so a non-EC `cnf` cannot smuggle one past on a technicality
+    // even though the ES256 verifier built below would reject its `kty`.
+    const PRIVATE_JWK_PARAMS: &[&str] = &["d", "p", "q", "dp", "dq", "qi", "oth", "k"];
+    if let Some(param) = PRIVATE_JWK_PARAMS
+        .iter()
+        .find(|p| cnf_jwk.parameter(p).is_some())
+    {
+        // Names the offending parameter but never its value — that value is,
+        // by construction, private key material (AGENTS.md §4.5).
+        return Err(IssuanceError::InvalidClient(format!(
+            "wallet attestation: cnf.jwk MUST be a public key, but carries the private parameter `{param}`"
+        )));
+    }
     let sub = payload
         .get("sub")
         .and_then(|v| v.as_str())
@@ -276,9 +303,15 @@ fn validate_client_attestation_pop_jwt(
         )));
     }
 
-    // Check 3 (ABCA §9.4; HAIP-0088): alg must be ES256. ABCA §9.4 only
-    // requires "a registered asymmetric digital signature algorithm ...
+    // Check 3 (ABCA §9 rule 4; HAIP-0088): alg must be ES256. ABCA §9 rule 4
+    // only requires "a registered asymmetric digital signature algorithm ...
     // not none"; HAIP-0088 narrows this to ES256 specifically for the PoP JWT.
+    //
+    // Note on citation form: ABCA §9 and §6.2 are each a single flat numbered
+    // list of rules, not subsectioned prose -- so "§9 rule 4" is the rule at
+    // list position 4 under the "9. Verification and Processing" heading. There
+    // is no §9.4 heading to look up (contrast §10, which genuinely does have
+    // §10.1..§10.6 subsections).
     let alg = header.get("alg").and_then(|v| v.as_str()).ok_or_else(|| {
         IssuanceError::InvalidClient("client attestation pop: missing alg header".into())
     })?;
@@ -288,8 +321,10 @@ fn validate_client_attestation_pop_jwt(
         )));
     }
 
-    // Check 4 (ABCA §5.2 r3, §6.2.3, §9.7): the signature MUST verify against
-    // the public key in the Client Attestation JWT's cnf.jwk claim.
+    // Check 4 (ABCA §5.2 r3, §6.2 rule 3, §9 rule 7): the signature MUST verify
+    // against the public key in the Client Attestation JWT's cnf.jwk claim.
+    // §9 rule 6's "cnf is not a private key" precondition is enforced upstream
+    // in validate_wallet_attestation_jwt, where the cnf.jwk is first parsed.
     let verifier = ES256.verifier_from_jwk(&attestation.cnf_jwk).map_err(|e| {
         IssuanceError::InvalidClient(format!(
             "client attestation pop: unable to build a verifier from the attestation's cnf.jwk: {e}"
@@ -310,8 +345,8 @@ fn validate_client_attestation_pop_jwt(
         IssuanceError::InvalidClient(format!("client attestation pop: invalid payload JSON: {e}"))
     })?;
 
-    // Check 5 (ABCA §5.2 r4, §9.13): iss REQUIRED, non-empty, MUST equal the
-    // attestation's sub claim (both represent the client_id).
+    // Check 5 (ABCA §5.2 r4, §9 rule 13): iss REQUIRED, non-empty, MUST equal
+    // the attestation's sub claim (both represent the client_id).
     let iss = payload
         .get("iss")
         .and_then(|v| v.as_str())
@@ -327,7 +362,7 @@ fn validate_client_attestation_pop_jwt(
         ));
     }
 
-    // Check 6 (ABCA §5.2, §9.10): aud REQUIRED, string or array form, MUST
+    // Check 6 (ABCA §5.2, §9 rule 10): aud REQUIRED, string or array form, MUST
     // exactly equal / contain expected_aud (the AS's RFC 8414 issuer
     // identifier URL). Exact match only -- no prefix or case-insensitive
     // comparison escape hatch (Q2(a)).
@@ -357,7 +392,7 @@ fn validate_client_attestation_pop_jwt(
             )
         })?;
 
-    // Check 8 (ABCA §9.9, §10.6, §12.1): iat REQUIRED, an integer; bounds the
+    // Check 8 (ABCA §9 rule 9, §10.6, §12.1): iat REQUIRED, an integer; bounds the
     // sliding replay-detection window both from staleness (max_age_secs) and
     // from the future (POP_CLOCK_SKEW_SECS).
     let iat = payload.get("iat").and_then(|v| v.as_i64()).ok_or_else(|| {
@@ -365,21 +400,42 @@ fn validate_client_attestation_pop_jwt(
             "client attestation pop: missing or non-integer iat claim".into(),
         )
     })?;
-    if now_unix - iat > max_age_secs as i64 {
+    // All comparisons below use saturating arithmetic. `iat` arrives via
+    // `as_i64` straight off the wire, so any i64 -- including the boundaries --
+    // is representable, and bare `+`/`-` would either panic (dev profile's
+    // `overflow-checks = true`, breaking AGENTS.md §4.1 in a request path) or
+    // silently wrap (release profile), in which case *both* freshness bounds
+    // stop firing and the ABCA §9 rule 9 / §10.6 window is bypassed rather
+    // than merely mis-tuned.
+    //
+    // In practice josekit's own JWT verification currently rejects a negative
+    // `iat` during check 4 above, so `i64::MIN` never reaches here today. That
+    // is an incidental property of a third-party library's claim validation,
+    // not a guarantee this function is entitled to assume -- so the bound is
+    // enforced locally too.
+    //
+    // `max_age_secs` is a `u64` from config, and `as i64` would be lossy:
+    // `u64::MAX as i64` is `-1`, which would make *every* PoP "older than the
+    // allowed max age". Clamped to `i64::MAX` instead, so an absurd config
+    // value degrades to "effectively no upper bound" rather than to "reject
+    // everything" -- the direction that fails loudly at configuration time
+    // rather than silently at request time.
+    let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+    if now_unix.saturating_sub(iat) > max_age {
         return Err(IssuanceError::InvalidClient(
             "client attestation pop: iat is older than the allowed max age".into(),
         ));
     }
-    if iat > now_unix + POP_CLOCK_SKEW_SECS {
+    if iat > now_unix.saturating_add(POP_CLOCK_SKEW_SECS) {
         return Err(IssuanceError::InvalidClient(
             "client attestation pop: iat is too far in the future".into(),
         ));
     }
 
     // Check 9 (ABCA §5.2): nbf, if present, MUST NOT be beyond the tolerable
-    // clock skew.
+    // clock skew. Saturating for the same reason as `iat` above.
     if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64()) {
-        if nbf > now_unix + POP_CLOCK_SKEW_SECS {
+        if nbf > now_unix.saturating_add(POP_CLOCK_SKEW_SECS) {
             return Err(IssuanceError::InvalidClient(
                 "client attestation pop: not yet valid (nbf beyond tolerable clock skew)".into(),
             ));
@@ -428,7 +484,18 @@ pub(crate) async fn claim_pop_jti(
     hasher.update(claims.jti.as_bytes());
     let key = B64URL.encode(hasher.finalize());
 
-    let expires_at = claims.iat + max_age_secs as i64 + POP_CLOCK_SKEW_SECS;
+    // Saturating, and via `try_from` rather than `as`, for the same two reasons
+    // documented at the `iat` bounds check in
+    // `validate_client_attestation_pop_jwt`: `claims.iat` originates off the
+    // wire, and `max_age_secs as i64` would be a lossy cast of a `u64` config
+    // value (`u64::MAX as i64 == -1`). A bare `+` here overflows on a boundary
+    // `iat` -- confirmed by `claim_pop_jti_does_not_overflow_on_boundary_iat`,
+    // which panicked on this exact line before this change.
+    let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+    let expires_at = claims
+        .iat
+        .saturating_add(max_age)
+        .saturating_add(POP_CLOCK_SKEW_SECS);
 
     let claimed = storage
         .insert_kv_if_absent(POP_JTI_NAMESPACE, &key, "1", Some(expires_at))
@@ -791,11 +858,106 @@ mod tests {
             .expect("cnf_jwk must be usable as an ES256 verification key");
     }
 
-    /// The `cnf.jwk` claim can be well-formed JSON and still be unusable as an
-    /// ES256 verification key (wrong curve). This must be rejected, not
-    /// silently accepted as "parses as *a* JWK".
+    /// ABCA draft -07 §9 rule 6: "The key contained in the cnf claim of the
+    /// Client Attestation JWT is not a private key."
+    ///
+    /// A private key in `cnf` means the Attester leaked the client instance's
+    /// signing key into a JWT that travels in a plaintext HTTP header, so
+    /// anyone who observes one attestation can mint PoPs for that client
+    /// forever. Crucially, this is NOT caught by the signature check further
+    /// down: `ES256.verifier_from_jwk` is perfectly happy to build a verifier
+    /// from a private JWK (it just reads `x`/`y` and ignores `d`), and the
+    /// resulting PoP verification would *succeed*. So without this explicit
+    /// check the condition is silently accepted -- which is what makes it worth
+    /// a dedicated test rather than relying on a downstream failure.
     #[test]
-    fn rejects_a_cnf_jwk_that_is_not_an_ec_p256_key() {
+    fn rejects_a_cnf_jwk_that_carries_a_private_key() {
+        let now = now_secs();
+        let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let private_jwk = serde_json::to_value(kp.to_jwk_private_key()).unwrap();
+
+        // Guard the premise: the planted JWK really does carry `d`, so the
+        // test would be vacuous if a future refactor changed the helper.
+        assert!(
+            private_jwk.get("d").is_some(),
+            "fixture must actually be a private JWK for this test to mean anything"
+        );
+
+        let (jwt, ca_pem) = wallet_attestation_jwt_custom(
+            "ES256",
+            "oauth-client-attestation+jwt",
+            true,
+            Some(now + 100_000),
+            None,
+            Some(private_jwk.clone()),
+            true,
+        );
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let err = validate_wallet_attestation_jwt(&jwt, &store, now)
+            .expect_err("a private key in cnf.jwk must be rejected (ABCA §9 rule 6)");
+        assert!(
+            matches!(err, IssuanceError::InvalidClient(_)),
+            "expected InvalidClient, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("public key") && msg.contains('d'),
+            "error should name the offending private parameter: {msg}"
+        );
+
+        // AGENTS.md §4.5: the error names the parameter but must never carry
+        // its value -- that value is private key material.
+        let d_value = private_jwk
+            .get("d")
+            .and_then(|v| v.as_str())
+            .expect("fixture has a string d");
+        assert!(
+            !msg.contains(d_value),
+            "the private key scalar must never appear in an error message"
+        );
+    }
+
+    /// Counterpart to the above, proving the check is not simply "reject any
+    /// JWK with more than the bare minimum members": a legitimate public JWK
+    /// that happens to carry optional public metadata is still accepted.
+    #[test]
+    fn accepts_a_cnf_jwk_that_is_a_public_key_with_optional_members() {
+        let now = now_secs();
+        let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut jwk = kp.to_jwk_public_key();
+        jwk.set_algorithm("ES256");
+        jwk.set_key_id("wallet-instance-key-1");
+        let public_jwk = serde_json::to_value(&jwk).unwrap();
+        assert!(
+            public_jwk.get("d").is_none(),
+            "a public JWK must not carry d"
+        );
+
+        let (jwt, ca_pem) = wallet_attestation_jwt_custom(
+            "ES256",
+            "oauth-client-attestation+jwt",
+            true,
+            Some(now + 100_000),
+            None,
+            Some(public_jwk),
+            true,
+        );
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        validate_wallet_attestation_jwt(&jwt, &store, now)
+            .expect("a public cnf.jwk with kid/alg must be accepted");
+    }
+
+    /// The `cnf.jwk` claim can be well-formed JSON and still be unusable as an
+    /// ES256 verification key (wrong curve). `validate_wallet_attestation_jwt`
+    /// deliberately does *not* reject it here -- it only parses `cnf.jwk`
+    /// structurally; the curve mismatch surfaces at check 4 of
+    /// `validate_client_attestation_pop_jwt`, where the verifier is built. This
+    /// test pins that division of labour so the failure is known to be caught
+    /// *somewhere* rather than assumed.
+    #[test]
+    fn a_wrong_curve_cnf_jwk_is_rejected_when_the_pop_verifier_is_built() {
         let now = now_secs();
         let (jwt, ca_pem) = wallet_attestation_jwt_custom(
             "ES256",
@@ -808,16 +970,30 @@ mod tests {
         );
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        // The wrong-curve JWK still parses structurally, so acceptance would
-        // be silent here; the failure must surface downstream when the PoP
-        // check (Task 6) tries to build a verifier from it. Confirmed here
-        // via ES256::verifier_from_jwk directly, since attestation.rs
-        // currently has no caller that does this check itself.
+        // The wrong-curve JWK still parses structurally, so the attestation
+        // itself validates -- acceptance here is correct, not a bug.
         let validated = validate_wallet_attestation_jwt(&jwt, &store, now)
             .expect("the attestation JWT itself is validly signed and trust-anchored");
         assert!(
             ES256.verifier_from_jwk(&validated.cnf_jwk).is_err(),
             "a P-384 EC key must not be usable as an ES256 verification key"
+        );
+
+        // ...and the real production path rejects it: check 4 of
+        // validate_client_attestation_pop_jwt fails to build the verifier. This
+        // is the assertion that makes the division of labour above safe; without
+        // it, "caught downstream" would be an untested claim.
+        let err = validate_client_attestation_pop_jwt(
+            "a.b.c",
+            &validated,
+            "https://issuer.example.com",
+            now,
+            300,
+        )
+        .expect_err("a P-384 cnf.jwk cannot verify an ES256 PoP");
+        assert!(
+            matches!(err, IssuanceError::InvalidClient(_)),
+            "expected InvalidClient, got {err:?}"
         );
     }
 
@@ -1797,6 +1973,73 @@ mod tests {
         let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// `iat` is read with `as_i64` straight off the wire, so every i64 --
+    /// including both boundaries -- is representable in the payload. Both must
+    /// be rejected, and rejected *without arithmetic overflow*.
+    ///
+    /// Honest accounting of what each case actually exercises, established by
+    /// instrumenting this test rather than by reasoning about it:
+    ///
+    /// - **`i64::MAX`** genuinely reaches check 8 and is rejected there by the
+    ///   "too far in the future" branch. This is the case that exercises our
+    ///   own arithmetic.
+    /// - **`i64::MIN`** never reaches check 8: josekit's JWT verification inside
+    ///   check 4 rejects it first ("the JWT iat payload claim must be a 64bit
+    ///   positive integer"). So the `now_unix - iat` overflow a bare `-` would
+    ///   suffer here is, today, unreachable through this function.
+    ///
+    /// The arithmetic is saturating anyway, and the `i64::MIN` case is still
+    /// pinned, because that guard is an *incidental* property of a third-party
+    /// library's claim validation -- not part of josekit's documented contract,
+    /// and not something a security bound should rest on. If josekit ever
+    /// relaxes it, a bare `-` would panic in a request path (AGENTS.md §4.1)
+    /// under the dev profile's `overflow-checks = true`, or silently wrap under
+    /// release's `overflow-checks = false` -- and on wrap *both* freshness
+    /// bounds stop firing, bypassing the ABCA §9 rule 9 / §10.6 window rather
+    /// than merely mis-tuning it. This test is the tripwire for that regression.
+    ///
+    /// Note this is wallet-controlled, not anonymous, input: check 4's signature
+    /// verification runs first, so a caller needs the attested private key to
+    /// get here at all. That bounds the blast radius; it does not excuse it.
+    #[test]
+    fn rejects_pop_with_iat_at_the_i64_boundaries_without_overflowing() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+
+        for (label, iat) in [("i64::MIN", i64::MIN), ("i64::MAX", i64::MAX)] {
+            let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+            let payload = pop_payload(
+                POP_TEST_SUB,
+                serde_json::json!(POP_TEST_AUD),
+                "jti-i64-boundary",
+                iat,
+            );
+            let jwt = sign_pop(&header, &payload, &signer);
+
+            let err =
+                validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
+                    .expect_err("a boundary iat must be rejected, not accepted or panicked on");
+            assert!(
+                matches!(err, IssuanceError::InvalidClient(_)),
+                "iat = {label}: expected InvalidClient, got {err:?}"
+            );
+        }
+    }
+
+    /// Companion to the above for `claim_pop_jti`'s own `iat + max_age + skew`:
+    /// even a `PopClaims` carrying a boundary `iat` (however it was obtained)
+    /// must not overflow when the replay TTL is computed.
+    #[tokio::test]
+    async fn claim_pop_jti_does_not_overflow_on_boundary_iat() {
+        for iat in [i64::MIN, i64::MAX] {
+            let storage = test_storage().await;
+            let claims = pop_claims("https://wallet.example.com", "jti-boundary", iat);
+            // Must return a Result, not panic. Either verdict is acceptable;
+            // the point is that the TTL arithmetic is saturating.
+            let _ = claim_pop_jti(&storage, &claims, u64::MAX).await;
+        }
     }
 
     #[test]

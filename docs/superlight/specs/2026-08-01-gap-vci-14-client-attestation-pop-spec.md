@@ -185,12 +185,12 @@ Every check cites its clause in a code comment:
 |---|---|---|
 | 1 | Exactly three dot-separated parts; base64url-decodable header and payload | ABCA §5.2 / RFC 7519 |
 | 2 | Header `typ == "oauth-client-attestation-pop+jwt"` | ABCA §5.2 |
-| 3 | Header `alg == "ES256"` — a registered asymmetric algorithm, not `none` | ABCA §9.4; HAIP-0088 |
-| 4 | Signature verifies against the attestation's `cnf.jwk` | ABCA §5.2 r3, §6.2.3, §9.7 |
-| 5 | `iss` present, non-empty, equals the attestation's `sub` | ABCA §5.2 r4, §9.13 |
-| 6 | `aud` present; string **or** array; equals / contains `expected_aud` exactly | ABCA §5.2, §9.10 |
+| 3 | Header `alg == "ES256"` — a registered asymmetric algorithm, not `none` | ABCA §9 rule 4; HAIP-0088 |
+| 4 | Signature verifies against the attestation's `cnf.jwk` | ABCA §5.2 r3, §6.2 rule 3, §9 rule 7 |
+| 5 | `iss` present, non-empty, equals the attestation's `sub` | ABCA §5.2 r4, §9 rule 13 |
+| 6 | `aud` present; string **or** array; equals / contains `expected_aud` exactly | ABCA §5.2, §9 rule 10 |
 | 7 | `jti` present, a non-empty string | ABCA §5.2 |
-| 8 | `iat` present, an integer; `now - iat <= max_age_secs`; `iat <= now + SKEW` | ABCA §9.9, §10.6, §12.1 |
+| 8 | `iat` present, an integer; `now - iat <= max_age_secs`; `iat <= now + SKEW` | ABCA §9 rule 9, §10.6, §12.1 |
 | 9 | `nbf`, if present, `<= now + SKEW` | ABCA §5.2 |
 
 `POP_CLOCK_SKEW_SECS: i64 = 60`, a named constant citing §12.1's "clock skews

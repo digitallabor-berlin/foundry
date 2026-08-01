@@ -140,10 +140,19 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   `validate_client_attestation_pop_jwt`), returning `Result<Option<PopClaims>,
   IssuanceError>`. Under both `Mode::Required` and `Mode::Optional`, a present
   attestation without a PoP is rejected (ABCA §6.2 rule 2) — see the 9-row mode
-  matrix in `attestation.rs`'s own tests. `KeyAttestationVerifier::verify_key_attestation`
-  (a distinct, unrelated mechanism for credential-key PoP) is unused dead code
-  with no caller anywhere in the workspace and still only checks presence —
-  do not confuse the two verifiers.
+  matrix in `attestation.rs`'s own tests.
+- **Three similarly-named things in `attestation.rs`; only two are live.** Do not
+  reason about one and change another:
+  - `WalletAttestationVerifier::verify_wallet_attestation` — **live**, called by
+    `handle_token_request`. Full crypto + PoP verification, as above.
+  - `verify_key_attestation_jwt` (free function) — **live**, called from
+    `proof.rs` for OpenID4VCI Appendix D credential-key attestation. Genuinely
+    verifies the key attestation JWT. Unrelated to OAuth client authentication.
+  - `KeyAttestationVerifier::verify_key_attestation` (trait method) — **dead**:
+    no caller anywhere in the workspace. Still only checks presence and still
+    returns `InvalidRequest` rather than `InvalidClient`. Deliberately left
+    untouched by GAP-VCI-14; do not cite it as evidence of what key attestation
+    does, and do not "fix" its error type without first giving it a caller.
 - **`claim_pop_jti` is the sole anti-replay mechanism for the PoP's `jti`.** It
   is keyed on a hash of `(iss, jti)`, not bare `jti` — a bare-`jti` namespace
   would let one wallet pre-claim `jti` values and deny service to another.

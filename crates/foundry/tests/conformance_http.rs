@@ -1088,6 +1088,20 @@ fn signed_attestation_and_pop(now: i64, aud: &str, jti: &str) -> (String, String
 /// pointed at `ca_pem` (written to a temp file -- `TrustStore::from_config`
 /// reads `certs` from disk).
 async fn setup_pop_test_app(ca_pem: &str) -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+    setup_pop_test_app_with_mode(ca_pem, Mode::Required).await
+}
+
+/// As above, but with the wallet-attestation `mode` chosen by the caller.
+///
+/// `Mode::Optional` is the only setting under which "no attestation presented"
+/// is an *accepted* outcome, which makes it the only setting that can
+/// distinguish "header rejected as malformed" from "header silently degraded to
+/// absent". A test of that distinction run under `Mode::Required` passes either
+/// way and proves nothing.
+async fn setup_pop_test_app_with_mode(
+    ca_pem: &str,
+    wallet_attestation_mode: Mode,
+) -> (AppState, tempfile::TempDir, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("foundry.db");
     let storage = SqliteStorage::connect(db_path.to_str().unwrap())
@@ -1136,7 +1150,7 @@ async fn setup_pop_test_app(ca_pem: &str) -> (AppState, tempfile::TempDir, tempf
         issuer: IssuerConfig {
             credential_issuer: "https://issuer.example.com".to_string(),
             wallet_attestation: AttestationMode {
-                mode: Mode::Required,
+                mode: wallet_attestation_mode,
                 trusted_anchors: vec![TrustAnchor {
                     name: "wallet-provider-ca".to_string(),
                     certs: ca_path.to_str().unwrap().to_string(),
@@ -1330,6 +1344,145 @@ async fn gap_vci_14_pop_aud_as_token_endpoint_url_is_rejected() {
         token_res.status(),
         StatusCode::BAD_REQUEST,
         "a pop whose aud is the token endpoint URL rather than the issuer identifier must be rejected"
+    );
+    let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_client");
+}
+
+// ---------------------------------------------------------------------------
+// ABCA draft -07 §6.2 rules 1 and 2: there MUST be *precisely one* of each
+// client-attestation header. `HeaderMap::get` yields only the first of several,
+// so without an explicit count check a duplicated header would be silently
+// processed against whichever copy happened to arrive first -- the classic
+// request-smuggling shape, where two intermediaries disagree about which value
+// is authoritative. Both directions are pinned below, plus the adjacent
+// non-UTF-8 case, where a present-but-unreadable header must NOT degrade into
+// "absent" (which `Mode::Optional` would then wave through unexamined).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn gap_vci_14_duplicate_pop_header_is_rejected_per_abca_6_2_rule_2() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-duppop-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        // The *same*, entirely valid PoP sent twice. Note this would be
+        // accepted by a first-value-wins reader, which is exactly the point:
+        // the rejection must come from the count, not from the content.
+        .header("OAuth-Client-Attestation-PoP", &pop_jwt)
+        .header("OAuth-Client-Attestation-PoP", &pop_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::BAD_REQUEST,
+        "a duplicated OAuth-Client-Attestation-PoP header must be rejected even when both copies are valid"
+    );
+    let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_client");
+}
+
+#[tokio::test]
+async fn gap_vci_14_duplicate_attestation_header_is_rejected_per_abca_6_2_rule_1() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-dupatt-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        .header("OAuth-Client-Attestation-PoP", &pop_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::BAD_REQUEST,
+        "a duplicated OAuth-Client-Attestation header must be rejected even when both copies are valid"
+    );
+    let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_client");
+}
+
+/// A present-but-non-UTF-8 attestation header must be rejected, not silently
+/// treated as absent.
+///
+/// Two setup choices here are load-bearing, and getting either wrong makes the
+/// test pass vacuously — both mistakes were made and caught while writing it:
+///
+/// 1. **`Mode::Optional`, not `Required`.** Under `Required`, a header that
+///    degrades to `None` is rejected anyway because absence is itself an error,
+///    so the assertion holds with or without the fix.
+/// 2. **No PoP header at all.** With a PoP present but the attestation degraded
+///    to `None`, the mode matrix rejects the request for an unrelated reason (a
+///    PoP with no attestation has no `cnf.jwk` to verify against) — again 400
+///    either way.
+///
+/// With `Optional` *and* no PoP, absent+absent is an accepted combination that
+/// returns HTTP 200. So 400 can only mean the malformed attestation header was
+/// actually noticed rather than silently swallowed. Confirmed by reverting the
+/// fix and watching this fail.
+#[tokio::test]
+async fn gap_vci_14_non_utf8_attestation_header_is_rejected_not_treated_as_absent() {
+    let now = pop_test_now_secs();
+    let (_attestation_jwt, _pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-nonutf8-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app_with_mode(&ca_pem, Mode::Optional).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    // 0xFF is never valid UTF-8, and `HeaderValue::from_bytes` accepts it
+    // (HTTP header values are opaque octets), so this reaches the handler.
+    let bad_value = axum::http::HeaderValue::from_bytes(b"eyJhbGc\xffiJFUzI1NiJ9.e30.sig")
+        .expect("0xFF is a legal header octet even though it is not UTF-8");
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", bad_value)
+        // Deliberately NO PoP header -- see the doc comment.
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::BAD_REQUEST,
+        "a non-UTF-8 attestation header must be rejected as malformed, not silently \
+         treated as 'no attestation presented' (which Mode::Optional would allow)"
     );
     let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
         .await

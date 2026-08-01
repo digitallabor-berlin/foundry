@@ -397,11 +397,78 @@ async fn authorize_handler(
     }
 }
 
+/// Reads a header that ABCA draft -07 §6.2 requires to appear *precisely once*,
+/// if at all.
+///
+/// Returns `Ok(None)` when the header is absent, `Ok(Some(value))` when it
+/// appears exactly once with a UTF-8 value, and `InvalidClient` otherwise.
+///
+/// Two failure modes that a plain `HeaderMap::get(..).and_then(|v| v.to_str().ok())`
+/// silently swallows are rejected here instead:
+///
+/// - **Duplicated header.** `get` yields only the first value, so a request
+///   carrying the header twice would be processed against the first and the
+///   rest discarded unexamined. §6.2 rules 1 and 2 both say "precisely one".
+/// - **Non-UTF-8 value.** `to_str().ok()` maps it to `None`, i.e. to *absent*.
+///   Under `Mode::Optional` absence is permitted, so an unreadable attestation
+///   header would be accepted as "no attestation was presented" rather than
+///   as the malformed one it is.
+fn exactly_one_header<'h>(
+    headers: &'h HeaderMap,
+    name: &str,
+) -> Result<Option<&'h str>, foundry_issuer::IssuanceError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        // The header name is a fixed literal from the call site, never
+        // attacker-controlled, so echoing it carries no injection risk.
+        return Err(foundry_issuer::IssuanceError::InvalidClient(format!(
+            "{name}: header MUST appear exactly once"
+        )));
+    }
+    // Deliberately does not include the value in the error: it is a client
+    // attestation JWT or its PoP, both sensitive per AGENTS.md §4.5.
+    let value = first.to_str().map_err(|_| {
+        foundry_issuer::IssuanceError::InvalidClient(format!(
+            "{name}: header value is not valid UTF-8"
+        ))
+    })?;
+    Ok(Some(value))
+}
+
+/// Token Endpoint (OpenID4VCI 1.0 Section 6).
+///
+/// Optionally authenticates the client with Attestation-Based Client
+/// Authentication (`draft-ietf-oauth-attestation-based-client-auth-07`, which
+/// OpenID4VCI Appendix E incorporates by reference), gated by
+/// `issuer.wallet_attestation.mode`. When a Wallet Attestation is presented,
+/// a matching Client Attestation PoP MUST accompany it (ABCA §6.2).
 #[utoipa::path(
     post,
     path = "/token",
     request_body = TokenRequest,
-    responses((status = 200, body = TokenResponse))
+    params(
+        ("OAuth-Client-Attestation" = Option<String>, Header,
+         description = "Wallet Attestation JWT (ABCA §6.1). Required when \
+                        issuer.wallet_attestation.mode is `required`. MUST appear \
+                        at most once (ABCA §6.2 rule 1)."),
+        ("OAuth-Client-Attestation-PoP" = Option<String>, Header,
+         description = "Client Attestation PoP JWT (ABCA §5.2/§6.1), proving \
+                        possession of the key in the Wallet Attestation's \
+                        `cnf.jwk`. Required whenever OAuth-Client-Attestation is \
+                        present, under both `required` and `optional` mode \
+                        (ABCA §6.2 rule 2). MUST appear at most once."),
+    ),
+    responses(
+        (status = 200, body = TokenResponse),
+        (status = 400, description = "RFC 6749 §5.2 error object. `invalid_client` \
+                                     for any Wallet Attestation / Client \
+                                     Attestation PoP failure, `invalid_grant` for \
+                                     an unusable code, `invalid_request` \
+                                     otherwise."),
+    )
 )]
 async fn token_handler(
     State(state): State<AppState>,
@@ -427,15 +494,22 @@ async fn token_handler(
         })?
     };
 
-    let attestation_hdr = headers
-        .get("OAuth-Client-Attestation")
-        .and_then(|v| v.to_str().ok());
+    // ABCA draft -07 §6.2 rules 1 and 2: there MUST be *precisely one* of each
+    // header. `HeaderMap::get` silently returns only the first of several, so a
+    // duplicated header would be accepted with the rest ignored; `get_all` is
+    // what makes the "precisely one" requirement enforceable.
+    //
+    // A present-but-non-UTF-8 value is likewise rejected rather than degraded
+    // to `None`: treating an unreadable attestation header as *absent* would
+    // let it slip through `Mode::Optional` unexamined.
+    //
     // axum's `HeaderMap` lookup is already case-insensitive (header names are
     // normalized to lowercase per RFC 9110), satisfying ABCA §6.1's header
     // matching requirement without any extra normalization here.
-    let pop_hdr = headers
-        .get("OAuth-Client-Attestation-PoP")
-        .and_then(|v| v.to_str().ok());
+    let attestation_hdr = exactly_one_header(&headers, "OAuth-Client-Attestation")
+        .map_err(|e| wallet_error_response(&e))?;
+    let pop_hdr = exactly_one_header(&headers, "OAuth-Client-Attestation-PoP")
+        .map_err(|e| wallet_error_response(&e))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

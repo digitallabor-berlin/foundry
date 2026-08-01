@@ -345,6 +345,18 @@ The PoP's `jti` is claimed exactly once via an atomic anti-replay check
 (`Storage::insert_kv_if_absent`), so a captured-and-resent PoP is rejected on
 its second use even if it is otherwise perfectly valid and unexpired.
 
+Two further rules are enforced and worth knowing when debugging a client:
+
+- **Each header must appear at most once** (ABCA §6.2 rules 1–2). Sending
+  `OAuth-Client-Attestation` or `OAuth-Client-Attestation-PoP` twice is
+  rejected even if both copies are identical and valid — a proxy that
+  duplicates the header will break the request rather than being silently
+  tolerated. A present-but-non-UTF-8 header value is likewise rejected rather
+  than treated as absent.
+- **The attestation's `cnf.jwk` must be a public key** (ABCA §9 rule 6). An
+  Attester that mistakenly embeds private key material is rejected, since such
+  an attestation would let any observer mint PoPs for that wallet.
+
 ---
 
 ## Logging & Observability
