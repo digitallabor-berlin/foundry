@@ -489,41 +489,77 @@ async fn do_verify_vp_response(
             // transport binds to the Client Identifier and response URI
             // (L2829-L2873). Building the wrong one yields a transcript no
             // conformant wallet's Device Signature can verify against.
-            let transcript_params = if tx.transport == "dc_api" {
-                // L2997: the Origin element MUST NOT carry the `origin:`
-                // prefix. That prefix belongs to the KB-JWT audience above — a
-                // different mechanism that happens to name the same value.
-                let origin = config
-                    .verifier
-                    .dc_api_expected_origins
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| base_url.to_string());
-                SessionTranscriptParams::DcApi {
-                    origin,
-                    nonce: tx.nonce.clone(),
-                    jwk_thumbprint,
-                }
+            //
+            // The Origin sits *inside* the hashed `OpenID4VPDCAPIHandoverInfo`,
+            // so unlike the KB-JWT audience above — which is compared against a
+            // list — the verifier cannot compare here. It must *pick* an Origin
+            // before it can verify anything, and a deployment may legitimately
+            // serve several. Each configured Origin therefore yields a
+            // candidate transcript, and the Device Signature decides which one
+            // the wallet actually used.
+            let candidates: Vec<SessionTranscriptParams> = if tx.transport == "dc_api" {
+                let origins: Vec<String> = if config.verifier.dc_api_expected_origins.is_empty() {
+                    vec![base_url.to_string()]
+                } else {
+                    config.verifier.dc_api_expected_origins.clone()
+                };
+                origins
+                    .into_iter()
+                    // L2997: the Origin element MUST NOT carry the `origin:`
+                    // prefix. That prefix belongs to the KB-JWT audience — a
+                    // different mechanism that happens to name the same value.
+                    .map(|origin| SessionTranscriptParams::DcApi {
+                        origin,
+                        nonce: tx.nonce.clone(),
+                        jwk_thumbprint,
+                    })
+                    .collect()
             } else {
-                SessionTranscriptParams::Redirect {
+                vec![SessionTranscriptParams::Redirect {
                     client_id: client_id.clone(),
                     nonce: tx.nonce.clone(),
                     jwk_thumbprint,
                     response_uri: format!("{base_url}/vp/response/{}", tx.id),
-                }
+                }]
             };
 
-            let session_transcript = build_session_transcript(&transcript_params)
-                .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
+            let mut accepted = None;
+            let mut last_err = None;
+            for params in &candidates {
+                let session_transcript = build_session_transcript(params)
+                    .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
+                match foundry_mdoc::verifier::verify_mdoc(
+                    &mdoc_bytes,
+                    &trust_store,
+                    &session_transcript,
+                    &dev_sig_bytes,
+                    now_unix,
+                ) {
+                    Ok(res) => {
+                        accepted = Some(res);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(VerificationError::Failed(format!(
+                            "mdoc verification failed: {e}"
+                        )))
+                    }
+                }
+            }
 
-            let mdoc_res = foundry_mdoc::verifier::verify_mdoc(
-                &mdoc_bytes,
-                &trust_store,
-                &session_transcript,
-                &dev_sig_bytes,
-                now_unix,
-            )
-            .map_err(|e| VerificationError::Failed(format!("mdoc verification failed: {e}")))?;
+            // `candidates` is never empty, so `last_err` is always populated on
+            // the failure path. The fallback message exists only so that this
+            // cannot become a panic if that ever stops holding.
+            let mdoc_res = match accepted {
+                Some(res) => res,
+                None => {
+                    return Err(last_err.unwrap_or_else(|| {
+                        VerificationError::Failed(
+                            "mdoc verification failed: no SessionTranscript candidate".to_string(),
+                        )
+                    }))
+                }
+            };
 
             checks.push(CheckResult {
                 check: "mdoc_issuer_auth_and_device_signature".to_string(),
@@ -2020,5 +2056,312 @@ mod tests {
             "an audience matching neither a configured origin nor the fallback must be rejected, \
              got: {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // GAP-VP-06 — mdoc SessionTranscript Handover binding.
+    //
+    // `foundry-mdoc`'s own tests pin the transcript bytes against OpenID4VP's
+    // published vectors. These tests cover the other half: that the verifier
+    // actually *requires* those bytes, and selects the right variant from the
+    // transaction's transport and Response Mode.
+    // -----------------------------------------------------------------------
+
+    fn cbor_text(s: &str) -> Vec<u8> {
+        let b = s.as_bytes();
+        let mut out = Vec::new();
+        if b.len() < 24 {
+            out.push(0x60 | b.len() as u8);
+        } else if b.len() < 256 {
+            out.push(0x78);
+            out.push(b.len() as u8);
+        } else {
+            out.push(0x79);
+            out.extend_from_slice(&(b.len() as u16).to_be_bytes());
+        }
+        out.extend_from_slice(b);
+        out
+    }
+
+    /// The exact `SessionTranscript` foundry produced *before* GAP-VP-06 was
+    /// closed: `[null, null, [client_id, response_uri, nonce]]`, with the raw
+    /// request values sitting where the spec requires a hashed
+    /// `OpenID4VPHandover`.
+    ///
+    /// Hand-encoded because `ciborium` is not a dependency of this crate, and
+    /// because pinning the pre-fix bytes literally is the point: it is what a
+    /// wallet built against the old behaviour would sign.
+    fn pre_fix_ad_hoc_transcript(client_id: &str, response_uri: &str, nonce: &str) -> Vec<u8> {
+        let mut out = vec![0x83, 0xf6, 0xf6, 0x83];
+        out.extend(cbor_text(client_id));
+        out.extend(cbor_text(response_uri));
+        out.extend(cbor_text(nonce));
+        out
+    }
+
+    fn mdoc_dcql_query() -> serde_json::Value {
+        serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "mso_mdoc",
+                "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+            }]
+        })
+    }
+
+    /// Issue an mdoc and sign a detached DeviceAuth over `transcript`, then
+    /// wrap it in the JWE a wallet would post. Taking the transcript as raw
+    /// bytes lets a caller sign a deliberately wrong one.
+    fn mdoc_presentation_jwe(
+        leaf_cert: &[u8],
+        leaf_key: &[u8],
+        transcript: &[u8],
+        ephem_public_jwk: &serde_json::Value,
+        now: u64,
+    ) -> String {
+        let issuer_signer = FileSigner::from_pem(leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &issuer_signer,
+            Some(vec![der_b64(leaf_cert)]),
+        )
+        .unwrap();
+
+        let protected = coset::HeaderBuilder::new()
+            .algorithm(coset::iana::Algorithm::ES256)
+            .build();
+        let partial = coset::CoseSign1Builder::new()
+            .protected(protected.clone())
+            .build();
+        let d_tbs = coset::sig_structure_data(
+            coset::SignatureContext::CoseSign1,
+            partial.protected.clone(),
+            None,
+            &[],
+            transcript,
+        );
+        let sig = {
+            use foundry_core::crypto::Signer as _;
+            d_signer.sign(&d_tbs).unwrap()
+        };
+        let d_sign = coset::CoseSign1Builder::new()
+            .protected(protected)
+            .signature(sig)
+            .build();
+        let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+
+        encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [serde_json::json!({
+                "mdoc": B64URL.encode(&mdoc_bytes),
+                "device_signature": B64URL.encode(&d_sig_bytes),
+            })] } }),
+            ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap()
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// The fix must not be cosmetic: a wallet still signing the pre-GAP-VP-06
+    /// ad-hoc transcript has to be rejected now. Without this, every other
+    /// assertion here would still pass if the verifier had simply stopped
+    /// checking the Device Signature.
+    #[tokio::test]
+    async fn mdoc_device_signature_over_the_pre_fix_ad_hoc_transcript_is_rejected() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let (config, _dir) = test_config(&String::from_utf8(root_pem).unwrap());
+        let (mut tx, _) = sample_tx();
+        tx.dcql_query = mdoc_dcql_query();
+
+        let legacy = pre_fix_ad_hoc_transcript(
+            "x509_san_dns:localhost",
+            &format!("https://localhost:8443/vp/response/{}", tx.id),
+            &tx.nonce,
+        );
+        let jwe = mdoc_presentation_jwe(
+            &leaf_cert,
+            &leaf_key,
+            &legacy,
+            &tx.ephem_public_jwk,
+            now_secs(),
+        );
+
+        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("mdoc verification failed"),
+            "a DeviceAuth over the pre-fix ad-hoc transcript must no longer verify, got: {err:?}"
+        );
+    }
+
+    /// OpenID4VP L2997: the DC API Handover binds to the request's Origin. The
+    /// Origin is inside the hash, so the verifier must try each configured
+    /// candidate — including ones that are not the first.
+    #[tokio::test]
+    async fn dc_api_mdoc_accepts_a_later_configured_origin() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let (mut config, _dir) = test_config(&String::from_utf8(root_pem).unwrap());
+        config.verifier.dc_api_expected_origins = vec![
+            "https://first.example.com".to_string(),
+            "https://second.example.com".to_string(),
+        ];
+
+        let (mut tx, _) = sample_tx();
+        tx.dcql_query = mdoc_dcql_query();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        // The wallet used the *second* origin; a first-only implementation
+        // would reject this.
+        let transcript = build_session_transcript(&SessionTranscriptParams::DcApi {
+            origin: "https://second.example.com".to_string(),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+        })
+        .unwrap();
+        let jwe = mdoc_presentation_jwe(
+            &leaf_cert,
+            &leaf_key,
+            &transcript,
+            &tx.ephem_public_jwk,
+            now_secs(),
+        );
+
+        let res = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
+            .await
+            .unwrap();
+        assert!(res.verified, "checks={:?}", res.checks);
+    }
+
+    /// Trying every configured Origin must not degrade into accepting any
+    /// Origin.
+    #[tokio::test]
+    async fn dc_api_mdoc_rejects_an_unconfigured_origin() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let (mut config, _dir) = test_config(&String::from_utf8(root_pem).unwrap());
+        config.verifier.dc_api_expected_origins = vec!["https://first.example.com".to_string()];
+
+        let (mut tx, _) = sample_tx();
+        tx.dcql_query = mdoc_dcql_query();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let transcript = build_session_transcript(&SessionTranscriptParams::DcApi {
+            origin: "https://attacker.example.com".to_string(),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+        })
+        .unwrap();
+        let jwe = mdoc_presentation_jwe(
+            &leaf_cert,
+            &leaf_key,
+            &transcript,
+            &tx.ephem_public_jwk,
+            now_secs(),
+        );
+
+        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("mdoc verification failed"),
+            "an Origin matching no configured candidate must be rejected, got: {err:?}"
+        );
+    }
+
+    /// OpenID4VP L2999: for Response Mode `dc_api.jwt` the third
+    /// `OpenID4VPDCAPIHandoverInfo` element is the encryption key's thumbprint;
+    /// for `dc_api` it is `null`. The two are not interchangeable, and this
+    /// asserts both directions so neither can be silently dropped.
+    #[tokio::test]
+    async fn dc_api_response_mode_selects_null_or_thumbprint() {
+        for (response_mode, correct, wrong) in
+            [("dc_api.jwt", true, false), ("dc_api", false, true)]
+        {
+            let (root_pem, leaf_cert, leaf_key) = test_pki();
+            let (mut config, _dir) = test_config(&String::from_utf8(root_pem).unwrap());
+            config.verifier.dc_api_expected_origins =
+                vec!["https://origin.example.com".to_string()];
+
+            let (mut tx, _) = sample_tx();
+            tx.dcql_query = mdoc_dcql_query();
+            tx.transport = "dc_api".to_string();
+            tx.response_mode = response_mode.to_string();
+
+            let thumb = foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap();
+            let build = |with_thumbprint: bool| {
+                build_session_transcript(&SessionTranscriptParams::DcApi {
+                    origin: "https://origin.example.com".to_string(),
+                    nonce: tx.nonce.clone(),
+                    jwk_thumbprint: if with_thumbprint { Some(thumb) } else { None },
+                })
+                .unwrap()
+            };
+
+            let ok_jwe = mdoc_presentation_jwe(
+                &leaf_cert,
+                &leaf_key,
+                &build(correct),
+                &tx.ephem_public_jwk,
+                now_secs(),
+            );
+            let mut tx_ok = tx.clone();
+            let res =
+                verify_vp_response(&config, &mut tx_ok, &ok_jwe, &MockResolver { token: None })
+                    .await
+                    .unwrap_or_else(|e| {
+                        panic!("{response_mode}: correct transcript must verify: {e:?}")
+                    });
+            assert!(res.verified, "{response_mode}: checks={:?}", res.checks);
+
+            let bad_jwe = mdoc_presentation_jwe(
+                &leaf_cert,
+                &leaf_key,
+                &build(wrong),
+                &tx.ephem_public_jwk,
+                now_secs(),
+            );
+            let mut tx_bad = tx.clone();
+            let err = verify_vp_response(
+                &config,
+                &mut tx_bad,
+                &bad_jwe,
+                &MockResolver { token: None },
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                format!("{err:?}").contains("mdoc verification failed"),
+                "{response_mode}: the opposite thumbprint choice must be rejected, got: {err:?}"
+            );
+        }
     }
 }
