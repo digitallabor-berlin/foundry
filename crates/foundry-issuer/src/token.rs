@@ -4,9 +4,9 @@
 use crate::attestation::{DefaultAttestationVerifier, WalletAttestationVerifier};
 use crate::error::IssuanceError;
 use crate::transaction::{
-    invalidate_authorization_code, load_transaction_by_authorization_code,
-    load_transaction_by_pre_auth_code, save_transaction_with_indices, IssuanceState,
-    IssuanceTransaction,
+    invalidate_authorization_code, invalidate_pre_authorized_code,
+    load_transaction_by_authorization_code, load_transaction_by_pre_auth_code,
+    save_transaction_with_indices, IssuanceState, IssuanceTransaction,
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -102,6 +102,15 @@ async fn handle_pre_authorized_code_grant(
             _ => return Err(IssuanceError::InvalidGrant("invalid tx_code".to_string())),
         }
     }
+
+    // OpenID4VCI 1.0 Credential Offer (L396): `pre-authorized_code` MUST be
+    // short-lived and single use. Burn only after full validation passes: an
+    // attacker probing with a wrong tx_code must not be able to destroy the
+    // legitimate holder's code (mirrors the authorization_code branch below).
+    invalidate_pre_authorized_code(storage, code).await?;
+
+    let mut tx = tx;
+    tx.pre_authorized_code = None;
 
     mint_and_save_tokens(storage, tx, now_unix).await
 }
@@ -276,6 +285,82 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, IssuanceError::InvalidGrant(_)));
+    }
+
+    /// A wrong `tx_code` must not burn the `pre-authorized_code`: an attacker
+    /// probing with an incorrect code must not be able to destroy the
+    /// legitimate holder's access. Mirrors the equivalent reasoning already
+    /// tested for the `authorization_code` branch.
+    #[tokio::test]
+    async fn wrong_tx_code_does_not_burn_the_pre_authorized_code() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-tok-wrong-code");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let wrong_req = TokenRequest {
+            grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: Some("wrong".to_string()),
+            code: None,
+            redirect_uri: None,
+            client_id: None,
+            code_verifier: None,
+        };
+        handle_token_request(&storage, &wrong_req, Mode::Disabled, None, 1_700_000_010)
+            .await
+            .unwrap_err();
+
+        let good_req = TokenRequest {
+            grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: Some("4242".to_string()),
+            code: None,
+            redirect_uri: None,
+            client_id: None,
+            code_verifier: None,
+        };
+        let res = handle_token_request(&storage, &good_req, Mode::Disabled, None, 1_700_000_020)
+            .await
+            .expect("the legitimate holder must still be able to redeem the code afterwards");
+
+        assert!(!res.access_token.is_empty());
+    }
+
+    /// Redeeming a `pre-authorized_code` a second time, with the correct
+    /// `tx_code` both times, must be rejected: OpenID4VCI 1.0 Credential Offer
+    /// (L396) requires the code be single use. GAP-VCI-01's regression is
+    /// covered end-to-end by
+    /// `vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance`
+    /// in `tests/conformance_vci.rs`; this is the crate-local unit twin.
+    #[tokio::test]
+    async fn rejects_pre_authorized_code_replay_after_successful_redemption() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-tok-replay");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let req = TokenRequest {
+            grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: Some("4242".to_string()),
+            code: None,
+            redirect_uri: None,
+            client_id: None,
+            code_verifier: None,
+        };
+
+        handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+            .await
+            .expect("first redemption must succeed");
+
+        let replay_err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_020)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(replay_err, IssuanceError::InvalidGrant(_)));
     }
 
     #[tokio::test]

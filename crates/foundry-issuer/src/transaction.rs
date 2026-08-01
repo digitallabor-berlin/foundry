@@ -182,6 +182,19 @@ pub async fn invalidate_authorization_code(
     Ok(())
 }
 
+/// Delete the single-use pre-authorized-code secondary index, so a replayed
+/// `pre-authorized_code` can no longer resolve to this transaction.
+///
+/// OpenID4VCI 1.0 Credential Offer (L396): `pre-authorized_code` MUST be
+/// short-lived and single use. Mirrors `invalidate_authorization_code` above.
+pub async fn invalidate_pre_authorized_code(
+    storage: &dyn Storage,
+    code: &str,
+) -> Result<(), IssuanceError> {
+    storage.delete_kv(PRE_AUTH_NS, code).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

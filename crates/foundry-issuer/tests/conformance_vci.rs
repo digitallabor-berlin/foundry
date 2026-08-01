@@ -234,7 +234,6 @@ async fn vci_0012_pre_authorized_code_is_present_and_distinct_per_offer() {
 }
 
 #[tokio::test]
-#[ignore = "GAP-VCI-01: OpenID4VCI Credential Offer (L396) — pre-authorized_code MUST be single use"]
 async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance() {
     let cfg = test_config();
     let storage = test_storage().await;
