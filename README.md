@@ -302,6 +302,51 @@ cargo run -p foundry -- cert issue \
 
 ---
 
+## Wallet Attestation & Client Attestation Proof-of-Possession
+
+Foundry gates `POST /token` on `issuer.wallet_attestation.mode`
+(`disabled` / `optional` / `required`), configured per-issuer:
+
+```yaml
+issuer:
+  wallet_attestation:
+    mode: required
+    trusted_anchors:
+      - name: wallet-provider-ca
+        certs: /path/to/wallet-provider-ca.pem
+    pop_max_age_secs: 300   # optional; default shown
+```
+
+- `mode: disabled` — no attestation is required or checked, even if a wallet
+  sends one.
+- `mode: optional` — a wallet may omit the `OAuth-Client-Attestation` header
+  entirely; but if it sends one, the attestation (and, since the field below,
+  its accompanying proof-of-possession) MUST be valid.
+- `mode: required` — a wallet MUST send `OAuth-Client-Attestation`.
+- `pop_max_age_secs` (`u64`, default `300`) — the ABCA (Attestation-Based
+  Client Authentication) draft's sliding-window staleness bound for the
+  Client Attestation PoP JWT's `iat` claim, per `draft-ietf-oauth-
+  attestation-based-client-auth` §10.6/§12.1.
+
+**Behaviour change:** as of this release, whenever a Wallet Attestation JWT
+(`OAuth-Client-Attestation`) is presented — under **both** `optional` and
+`required` mode — the request MUST also carry a matching
+`OAuth-Client-Attestation-PoP` header: a JWT proving possession of the
+private key the attestation's `cnf.jwk` claim attests to, per
+`draft-ietf-oauth-attestation-based-client-auth` §5.2/§6.2. A Wallet
+Attestation presented with no PoP is now rejected with HTTP 400
+`{"error": "invalid_client"}`, where previously it was accepted outright
+(GAP-VCI-14). **Deployments running `wallet_attestation.mode: required` (or
+`optional` with wallets that send an attestation) must upgrade their wallet
+client to send the PoP header before upgrading the issuer**, or existing
+wallets will start failing `/token` requests.
+
+The PoP's `jti` is claimed exactly once via an atomic anti-replay check
+(`Storage::insert_kv_if_absent`), so a captured-and-resent PoP is rejected on
+its second use even if it is otherwise perfectly valid and unexpired.
+
+---
+
 ## Logging & Observability
 
 Every HTTP request on both listeners produces one structured log record, and

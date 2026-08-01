@@ -33,7 +33,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
 | `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
 | `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
-| `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode` |
+| `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt`, and owns anti-replay claiming of its `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config` |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
@@ -46,7 +46,7 @@ Entry point → the endpoint that drives it (routes defined in
 | Entry point | Endpoint | Listener |
 |---|---|---|
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
-| `handle_token_request(TokenRequest) -> TokenResponse` | `POST /token` | wallet-facing |
+| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
 | `handle_credential_request(CredentialRequest) -> CredentialResponse` | `POST /credential` | wallet-facing |
 | `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
@@ -133,10 +133,22 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   with no TTL. Exhaustion after `MAX_ATTEMPTS` draws yields
   `StatusListExhausted`, so a small configured `list_size` will start failing
   long before the list is genuinely full.
-- **`DefaultAttestationVerifier` only checks presence, not validity.** With
-  `Mode::Required` it errors when the attestation header/data is absent, and
-  otherwise returns `Ok(())`. It does **not** cryptographically verify anything —
-  do not treat a passing attestation check as a security guarantee.
+- **`DefaultAttestationVerifier::verify_wallet_attestation` fully verifies the
+  Wallet Attestation JWT** (signature, `x5c` chain against `trusted_anchors`,
+  `exp`/`nbf`, `cnf.jwk`/`sub` presence) **and, since GAP-VCI-14's closure, the
+  accompanying Client Attestation PoP JWT** (ABCA draft -07 §5.2 — 9 checks,
+  `validate_client_attestation_pop_jwt`), returning `Result<Option<PopClaims>,
+  IssuanceError>`. Under both `Mode::Required` and `Mode::Optional`, a present
+  attestation without a PoP is rejected (ABCA §6.2 rule 2) — see the 9-row mode
+  matrix in `attestation.rs`'s own tests. `KeyAttestationVerifier::verify_key_attestation`
+  (a distinct, unrelated mechanism for credential-key PoP) is unused dead code
+  with no caller anywhere in the workspace and still only checks presence —
+  do not confuse the two verifiers.
+- **`claim_pop_jti` is the sole anti-replay mechanism for the PoP's `jti`.** It
+  is keyed on a hash of `(iss, jti)`, not bare `jti` — a bare-`jti` namespace
+  would let one wallet pre-claim `jti` values and deny service to another.
+  `handle_token_request` calls it strictly before any grant work, so a replayed
+  PoP can never burn a legitimate holder's `pre-authorized_code`.
 - **Only the pre-authorized-code grant is supported.** `handle_token_request`
   rejects any `grant_type` other than
   `urn:ietf:params:oauth:grant-type:pre-authorized_code` with

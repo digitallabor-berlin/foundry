@@ -45,11 +45,19 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **Config:** `Config` (fields: `server`, `storage`, `keys`, `trust_anchors`,
   `issuer`, `credential_types`, `verifier`), loaded via `Config::load(&Path)`.
   `Mode` (`Required`/`Optional`/`Disabled`) drives attestation gating in
-  `foundry-issuer`.
+  `foundry-issuer`. `AttestationMode.pop_max_age_secs: u64` (default 300) is the
+  ABCA draft -07 sliding-window staleness bound for Client Attestation PoP JWTs
+  (GAP-VCI-14); applicable only to `issuer.wallet_attestation`, present but
+  unused by `issuer.key_attestation` since that mechanism has no PoP JWT.
 - **Crypto:** `Signer` trait, `FileSigner`, `SignatureAlgorithm` (with `as_str`,
   `FromStr` — case-insensitive, `Display`).
-- **Storage:** `Storage` trait — `put_kv(namespace, key, value, expires_at)`,
-  `get_kv`, `delete_kv`, `purge_expired(now_unix) -> u64`. Impl:
+- **Storage:** `Storage` trait — `put_kv(namespace, key, value, expires_at)`
+  (upsert), `get_kv`, `delete_kv`, `purge_expired(now_unix) -> u64`, and
+  `insert_kv_if_absent(namespace, key, value, expires_at) -> Result<bool, _>` —
+  atomic claim semantics (`INSERT ... ON CONFLICT DO NOTHING`) distinct from
+  `put_kv`'s upsert; a rejected (`false`) claim leaves the existing row
+  untouched. This is the primitive `foundry-issuer`'s `claim_pop_jti` builds
+  Client Attestation PoP `jti` replay detection on (GAP-VCI-14). Impl:
   `SqliteStorage::connect(path)`.
 - **Trust:** `TrustStore` (`from_pems`, `from_config`, `is_empty`),
   `validate_chain(leaf_pem, intermediates, store, now_unix)`, plus helpers
