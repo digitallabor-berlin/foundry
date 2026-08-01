@@ -217,11 +217,11 @@ circumvented with a wildcard.
 
 **Verify:** `cargo test -p foundry-issuer -p foundry`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output (single-threaded; see plan note on the pre-existing `log_capture` harness flake)
+- [x] Commit
 
 ---
 
@@ -587,3 +587,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 1 (vendored ABCA draft -07 verbatim to `docs/specs/`; AGENTS.md §4.4 gained its row) — `a5fea96`
 - 2026-08-01 — Task 2 (`Storage::insert_kv_if_absent` — atomic INSERT ... ON CONFLICT DO NOTHING; 6 tests incl. no-overwrite-on-rejection and per-namespace scoping) — `5183bee`
 - 2026-08-01 — Task 3 (`AttestationMode.pop_max_age_secs`, default 300; 46-literal ripple across 19 files via a brace-aware script, isolated from semantic tasks; caught and fixed the script's own `-> AttestationMode {` false-positive bug via full revert + re-run before committing; 4 deserialization tests) — `7242464`
+- 2026-08-01 — Task 4 (`IssuanceError::InvalidClient` -> HTTP 400 `invalid_client` per RFC 6749 sect-5.2, migrated onto `wallet_error_response`; admin surface falls through its existing catch-all to 500; identified and characterized a pre-existing `log_capture` test-harness flake in server.rs — confirmed present on the base commit before this task, out of scope, noted for final review) — `08147e0`
