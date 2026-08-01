@@ -52,19 +52,24 @@ lines moved.
 
 **Files:** `crates/foundry-core/src/obs.rs`
 
-- [ ] Add `pub fn thumbprint_bytes(jwk: &serde_json::Value) -> Result<[u8; 32], String>`
+- [x] Add `pub fn thumbprint_bytes(jwk: &serde_json::Value) -> Result<[u8; 32], String>`
       carrying the existing RFC 7638 §3.2 canonicalization (required members
       only, lexicographic via `BTreeMap`, no whitespace).
-- [ ] Refactor `thumbprint()` to delegate, mapping `Err` → `INVALID_JWK_THUMBPRINT`.
+- [x] Refactor `thumbprint()` to delegate, mapping `Err` → `INVALID_JWK_THUMBPRINT`.
       **One** canonicalization implementation must remain.
-- [ ] Test: `thumbprint_bytes` of the OpenID4VP example JWK (spec L2878-L2886)
+- [x] Test: `thumbprint_bytes` of the OpenID4VP example JWK (spec L2878-L2886)
       == `4283ec927ae0f208daaa2d026a814f2b22dca52cf85ffa8f3f8626c6bd669047`.
-- [ ] Test: `thumbprint_bytes` returns `Err` for each input where `thumbprint`
+- [x] Test: `thumbprint_bytes` returns `Err` for each input where `thumbprint`
       returns the placeholder (non-object, missing `kty`, unknown `kty`,
-      missing required member).
-- [ ] Confirm the pre-existing `thumbprint_matches_rfc7638_vector` and
-      `thumbprint_never_contains_key_material` tests still pass **unmodified**.
-- [ ] Gates ×4.
+      missing required member) — asserted as a *paired* contract in one test.
+- [x] Confirm the pre-existing `thumbprint_matches_rfc7638_vector` and
+      `thumbprint_never_contains_key_material` tests still pass **unmodified**
+      — 15/15 `obs` tests green, no pre-existing test edited.
+- [x] Gates ×4. One `cargo fmt` fixup applied and re-verified.
+
+**Landed:** `b6835c8`. `--ignored` baseline re-confirmed unchanged at 23
+failing gap tests + 1 passing E2E (`full_flow_issue_verify_revoke_reverify`),
+as expected for a purely additive change.
 
 **Done when:** two independent KATs (RFC 7638 §3.1 and OpenID4VP's example JWK)
 pass against a single canonicalization.
