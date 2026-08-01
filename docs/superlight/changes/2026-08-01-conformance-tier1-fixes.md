@@ -219,18 +219,23 @@ Noted during Task 3 but not addressed: the read-then-write allocation pattern
 in `allocate_status_index` is not atomic under concurrent callers. Explicitly
 a non-goal for this run per the spec.
 
-### 4. A test-flake was investigated and ruled a pre-existing environmental blip, not a regression
+### 4. A test-flake recurred twice during this run, investigated both times, ruled a pre-existing environmental blip rather than a regression
 
 During Task 4 verification, `attestation::tests::rejects_nonce_not_minted_by_this_issuer`
 and `attestation::tests::rejects_expired_attestation` both failed once in a
-single `cargo test -p foundry-issuer --lib` run. Neither test was touched by
-this branch. Re-ran the same command 20× in immediate succession afterward
-with zero failures, and the single failing run could not be reproduced on
-demand — consistent with a real-wall-clock timing sensitivity in tests that
-check certificate/attestation validity windows against `SystemTime::now()`,
-not a defect introduced here. Not filed as a gap since it is a test-harness
-timing property, not a spec-conformance question; worth a look if it
-recurs.
+single `cargo test -p foundry-issuer --lib` run; 20 immediate re-runs were
+clean. During the final post-changelog gate re-check (Task 6, after all code
+was already committed), `cargo test --workspace` failed once in
+`foundry-issuer --test conformance_vci` with no test name captured in the
+first pass; a second run of that binary alone passed clean (32/0/13), and 15
+further immediate re-runs were all clean. Neither occurrence was reproducible
+on demand, and neither touched a test this branch modified. Consistent with a
+real-wall-clock timing sensitivity in tests that check certificate/attestation
+validity windows (`exp`/`nbf`) against `SystemTime::now()`, not a defect
+introduced here — but flagged twice now, in two different sessions, so it is
+worth a dedicated look (e.g. mocking the clock in these specific tests) if it
+recurs a third time. Not filed as its own conformance gap since it is a
+test-harness timing property, not a spec-conformance question.
 
 ### 5. The 2026-07-31 audit itself still has no changelog
 
