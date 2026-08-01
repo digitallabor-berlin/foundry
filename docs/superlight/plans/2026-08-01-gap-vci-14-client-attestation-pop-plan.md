@@ -492,11 +492,19 @@ two register rows that cite the old name.
 
 **Verify:** `cargo test -p foundry-issuer`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — `cargo test --workspace` shows exactly one expected failure
+  (`every_test_named_by_the_report_exists`, Task 11's job); `cargo test
+  -p foundry-issuer` and `-p foundry` both clean; clippy/fmt clean
+- [x] Commit
+
+Deviation: minimal compile-preserving placeholder fix to `server.rs`'s
+call site (`pop_header: None`, `issuer_identifier: ""`), same pattern as
+Task 8's `token.rs` fix; confirmed no `foundry` crate test sends an
+`OAuth-Client-Attestation` header, so unaffected. Full HTTP wiring is
+Task 10.
 
 ---
 
@@ -610,3 +618,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 6 (`validate_client_attestation_pop_jwt`, 9 ABCA sect-5.2 checks each citing its clause; 29 tests; no `exp` check by design, pinned by a dedicated test; temporary `#[allow(dead_code)]` on the new items pending Task 8's wiring) — `45ea004`
 - 2026-08-01 — Task 7 (`claim_pop_jti` atomic `(iss, jti)` replay claim via `insert_kv_if_absent`, hashed key, `expires_at` derived solely from `claims.iat`; 6 tests; removed the now-unnecessary `#[allow(dead_code)]` from `POP_CLOCK_SKEW_SECS`) — `d7714e4`
 - 2026-08-01 — Task 8 (`verify_wallet_attestation` 9-row mode matrix; all rows tested; minimal placeholder fix to `token.rs`'s call site to keep the crate compiling ahead of Task 9's full wiring) — `39ce70a`
+- 2026-08-01 — Task 9 (`handle_token_request` gains `pop_header`/`issuer_identifier`; wires `claim_pop_jti` + ABCA sect-6.3 `client_id` check; renamed and un-`#[ignore]`d the GAP-VCI-14 gap test; 7 new tests; updated 27 call sites across `token.rs`/`conformance_vci.rs`; minimal placeholder fix to `server.rs`'s call site pending Task 10) — `c00e951`
