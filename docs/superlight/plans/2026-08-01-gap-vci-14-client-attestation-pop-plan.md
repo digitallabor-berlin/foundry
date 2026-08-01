@@ -374,11 +374,12 @@ second source of truth for the same fact.
 
 **Verify:** `cargo test -p foundry-issuer`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — full `cargo test --workspace`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --check` all clean
+- [x] Commit
 
 ---
 
@@ -600,3 +601,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 4 (`IssuanceError::InvalidClient` -> HTTP 400 `invalid_client` per RFC 6749 sect-5.2, migrated onto `wallet_error_response`; admin surface falls through its existing catch-all to 500; identified and characterized a pre-existing `log_capture` test-harness flake in server.rs — confirmed present on the base commit before this task, out of scope, noted for final review) — `08147e0`
 - 2026-08-01 — Task 5 (`ValidatedAttestation { sub, cnf_jwk }` returned from `validate_wallet_attestation_jwt`; migrated 21/22 `InvalidRequest` sites to `InvalidClient`, deliberately excluding the unused `verify_key_attestation` dead-code path as a distinct non-client-auth mechanism; `token.rs` needed no edits, contrary to the plan's file list, since it only calls the unchanged trait method) — `47e1c53`
 - 2026-08-01 — Task 6 (`validate_client_attestation_pop_jwt`, 9 ABCA sect-5.2 checks each citing its clause; 29 tests; no `exp` check by design, pinned by a dedicated test; temporary `#[allow(dead_code)]` on the new items pending Task 8's wiring) — `45ea004`
+- 2026-08-01 — Task 7 (`claim_pop_jti` atomic `(iss, jti)` replay claim via `insert_kv_if_absent`, hashed key, `expires_at` derived solely from `claims.iat`; 6 tests; removed the now-unnecessary `#[allow(dead_code)]` from `POP_CLOCK_SKEW_SECS`) — `d7714e4`
