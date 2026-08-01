@@ -11,13 +11,23 @@ use josekit::jws::ES256;
 use sha2::{Digest, Sha256};
 
 pub trait WalletAttestationVerifier: Send + Sync {
+    /// Returns `Ok(Some(claims))` when both a Wallet Attestation and a
+    /// matching Client Attestation PoP JWT were present and verified;
+    /// `Ok(None)` when `mode` is `Disabled`, or both are absent under
+    /// `Optional`. Stays synchronous and takes no `Storage` -- the anti-replay
+    /// claim (`claim_pop_jti`) is a separate step so a database is never
+    /// required to unit-test the crypto/claim checks here.
+    #[allow(clippy::too_many_arguments)]
     fn verify_wallet_attestation(
         &self,
         mode: Mode,
         attestation_header: Option<&str>,
+        pop_header: Option<&str>,
         trust_store: &TrustStore,
+        expected_aud: &str,
         now_unix: i64,
-    ) -> Result<(), IssuanceError>;
+        max_age_secs: u64,
+    ) -> Result<Option<PopClaims>, IssuanceError>;
 }
 
 pub trait KeyAttestationVerifier: Send + Sync {
@@ -230,9 +240,6 @@ const POP_CLOCK_SKEW_SECS: i64 = 60;
 /// for the full table this mirrors. `skip_all` is mandatory: the argument is
 /// the PoP JWT itself.
 ///
-/// `#[allow(dead_code)]`: not yet called from production code -- Task 8 wires
-/// this into `verify_wallet_attestation`. Only `#[cfg(test)]` uses it so far.
-#[allow(dead_code)]
 #[tracing::instrument(skip_all)]
 fn validate_client_attestation_pop_jwt(
     pop_jwt: &str,
@@ -591,36 +598,64 @@ pub fn verify_key_attestation_jwt(
 pub struct DefaultAttestationVerifier;
 
 impl WalletAttestationVerifier for DefaultAttestationVerifier {
+    #[allow(clippy::too_many_arguments)]
     fn verify_wallet_attestation(
         &self,
         mode: Mode,
         attestation_header: Option<&str>,
+        pop_header: Option<&str>,
         trust_store: &TrustStore,
+        expected_aud: &str,
         now_unix: i64,
-    ) -> Result<(), IssuanceError> {
-        // `validate_wallet_attestation_jwt` now returns `ValidatedAttestation`
-        // (Task 5), but this trait's own signature does not change until
-        // Task 8 rewires it to return `Option<PopClaims>`; discard it here.
-        match mode {
-            // Disabled skips validation entirely, even if a header happens
-            // to be present.
-            Mode::Disabled => Ok(()),
-            Mode::Required => {
-                let jwt = attestation_header.ok_or_else(|| {
-                    IssuanceError::InvalidClient("wallet attestation is required".into())
-                })?;
-                validate_wallet_attestation_jwt(jwt, trust_store, now_unix).map(|_| ())
-            }
-            // Optional tolerates absence, but a *present* attestation must
-            // still be a validly signed, trust-anchored JWT — presence and
-            // validity are distinct checks (GAP-HAIP-04).
-            Mode::Optional => match attestation_header {
-                Some(jwt) => {
-                    validate_wallet_attestation_jwt(jwt, trust_store, now_unix).map(|_| ())
-                }
-                None => Ok(()),
-            },
+        max_age_secs: u64,
+    ) -> Result<Option<PopClaims>, IssuanceError> {
+        // Disabled skips validation entirely, even if either header happens
+        // to be present and structurally invalid.
+        if matches!(mode, Mode::Disabled) {
+            return Ok(None);
         }
+
+        let attestation_jwt = match attestation_header {
+            Some(jwt) => jwt,
+            None => {
+                if matches!(mode, Mode::Required) {
+                    return Err(IssuanceError::InvalidClient(
+                        "wallet attestation is required".into(),
+                    ));
+                }
+                // Optional + absent attestation: a PoP without an attestation
+                // makes no sense -- there is no cnf.jwk to verify it against.
+                if pop_header.is_some() {
+                    return Err(IssuanceError::InvalidClient(
+                        "client attestation pop present without a wallet attestation".into(),
+                    ));
+                }
+                return Ok(None);
+            }
+        };
+
+        // A *present* attestation must still be a validly signed,
+        // trust-anchored JWT -- presence and validity are distinct checks
+        // (GAP-HAIP-04), under both Required and Optional.
+        let attestation = validate_wallet_attestation_jwt(attestation_jwt, trust_store, now_unix)?;
+
+        // ABCA §6.2 rule 2: exactly one Client Attestation PoP JWT MUST
+        // accompany a present Wallet Attestation, under both Required and
+        // Optional (GAP-VCI-14).
+        let pop_jwt = pop_header.ok_or_else(|| {
+            IssuanceError::InvalidClient(
+                "client attestation pop is required when a wallet attestation is present".into(),
+            )
+        })?;
+
+        let claims = validate_client_attestation_pop_jwt(
+            pop_jwt,
+            &attestation,
+            expected_aud,
+            now_unix,
+            max_age_secs,
+        )?;
+        Ok(Some(claims))
     }
 }
 
@@ -738,17 +773,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn accepts_a_validly_signed_trust_anchored_wallet_attestation() {
-        let now = now_secs();
-        let (jwt, ca_pem) = signed_wallet_attestation(now + 100_000);
-        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
-
-        DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
-            .expect("a validly signed, trust-anchored attestation must be accepted");
-    }
-
     /// GAP-VCI-14: `sub` and `cnf_jwk` are the two claims the Client
     /// Attestation PoP JWT is verified against (Task 6) -- this proves they
     /// actually come back from a valid attestation, not just that validation
@@ -808,7 +832,15 @@ mod tests {
         let store = TrustStore::from_pems(&[]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some("not-a-jwt-at-all"), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some("not-a-jwt-at-all"),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -821,7 +853,15 @@ mod tests {
         let store = TrustStore::from_pems(&[other_ca.cert_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::Trust(_)));
     }
@@ -841,7 +881,15 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -861,7 +909,15 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -881,7 +937,15 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -901,7 +965,15 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -913,56 +985,247 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&jwt),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// A present-but-invalid attestation must still be rejected under
+    /// Optional -- presence-vs-validity is the distinction GAP-HAIP-04 found
+    /// collapsed; Optional only governs whether *absence* is tolerated, not
+    /// whether a present header must be valid.
+    #[test]
+    fn optional_mode_rejects_a_present_but_invalid_attestation() {
+        let now = now_secs();
+        let store = TrustStore::from_pems(&[]).unwrap();
+
+        let err = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Optional,
+                Some("not-a-jwt-at-all"),
+                None,
+                &store,
+                POP_TEST_AUD,
+                now,
+                300,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    // -- verify_wallet_attestation mode matrix (Task 8, GAP-VCI-14) --
+
+    const WALLET_ATTESTATION_SUB: &str = "https://wallet.example.org";
+    const MATRIX_AUD: &str = "https://as.example.com/matrix";
+
+    /// A fresh EC P-256 keypair usable both as a Wallet Attestation's
+    /// `cnf.jwk` and to sign a matching Client Attestation PoP JWT.
+    fn fresh_cnf_keypair() -> (Jwk, impl JwsSigner) {
+        let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut public = kp.to_jwk_public_key();
+        public.set_algorithm("ES256");
+        let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+        (public, signer)
+    }
+
+    /// A fully-formed, validly signed Wallet Attestation (chained to a fresh
+    /// CA) plus a Client Attestation PoP JWT that verifies against its
+    /// `cnf.jwk` -- the "present, present" happy path the mode matrix
+    /// accepts. Returns `(attestation_jwt, pop_jwt, ca_cert_pem)`.
+    fn matched_attestation_and_pop(now: i64, aud: &str) -> (String, String, String) {
+        let (cnf_jwk, signer) = fresh_cnf_keypair();
+        let cnf_jwk_value = serde_json::to_value(&cnf_jwk).unwrap();
+        let (attestation_jwt, ca_pem) = wallet_attestation_jwt_custom(
+            "ES256",
+            "oauth-client-attestation+jwt",
+            true,
+            Some(now + 100_000),
+            None,
+            Some(cnf_jwk_value),
+            true,
+        );
+        let hdr = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let payload = pop_payload(
+            WALLET_ATTESTATION_SUB,
+            serde_json::json!(aud),
+            "jti-matrix-1",
+            now,
+        );
+        let pop_jwt = sign_pop(&hdr, &payload, &signer);
+        (attestation_jwt, pop_jwt, ca_pem)
+    }
+
+    #[test]
+    fn matrix_disabled_any_any_is_ok_none_with_no_validation() {
+        let now = now_secs();
+        let store = TrustStore::from_pems(&[]).unwrap();
+
+        let result = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Disabled,
+                Some("not-a-jwt-at-all"),
+                Some("also-not-a-jwt"),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
+            .expect("Disabled must skip all validation, even with structurally invalid inputs");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn matrix_required_absent_absent_rejects() {
+        let now = now_secs();
+        let store = TrustStore::from_pems(&[]).unwrap();
+
+        let err = DefaultAttestationVerifier
+            .verify_wallet_attestation(Mode::Required, None, None, &store, MATRIX_AUD, now, 300)
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
-    fn optional_mode_validates_a_present_attestation_but_tolerates_absence() {
+    fn matrix_required_absent_present_rejects() {
         let now = now_secs();
-        let (jwt, ca_pem) = signed_wallet_attestation(now + 100_000);
+        let store = TrustStore::from_pems(&[]).unwrap();
+
+        let err = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Required,
+                None,
+                Some("some-pop-jwt"),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// ABCA §6.2 rule 2.
+    #[test]
+    fn matrix_required_present_absent_rejects() {
+        let now = now_secs();
+        let (attestation_jwt, _pop_jwt, ca_pem) = matched_attestation_and_pop(now, MATRIX_AUD);
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Optional, Some(&jwt), &store, now)
-            .expect("Optional mode must still validate a present attestation");
-        DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Optional, None, &store, now)
-            .expect("Optional mode must tolerate absence");
-
-        // And a present-but-invalid attestation must still be rejected under
-        // Optional -- presence-vs-validity is the distinction GAP-HAIP-04
-        // found collapsed; Optional only governs whether absence is
-        // tolerated, not whether a present header must be valid.
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Optional, Some("not-a-jwt-at-all"), &store, now)
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&attestation_jwt),
+                None,
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
-    fn disabled_mode_skips_validation_entirely() {
+    fn matrix_required_present_present_returns_some_claims() {
         let now = now_secs();
-        let store = TrustStore::from_pems(&[]).unwrap();
+        let (attestation_jwt, pop_jwt, ca_pem) = matched_attestation_and_pop(now, MATRIX_AUD);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
-        DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Disabled, None, &store, now)
-            .expect("Disabled must tolerate absence");
-        DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Disabled, Some("not-a-jwt-at-all"), &store, now)
-            .expect("Disabled must skip validation even when a header is present");
+        let result = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&attestation_jwt),
+                Some(&pop_jwt),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
+            .expect("both attestation and a matching PoP present must be accepted");
+        let claims = result.expect("must return Some(claims)");
+        assert_eq!(claims.iss, WALLET_ATTESTATION_SUB);
     }
 
     #[test]
-    fn required_mode_still_rejects_absence() {
+    fn matrix_optional_absent_absent_is_ok_none() {
+        let now = now_secs();
+        let store = TrustStore::from_pems(&[]).unwrap();
+
+        let result = DefaultAttestationVerifier
+            .verify_wallet_attestation(Mode::Optional, None, None, &store, MATRIX_AUD, now, 300)
+            .expect("Optional with both absent must be Ok(None)");
+        assert!(result.is_none());
+    }
+
+    /// No `cnf.jwk` exists to verify a PoP against when there is no
+    /// attestation.
+    #[test]
+    fn matrix_optional_absent_present_rejects() {
         let now = now_secs();
         let store = TrustStore::from_pems(&[]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, None, &store, now)
+            .verify_wallet_attestation(
+                Mode::Optional,
+                None,
+                Some("some-pop-jwt"),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// ABCA §6.2 rule 2 applies identically under Optional once an
+    /// attestation is present.
+    #[test]
+    fn matrix_optional_present_absent_rejects() {
+        let now = now_secs();
+        let (attestation_jwt, _pop_jwt, ca_pem) = matched_attestation_and_pop(now, MATRIX_AUD);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let err = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Optional,
+                Some(&attestation_jwt),
+                None,
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
+            .unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    #[test]
+    fn matrix_optional_present_present_returns_some_claims() {
+        let now = now_secs();
+        let (attestation_jwt, pop_jwt, ca_pem) = matched_attestation_and_pop(now, MATRIX_AUD);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let result = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Optional,
+                Some(&attestation_jwt),
+                Some(&pop_jwt),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+            )
+            .expect("both present and matching under Optional must be accepted");
+        assert!(result.is_some());
     }
 
     use super::verify_key_attestation_jwt;

@@ -60,12 +60,21 @@ pub async fn handle_token_request(
     );
     let verifier = DefaultAttestationVerifier;
     let trust_store = TrustStore::from_config(&wallet_attestation.trusted_anchors)?;
+    // TODO(Task 9): thread pop_header/issuer_identifier through this fn's own
+    // signature and consume the returned PopClaims via claim_pop_jti + the
+    // ABCA §6.3 client_id cross-check. Until then no caller of this function
+    // can supply a PoP, so only Mode::Disabled is exercised in practice --
+    // Required/Optional with an attestation present would (correctly) reject
+    // for a PoP that can never arrive.
     verifier
         .verify_wallet_attestation(
             wallet_attestation.mode.clone(),
             attestation_header,
+            None,
             &trust_store,
+            "",
             now_unix,
+            wallet_attestation.pop_max_age_secs,
         )
         .inspect_err(|e| {
             tracing::warn!(error.kind = e.kind(), "wallet attestation rejected");
