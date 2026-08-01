@@ -275,6 +275,10 @@ fn wallet_error_response(
         UnknownCredentialType(_) | ClaimValidation(_) => {
             (StatusCode::BAD_REQUEST, "invalid_credential_request")
         }
+        // RFC 6749 sect-5.2: a failed client-authentication mechanism (an absent,
+        // malformed, or unverifiable Wallet Attestation / Client Attestation
+        // PoP JWT, GAP-VCI-14) is `invalid_client`, not `invalid_request`.
+        InvalidClient(_) => (StatusCode::BAD_REQUEST, "invalid_client"),
         StatusListExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
@@ -1028,6 +1032,12 @@ mod tests {
             verifier_wallet_error_response(&VerificationError::Decryption("x".into())).0,
             StatusCode::BAD_REQUEST
         );
+        // GAP-VCI-14 / RFC 6749 sect-5.2: a failed client-authentication mechanism
+        // is invalid_client, distinct from a malformed request.
+        assert_eq!(
+            wallet_error_response(&IssuanceError::InvalidClient("x".into())).0,
+            StatusCode::BAD_REQUEST
+        );
         assert_eq!(
             verifier_wallet_error_response(&VerificationError::StatusUnavailable("x".into())).0,
             StatusCode::BAD_GATEWAY
@@ -1079,6 +1089,33 @@ mod tests {
             .fields
             .get("error.detail")
             .is_some_and(|d| d.contains("disk on fire")));
+    }
+
+    /// GAP-VCI-14: the wire body for a failed Client Attestation / PoP JWT is
+    /// `{"error": "invalid_client"}`, matching RFC 6749 sect-5.2 -- not
+    /// `invalid_request`, which the endpoint used to return for every
+    /// attestation failure regardless of cause.
+    #[test]
+    fn invalid_client_wire_body_is_rfc6749_shaped() {
+        let (status, Json(body)) =
+            wallet_error_response(&IssuanceError::InvalidClient("pop jti replayed".into()));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "invalid_client");
+        assert_eq!(
+            body["error_description"],
+            "invalid client: pop jti replayed"
+        );
+    }
+
+    /// `InvalidClient` has no admin-surface meaning (client authentication is a
+    /// wallet-facing concept) -- it must fall through the admin mapper's
+    /// existing catch-all to 500, not silently gain a bespoke admin status.
+    #[test]
+    fn invalid_client_is_not_special_cased_on_the_admin_surface() {
+        assert_eq!(
+            admin_error_response(&IssuanceError::InvalidClient("x".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     /// No production path in this file may throw an error object away on its way

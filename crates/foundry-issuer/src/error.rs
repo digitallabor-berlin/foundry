@@ -12,6 +12,13 @@ pub enum IssuanceError {
     UnknownCredentialType(String),
     #[error("claim validation failed: {0}")]
     ClaimValidation(String),
+    /// Client-authentication failures per RFC 6749 sect-5.2: an absent, malformed,
+    /// unsigned, expired, replayed, or otherwise unverifiable Wallet Attestation
+    /// or Client Attestation PoP JWT (ABCA draft -07). Deliberately distinct from
+    /// `InvalidRequest`, which is for malformed *request parameters*, not a
+    /// failed client-auth mechanism -- GAP-VCI-14.
+    #[error("invalid client: {0}")]
+    InvalidClient(String),
     #[error("status list exhausted while allocating an index for credential_type '{0}'")]
     StatusListExhausted(String),
     #[error(transparent)]
@@ -45,6 +52,7 @@ impl IssuanceError {
             IssuanceError::InvalidProof(_) => "invalid_proof",
             IssuanceError::UnknownCredentialType(_) => "unknown_credential_type",
             IssuanceError::ClaimValidation(_) => "claim_validation",
+            IssuanceError::InvalidClient(_) => "invalid_client",
             IssuanceError::StatusListExhausted(_) => "status_list_exhausted",
             IssuanceError::Storage(_) => "storage",
             IssuanceError::Crypto(_) => "crypto",
@@ -87,6 +95,7 @@ mod tests {
                 "unknown_credential_type",
             ),
             (IssuanceError::ClaimValidation(s()), "claim_validation"),
+            (IssuanceError::InvalidClient(s()), "invalid_client"),
             (
                 IssuanceError::StatusListExhausted(s()),
                 "status_list_exhausted",
@@ -116,5 +125,15 @@ mod tests {
         let err = IssuanceError::InvalidProof("a-very-specific-secret".to_string());
         assert_eq!(err.kind(), "invalid_proof");
         assert!(!err.kind().contains("secret"));
+    }
+
+    /// GAP-VCI-14: a failed Client Attestation PoP JWT never leaks into the
+    /// `Display` text either -- the detail string is operator-facing, not the
+    /// raw JWT.
+    #[test]
+    fn invalid_client_does_not_leak_a_raw_jwt_in_display() {
+        let err = IssuanceError::InvalidClient("pop jti already claimed".to_string());
+        assert_eq!(err.kind(), "invalid_client");
+        assert_eq!(err.to_string(), "invalid client: pop jti already claimed");
     }
 }
