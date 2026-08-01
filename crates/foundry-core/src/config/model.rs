@@ -140,6 +140,18 @@ pub struct AttestationMode {
     pub mode: Mode,
     #[serde(default)]
     pub trusted_anchors: Vec<TrustAnchor>,
+    /// Sliding-window duration (ABCA §10.6, §12.1) bounding how old a Client
+    /// Attestation PoP JWT's `iat` may be before it is rejected as stale; also
+    /// the basis for the `jti` replay-store row's `expires_at`. Consulted
+    /// **only** for `issuer.wallet_attestation` -- `AttestationMode` is shared
+    /// with `issuer.key_attestation`, which has no PoP mechanism and never
+    /// reads this field.
+    #[serde(default = "default_pop_max_age_secs")]
+    pub pop_max_age_secs: u64,
+}
+
+fn default_pop_max_age_secs() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -277,6 +289,55 @@ verifier:
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.logging.format, LogFormat::Human);
         assert!(!cfg.logging.sensitive_payloads);
+    }
+
+    /// Same shape as `MINIMAL` but with a caller-supplied `issuer:` block, so
+    /// these tests can vary `wallet_attestation`/`key_attestation` without
+    /// duplicating the `issuer:` key `MINIMAL` already declares.
+    fn parse_with_issuer(issuer_block: &str) -> Config {
+        let yaml = format!(
+            "server:\n  wallet_facing:\n    public_base_url: https://example.test\n    bind: 127.0.0.1:8080\n  admin:\n    bind: 127.0.0.1:8081\nstorage:\n  path: ./test.db\n{issuer_block}\nverifier:\n  client_id_scheme: x509_san_dns\n  signing_key: verifier-key\n"
+        );
+        parse(&yaml)
+    }
+
+    /// GAP-VCI-14: a config omitting `pop_max_age_secs` under
+    /// `wallet_attestation` must default to the ABCA section-10.6 sliding-
+    /// window value the spec fixes at 300s.
+    #[test]
+    fn wallet_attestation_without_pop_max_age_secs_defaults_to_300() {
+        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n  status_list:\n    enabled: false\n");
+        assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 300);
+    }
+
+    /// An explicit value must be honoured, not silently overridden by the
+    /// default.
+    #[test]
+    fn wallet_attestation_pop_max_age_secs_explicit_value_is_honoured() {
+        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n");
+        assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 60);
+    }
+
+    /// `0` is a legal (if operationally severe) value -- it must parse rather
+    /// than being silently clamped. Whether to reject 0 at the validation
+    /// layer is a separate, deliberately unmade decision (see the plan's
+    /// Task 3 note); this test only pins that the deserializer itself is not
+    /// the place that decision gets made implicitly.
+    #[test]
+    fn wallet_attestation_pop_max_age_secs_zero_still_parses() {
+        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 0\n  status_list:\n    enabled: false\n");
+        assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 0);
+    }
+
+    /// `AttestationMode` is shared by `key_attestation`, which has no PoP
+    /// mechanism. Setting the field there must still parse cleanly (the type
+    /// is shared) even though nothing in the codebase ever reads it for that
+    /// path -- proven here by the absence of any `key_attestation`-scoped
+    /// consumer, not by a runtime assertion.
+    #[test]
+    fn key_attestation_pop_max_age_secs_parses_but_has_no_consumer() {
+        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  key_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n");
+        assert_eq!(cfg.issuer.key_attestation.pop_max_age_secs, 60);
     }
 }
 

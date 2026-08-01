@@ -38,10 +38,12 @@ fn test_config(swagger_ui_enabled: bool) -> Config {
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             status_list: StatusListConfig {
                 enabled: false,

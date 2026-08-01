@@ -102,10 +102,12 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -595,10 +597,12 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -725,10 +729,12 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             status_list: StatusListConfig {
                 enabled: false,

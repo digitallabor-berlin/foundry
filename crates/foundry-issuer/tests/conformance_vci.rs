@@ -36,6 +36,7 @@ fn disabled_attestation() -> AttestationMode {
     AttestationMode {
         mode: Mode::Disabled,
         trusted_anchors: Vec::new(),
+        pop_max_age_secs: 300,
     }
 }
 
@@ -66,10 +67,12 @@ fn test_config() -> Config {
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -857,6 +860,7 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
     let required = AttestationMode {
         mode: Mode::Required,
         trusted_anchors: Vec::new(),
+        pop_max_age_secs: 300,
     };
     let result = handle_token_request(
         &storage,
@@ -1218,6 +1222,7 @@ async fn vci_0232_wallet_attestation_pop_jwt_is_never_verified() {
             name: "wallet-provider-ca".to_string(),
             certs: ca_path.to_str().unwrap().to_string(),
         }],
+        pop_max_age_secs: 300,
     };
 
     // No Client Attestation PoP JWT is presented at all -- there is no
