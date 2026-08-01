@@ -94,16 +94,20 @@ pub async fn create_offer(
     let status_list_index = if cfg.issuer.status_list.enabled {
         let list_size = cfg.issuer.status_list.list_size.unwrap_or(1_048_576);
         // The embedded status URI is always ".../1" (see credential.rs) regardless
-        // of credential_type_id — ensure the backing PersistentStatusList exists
-        // under that same literal key "1" before any credential can reference it.
+        // of credential_type_id — every credential type shares this one physical
+        // list. Ensure the backing PersistentStatusList exists under that same
+        // literal key "1" before any credential can reference it.
         // TODO(concurrency): this check-then-create is not atomic, matching the
         // same class of race already documented in allocate_status_index below;
         // acceptable for this phase's single-process dev deployment.
-        if load_status_list(storage, "1").await?.is_none() {
-            let fresh = PersistentStatusList::new("1", list_size, 2);
+        const STATUS_LIST_ID: &str = "1";
+        if load_status_list(storage, STATUS_LIST_ID).await?.is_none() {
+            let fresh = PersistentStatusList::new(STATUS_LIST_ID, list_size, 2);
             save_status_list(storage, &fresh).await?;
         }
-        Some(allocate_status_index(storage, &ct.id, list_size).await?)
+        // HAIP SD-JWT VC Profile (L329): dedup scope must equal the physical
+        // list scope, not credential_type_id — see status_index.rs.
+        Some(allocate_status_index(storage, STATUS_LIST_ID, &ct.id, list_size).await?)
     } else {
         None
     };

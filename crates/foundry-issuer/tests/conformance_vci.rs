@@ -1936,18 +1936,26 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
 /// about the storage key, not the physical bit position the index maps to
 /// in the one shared list every credential actually uses.
 #[tokio::test]
-#[ignore = "GAP-HAIP-06: HAIP SD-JWT VC Profile (L329) -- allocate_status_index deduplicates per credential_type_id, but every credential type shares the same physical status list URI ('.../1'), so two different credential types can be allocated the same index in the same physical list"]
 async fn gap_haip_06_status_index_can_collide_across_credential_types_sharing_one_list() {
     let storage = test_storage().await;
-    // Both draws target list_size=1, forcing a deterministic collision if
-    // (as in production) "pid" and "mdl" both ultimately point at the same
-    // physical status list URI (".../1").
-    let pid_idx = allocate_status_index(&storage, "pid", 1).await.unwrap();
-    let mdl_idx = allocate_status_index(&storage, "mdl", 1).await.unwrap();
-    assert_ne!(
-        pid_idx, mdl_idx,
-        "two credentials of different types that both embed the shared status \
-         list URI '.../1' must never be allocated the same index in that \
-         physical list, but both drew {pid_idx}"
+    // list_size=1 for the shared list_id "1" (as in production -- see
+    // create_offer.rs): with only one physical slot, a correct implementation
+    // must never let a second credential type draw into a slot a different
+    // type already occupies -- it must report the list exhausted instead.
+    // Deterministic in both directions: every draw against list_size=1 is
+    // forced to index 0, so a scheme keyed per credential_type_id (the bug)
+    // lets "mdl" independently succeed with the same index "pid" already took,
+    // while a scheme keyed per physical list (the fix) correctly exhausts.
+    let pid_idx = allocate_status_index(&storage, "1", "pid", 1)
+        .await
+        .unwrap();
+    assert_eq!(pid_idx, 0);
+
+    let mdl_result = allocate_status_index(&storage, "1", "mdl", 1).await;
+    assert!(
+        mdl_result.is_err(),
+        "a second credential type must not be able to draw an index into a physical \
+         status list whose only slot index {pid_idx} is already taken by a different \
+         credential type, but got {mdl_result:?}"
     );
 }

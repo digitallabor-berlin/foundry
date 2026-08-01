@@ -12,7 +12,7 @@ pub enum IssuanceError {
     UnknownCredentialType(String),
     #[error("claim validation failed: {0}")]
     ClaimValidation(String),
-    #[error("status list exhausted for credential_type '{0}'")]
+    #[error("status list exhausted while allocating an index for credential_type '{0}'")]
     StatusListExhausted(String),
     #[error(transparent)]
     Storage(#[from] foundry_core::error::StorageError),
