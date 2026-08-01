@@ -88,7 +88,14 @@ fn der_b64_to_pem(standard_b64: &str) -> Result<Vec<u8>, FormatError> {
 pub fn verify_sd_jwt_vc(
     presentation_string: &str,
     trust_store: &TrustStore,
-    expected_audience: &str,
+    // OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the
+    // DC API the KB-JWT `aud` MUST be the Origin prefixed with `origin:`, not
+    // the Client Identifier used elsewhere. Callers pass every audience value
+    // that is acceptable for this presentation (normally one), so the same
+    // verification path serves both the `x509_san_dns:<host>` Client
+    // Identifier (non-DC-API transports) and one or more `origin:<origin>`
+    // values (DC API transport) without a format-level branch here.
+    expected_audiences: &[String],
     expected_nonce: &str,
     now_unix: u64,
 ) -> Result<VerificationResult, FormatError> {
@@ -194,7 +201,7 @@ pub fn verify_sd_jwt_vc(
         kb,
         presentation_string,
         &holder_jwk,
-        expected_audience,
+        expected_audiences,
         expected_nonce,
     )?;
 
@@ -260,11 +267,23 @@ pub fn verify_sd_jwt_vc(
     })
 }
 
+/// Normalizes an audience/origin value for comparison by stripping a single
+/// trailing slash. OpenID4VP L2543 specifies the `origin:`-prefixed audience
+/// as exactly the serialized Origin (RFC 6454), which never carries a path
+/// and therefore never has a trailing slash in the strict reading -- but
+/// real-world Origin serialization and operator-supplied config values are
+/// not always disciplined about it, so both sides of the comparison are
+/// normalized the same way rather than requiring byte-exact agreement on a
+/// detail the spec text and RFC 6454 do not actually align on.
+fn normalize_audience(value: &str) -> &str {
+    value.trim_end_matches('/')
+}
+
 fn verify_kb_jwt(
     kb: &str,
     full_presentation: &str,
     holder_jwk: &Value,
-    expected_audience: &str,
+    expected_audiences: &[String],
     expected_nonce: &str,
 ) -> Result<(), FormatError> {
     let kb_parts: Vec<&str> = kb.split('.').collect();
@@ -287,7 +306,14 @@ fn verify_kb_jwt(
     )
     .map_err(|e| FormatError::KeyBinding(format!("kb payload json: {e}")))?;
 
-    if kb_payload.get("aud").and_then(|v| v.as_str()) != Some(expected_audience) {
+    let aud = kb_payload
+        .get("aud")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| FormatError::KeyBinding("KB-JWT aud claim missing".into()))?;
+    let aud_matches = expected_audiences
+        .iter()
+        .any(|expected| normalize_audience(expected) == normalize_audience(aud));
+    if !aud_matches {
         return Err(FormatError::KeyBinding("KB-JWT audience mismatch".into()));
     }
     if kb_payload.get("nonce").and_then(|v| v.as_str()) != Some(expected_nonce) {
@@ -394,7 +420,14 @@ mod tests {
         // Cert validity is stamped from the system clock by pki::issue_leaf, so
         // verify against the current time (the issuer iat/exp window spans it).
         let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let res = verify_sd_jwt_vc(&presentation, &trust_store, "audience", "nonce", now).unwrap();
+        let res = verify_sd_jwt_vc(
+            &presentation,
+            &trust_store,
+            &["audience".to_string()],
+            "nonce",
+            now,
+        )
+        .unwrap();
         assert_eq!(res.claims["given_name"], "Alice");
         assert_eq!(res.claims["sub"], "did:example:alice");
     }
@@ -423,8 +456,14 @@ mod tests {
         let presentation = attach_kb_jwt(issuer_pres, &holder_signer, "audience", "WRONG").unwrap();
 
         let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let err =
-            verify_sd_jwt_vc(&presentation, &trust_store, "audience", "nonce", now).unwrap_err();
+        let err = verify_sd_jwt_vc(
+            &presentation,
+            &trust_store,
+            &["audience".to_string()],
+            "nonce",
+            now,
+        )
+        .unwrap_err();
         assert!(matches!(err, FormatError::KeyBinding(_)));
     }
 }

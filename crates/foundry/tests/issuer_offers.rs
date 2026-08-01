@@ -70,6 +70,7 @@ fn test_config(status_list_enabled: bool) -> Config {
             transaction_data_hashes_alg: Vec::new(),
             named_queries: Vec::new(),
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     }

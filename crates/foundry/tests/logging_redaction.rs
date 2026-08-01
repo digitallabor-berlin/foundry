@@ -150,6 +150,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             transaction_data_hashes_alg: vec![],
             named_queries: vec![],
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     };

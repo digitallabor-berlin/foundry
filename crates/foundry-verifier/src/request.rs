@@ -511,6 +511,7 @@ mod tests {
                     }
                 })],
                 webhook: None,
+                dc_api_expected_origins: Vec::new(),
             },
             logging: LoggingConfig::default(),
         }

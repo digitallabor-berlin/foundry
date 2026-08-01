@@ -297,6 +297,16 @@ verifier:
   signing_key: verifier_signing
   response_encryption: { alg: ECDH-ES, enc: A128GCM }
   transaction_data_hashes_alg: [sha-256]
+  # OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the DC
+  # API transport the KB-JWT audience MUST be the browsing-context Origin
+  # prefixed with `origin:`, not this verifier's own Client Identifier -- an
+  # Origin is unknowable from `server.wallet_facing.public_base_url` alone
+  # (RFC 6454), so it must be listed explicitly for every site expected to
+  # invoke this verifier over the DC API. Left empty (the default), a single
+  # origin derived from `public_base_url` is accepted instead, which keeps an
+  # unconfigured single-origin deployment working but is only appropriate
+  # when the DC API caller and this server share an origin.
+  # dc_api_expected_origins: ["https://wallet-relying-party.example"]
   named_queries:
     # `credentials` must be non-empty (OpenID4VP 1.0 §6, enforced when a
     # verification request is created). The shipped `pid` type has no

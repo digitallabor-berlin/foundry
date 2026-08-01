@@ -383,6 +383,36 @@ async fn do_verify_vp_response(
     let host = crate::request::dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
 
+    // OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the
+    // DC API transport the KB-JWT `aud` MUST be the Origin prefixed with
+    // `origin:`, not the `x509_san_dns:<host>` Client Identifier used by
+    // every other transport. The Origin is a browsing-context property
+    // (RFC 6454) this server cannot derive on its own, so it is read from
+    // `verifier.dc_api_expected_origins` when configured; an unconfigured
+    // deployment falls back to a single origin derived from
+    // `public_base_url`, which keeps existing single-origin dev/test setups
+    // working without requiring the new config field.
+    let expected_audiences: Vec<String> = if tx.transport == "dc_api" {
+        if config.verifier.dc_api_expected_origins.is_empty() {
+            let fallback = format!("origin:{base_url}");
+            tracing::debug!(
+                fallback_origin = %fallback,
+                "verifier.dc_api_expected_origins is unset; falling back to an origin derived \
+                 from public_base_url"
+            );
+            vec![fallback]
+        } else {
+            config
+                .verifier
+                .dc_api_expected_origins
+                .iter()
+                .map(|origin| format!("origin:{origin}"))
+                .collect()
+        }
+    } else {
+        vec![client_id.clone()]
+    };
+
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| VerificationError::Crypto(e.to_string()))?
@@ -400,7 +430,7 @@ async fn do_verify_vp_response(
             let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
                 jwt_str,
                 &trust_store,
-                &client_id,
+                &expected_audiences,
                 &tx.nonce,
                 now_unix,
             )
@@ -591,6 +621,10 @@ mod tests {
                 transaction_data_hashes_alg: vec![],
                 named_queries: vec![],
                 webhook: None,
+                // Only `gap_vp_07_...` exercises the `dc_api` transport in
+                // this file; every other test here uses `direct_post` (see
+                // `sample_tx`), so this default is inert for them.
+                dc_api_expected_origins: vec!["https://verifier-website.example".to_string()],
             },
             logging: LoggingConfig::default(),
         };
@@ -1622,7 +1656,6 @@ mod tests {
     /// verifier would reject every genuinely conformant wallet's dc_api
     /// presentation.
     #[tokio::test]
-    #[ignore = "GAP-VP-07: OpenID4VP IETF SD-JWT VC Presentation Response (L3179) — over the DC API the KB-JWT `aud` claim MUST be the Origin prefixed with `origin:`, but do_verify_vp_response always expects the x509_san_dns Client Identifier instead, regardless of tx.transport"]
     async fn gap_vp_07_dc_api_transport_never_accepts_origin_prefixed_kb_jwt_audience() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
@@ -1683,6 +1716,249 @@ mod tests {
             "a conformant wallet's Origin-prefixed KB-JWT audience for a dc_api presentation \
              should verify, but do_verify_vp_response rejected it: {:?}",
             res.checks
+        );
+    }
+
+    /// OpenID4VP L2543: with `verifier.dc_api_expected_origins` left unconfigured
+    /// (the `#[serde(default)]` empty-Vec case), `do_verify_vp_response` falls
+    /// back to a single origin derived from `public_base_url` rather than
+    /// rejecting every dc_api presentation outright -- this keeps an
+    /// unconfigured single-origin deployment working.
+    #[tokio::test]
+    async fn dc_api_presentation_with_no_configured_origins_accepts_public_base_url_fallback() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (mut config, _trust_dir) = test_config(&ca_str);
+        config.verifier.dc_api_expected_origins = Vec::new();
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // test_config()'s public_base_url is "https://localhost:8443" -- the
+        // fallback audience the unconfigured branch derives.
+        let fallback_audience = "origin:https://localhost:8443";
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, fallback_audience, &tx.nonce).unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "an unconfigured deployment must fall back to a public_base_url-derived origin: {:?}",
+            res.checks
+        );
+    }
+
+    /// OpenID4VP L2543 / RFC 6454: the spec text and RFC 6454's own Origin
+    /// serialization do not agree on trailing-slash handling, so both a
+    /// configured origin and a presented audience are normalized the same way
+    /// before comparison -- neither a trailing slash on the config value nor
+    /// on the presented `aud` should defeat the match.
+    #[tokio::test]
+    async fn dc_api_audience_trailing_slash_variations_both_match() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (mut config, _trust_dir) = test_config(&ca_str);
+        // Configured origin carries a trailing slash; the presented `aud` does not.
+        config.verifier.dc_api_expected_origins =
+            vec!["https://verifier-website.example/".to_string()];
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let no_slash_audience = "origin:https://verifier-website.example";
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, no_slash_audience, &tx.nonce).unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "a configured origin with a trailing slash must still match a presented audience \
+             without one: {:?}",
+            res.checks
+        );
+    }
+
+    /// Guards against over-broadening the fix: only the `dc_api` transport
+    /// gets the Origin-prefixed audience treatment. A `request_uri` (or any
+    /// other) transport must still require the `x509_san_dns:<host>` Client
+    /// Identifier and reject an Origin-prefixed audience.
+    #[tokio::test]
+    async fn request_uri_transport_rejects_origin_prefixed_audience() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.transport = "request_uri".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let origin_audience = "origin:https://verifier-website.example";
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Failed(_)),
+            "a request_uri-transport presentation with an Origin-prefixed audience must still be \
+             rejected, got: {err:?}"
+        );
+    }
+
+    /// A `dc_api` presentation whose audience matches neither a configured
+    /// origin nor the `public_base_url`-derived fallback must be rejected --
+    /// the fix must not accept an arbitrary Origin.
+    #[tokio::test]
+    async fn dc_api_audience_matching_neither_configured_nor_fallback_is_rejected() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let unrelated_audience = "origin:https://some-other-site.example";
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, unrelated_audience, &tx.nonce).unwrap();
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Failed(_)),
+            "an audience matching neither a configured origin nor the fallback must be rejected, \
+             got: {err:?}"
         );
     }
 }

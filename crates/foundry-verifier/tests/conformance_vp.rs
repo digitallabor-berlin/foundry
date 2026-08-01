@@ -80,6 +80,7 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
             transaction_data_hashes_alg: vec!["sha-256".to_string()],
             named_queries: vec![],
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     }

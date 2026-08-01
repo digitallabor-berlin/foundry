@@ -292,4 +292,15 @@ pub struct VerifierConfig {
     pub named_queries: Vec<serde_json::Value>,
     #[serde(default)]
     pub webhook: Option<serde_json::Value>,
+    /// Origins (e.g. `https://wallet.example.org`) that this Verifier accepts
+    /// as the `origin:`-prefixed KB-JWT/response audience for the DC API
+    /// transport (OpenID4VP L2543, IETF SD-JWT VC Presentation Response
+    /// L3179). Deployment-specific and unknowable from `public_base_url`
+    /// alone -- an Origin is a browsing-context property (RFC 6454), not a
+    /// server identifier -- so it must be configured explicitly. When empty,
+    /// `do_verify_vp_response` falls back to a single origin derived from
+    /// `server.wallet_facing.public_base_url`, which keeps existing
+    /// single-origin dev/test deployments working unconfigured.
+    #[serde(default)]
+    pub dc_api_expected_origins: Vec<String>,
 }

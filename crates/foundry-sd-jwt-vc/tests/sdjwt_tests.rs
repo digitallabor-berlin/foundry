@@ -77,7 +77,7 @@ fn verifies_selective_claims() {
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
     let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
-    let res = verify_sd_jwt_vc(&pres, &trust_store, "aud", "nonce", now).unwrap();
+    let res = verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap();
     assert_eq!(res.claims["name"], "Bob");
 }
 
@@ -93,7 +93,8 @@ fn rejects_expired_sd_jwt() {
     let claims = make_claims(h_pub, (now - 3600) as i64, (now - 1800) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
     let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
-    let err = verify_sd_jwt_vc(&pres, &trust_store, "aud", "nonce", now).unwrap_err();
+    let err =
+        verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::Expired));
 }
 
@@ -110,7 +111,8 @@ fn rejects_untrusted_anchor() {
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
     let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
-    let err = verify_sd_jwt_vc(&pres, &trust_store, "aud", "nonce", now).unwrap_err();
+    let err =
+        verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::SignatureVerification(_)));
 }
 
@@ -126,7 +128,8 @@ fn rejects_kb_audience_mismatch() {
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
     // KB-JWT bound to the wrong audience.
     let pres = attach_kb_jwt(issuer_pres, &h_signer, "WRONG_AUD", "nonce").unwrap();
-    let err = verify_sd_jwt_vc(&pres, &trust_store, "aud", "nonce", now).unwrap_err();
+    let err =
+        verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::KeyBinding(_)));
 }
 
@@ -150,6 +153,7 @@ fn rejects_tampered_disclosure() {
     d.push(if last == 'A' { 'B' } else { 'A' });
     let tampered = segs.join("~");
 
-    let err = verify_sd_jwt_vc(&tampered, &trust_store, "aud", "nonce", now).unwrap_err();
+    let err =
+        verify_sd_jwt_vc(&tampered, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::KeyBinding(_)));
 }

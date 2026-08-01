@@ -210,6 +210,7 @@ mod tests {
                 transaction_data_hashes_alg: Vec::new(),
                 named_queries: Vec::new(),
                 webhook: None,
+                dc_api_expected_origins: Vec::new(),
             },
             logging: LoggingConfig::default(),
         }

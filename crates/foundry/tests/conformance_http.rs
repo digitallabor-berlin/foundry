@@ -134,6 +134,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             transaction_data_hashes_alg: vec![],
             named_queries: vec![],
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     };
@@ -614,6 +615,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             transaction_data_hashes_alg: vec![],
             named_queries: vec![],
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     };
@@ -755,6 +757,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             transaction_data_hashes_alg: vec![],
             named_queries: vec![],
             webhook: None,
+            dc_api_expected_origins: Vec::new(),
         },
         logging: LoggingConfig::default(),
     };
