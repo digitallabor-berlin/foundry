@@ -599,11 +599,15 @@ Docs:
   && cargo fmt --check
 ```
 
-- [ ] Red — n/a (documentation task)
-- [ ] Green — register and docs updated
-- [ ] Refactor — n/a
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — n/a (documentation task)
+- [x] Green — register and docs updated
+- [x] Refactor — n/a
+- [x] Verify — register count 20, no dangling `gap`-verdict citations of
+  GAP-VCI-14 (one explanatory code comment in `conformance_vci.rs` still
+  names the old test for rename context, which is intentional, not a
+  live reference); full `cargo test --workspace` 0 failures; clippy/fmt
+  clean
+- [x] Commit
 
 ---
 
@@ -621,3 +625,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 8 (`verify_wallet_attestation` 9-row mode matrix; all rows tested; minimal placeholder fix to `token.rs`'s call site to keep the crate compiling ahead of Task 9's full wiring) — `39ce70a`
 - 2026-08-01 — Task 9 (`handle_token_request` gains `pop_header`/`issuer_identifier`; wires `claim_pop_jti` + ABCA sect-6.3 `client_id` check; renamed and un-`#[ignore]`d the GAP-VCI-14 gap test; 7 new tests; updated 27 call sites across `token.rs`/`conformance_vci.rs`; minimal placeholder fix to `server.rs`'s call site pending Task 10) — `c00e951`
 - 2026-08-01 — Task 10 (HTTP wiring: `token_handler` reads `OAuth-Client-Attestation-PoP` and sources `issuer_identifier` from `build_authorization_server_metadata`; 4 HTTP-level tests; 2 behavioural redaction tests for the raw pop JWT/jti, positive control reconfirmed) — `5eabfb3`
+- 2026-08-01 — Task 11 (register: VCI-0232 and HAIP-0088 gap -> conforming, GAP-VCI-14 row deleted, 21 -> 20 rows, summary counts recounted; `crates/foundry-core/AGENTS.md`/`crates/foundry-issuer/AGENTS.md`/`README.md` updated; confirmed no `openapi.json`/`openapi-wallet.json` regeneration needed; full `cargo test --workspace` 0 failures) — `10ebf00`
