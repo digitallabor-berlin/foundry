@@ -1,5 +1,5 @@
 use crate::error::FormatError;
-use crate::types::{serialize_session_transcript, IssuerSignedItem, MobileSecurityObject};
+use crate::types::{IssuerSignedItem, MobileSecurityObject};
 use base64::{
     engine::general_purpose::STANDARD as B64STD,
     engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
@@ -109,12 +109,19 @@ fn cose_alg_str(alg: &coset::Algorithm) -> Result<&'static str, FormatError> {
     }
 }
 
+/// Verify an mdoc presentation: IssuerAuth chain and signature, MSO validity
+/// window, element digests, and the DeviceAuth signature over
+/// `session_transcript`.
+///
+/// `session_transcript` is supplied by the caller rather than derived here.
+/// Which `SessionTranscript` applies is an OpenID4VP question — it depends on
+/// the invocation method, the Response Mode, and the request's Origin — and
+/// this crate has no access to any of them. Build it with
+/// [`crate::types::build_session_transcript`].
 pub fn verify_mdoc(
     mdoc_bytes: &[u8],
     trust_store: &TrustStore,
-    client_id: Option<String>,
-    response_uri: Option<String>,
-    nonce: String,
+    session_transcript: &[u8],
     device_signature_cose_sign1_bytes: &[u8],
     now_unix: u64,
 ) -> Result<MdocVerificationResult, FormatError> {
@@ -284,8 +291,6 @@ pub fn verify_mdoc(
 
     let d_sign1 = CoseSign1::from_slice(device_signature_cose_sign1_bytes)
         .map_err(|e| FormatError::Deserialization(format!("device COSE: {e}")))?;
-    let transcript = serialize_session_transcript(client_id, response_uri, nonce)
-        .map_err(FormatError::Serialization)?;
     let d_alg = d_sign1
         .protected
         .header
@@ -299,7 +304,7 @@ pub fn verify_mdoc(
         d_sign1.protected.clone(),
         None,
         &[],
-        &transcript,
+        session_transcript,
     );
     verify_ecdsa(d_curve, &d_x, &d_y, &d_tbs, &d_sign1.signature)
         .map_err(|e| FormatError::KeyBinding(format!("device signature invalid: {e}")))?;
@@ -408,12 +413,13 @@ mod tests {
         };
         let mdoc_bytes = build_mdoc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let transcript = crate::types::serialize_session_transcript(
-            Some("client".to_string()),
-            Some("uri".to_string()),
-            "nonce".to_string(),
-        )
-        .unwrap();
+        let transcript =
+            crate::types::build_session_transcript(&crate::types::SessionTranscriptParams::DcApi {
+                origin: "https://client.example.com".to_string(),
+                nonce: "nonce".to_string(),
+                jwk_thumbprint: None,
+            })
+            .unwrap();
 
         let protected = coset::HeaderBuilder::new()
             .algorithm(coset::iana::Algorithm::ES256)
@@ -438,16 +444,7 @@ mod tests {
         // Cert validity is stamped from the system clock by pki::issue_leaf, so verify
         // against the current time (the MSO signed/validUntil window spans it).
         let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let res = verify_mdoc(
-            &mdoc_bytes,
-            &trust_store,
-            Some("client".to_string()),
-            Some("uri".to_string()),
-            "nonce".to_string(),
-            &d_sig_bytes,
-            now,
-        )
-        .unwrap();
+        let res = verify_mdoc(&mdoc_bytes, &trust_store, &transcript, &d_sig_bytes, now).unwrap();
         assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
         assert_eq!(res.doc_type, "org.iso.18013.5.1.mDL");
     }

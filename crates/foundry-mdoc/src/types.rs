@@ -181,32 +181,6 @@ fn encode_cbor(value: &ciborium::Value) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// SessionTranscript for OpenID4VP handover.
-/// TODO(interop): simplified handover; not the hashed OID4VPHandover from 18013-7.
-pub fn serialize_session_transcript(
-    client_id: Option<String>,
-    response_uri: Option<String>,
-    nonce: String,
-) -> Result<Vec<u8>, String> {
-    let handover = if let (Some(cid), Some(ruri)) = (client_id, response_uri) {
-        ciborium::Value::Array(vec![
-            ciborium::Value::Text(cid),
-            ciborium::Value::Text(ruri),
-            ciborium::Value::Text(nonce),
-        ])
-    } else {
-        ciborium::Value::Array(vec![
-            ciborium::Value::Text("https://localhost:8443".to_string()),
-            ciborium::Value::Text(nonce),
-        ])
-    };
-    let transcript =
-        ciborium::Value::Array(vec![ciborium::Value::Null, ciborium::Value::Null, handover]);
-    let mut bytes = Vec::new();
-    ciborium::into_writer(&transcript, &mut bytes).map_err(|e| e.to_string())?;
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

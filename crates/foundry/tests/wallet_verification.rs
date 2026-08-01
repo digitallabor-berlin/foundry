@@ -16,7 +16,7 @@ use foundry_core::status_list::{build_status_list_token, StatusList, StatusListT
 use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::build_x5c;
 use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-use foundry_mdoc::types::serialize_session_transcript;
+use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
 use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
 use foundry_verifier::{
     CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
@@ -1027,8 +1027,26 @@ async fn mdoc_presentation_is_accepted() {
     .unwrap();
 
     // Detached DeviceAuth over the reconstructed SessionTranscript.
-    let transcript =
-        serialize_session_transcript(Some(client_id), Some(response_uri), nonce).unwrap();
+    //
+    // This transaction uses `transport: request_uri`, so the OpenID4VP
+    // "Invocation via Redirects" Handover applies (L2829-L2873); the response
+    // is encrypted (`direct_post.jwt`), so the third `OpenID4VPHandoverInfo`
+    // element is the RFC 7638 thumbprint of the Verifier's encryption key
+    // (L2870).
+    //
+    // The thumbprint is derived here from the key the *request object*
+    // advertised, while the verifier derives it from the key stored on the
+    // transaction. That the round-trip succeeds is the end-to-end evidence
+    // that a wallet and this verifier independently compute the same
+    // transcript bytes -- which is exactly what GAP-VP-06 recorded as broken.
+    let jwk_thumbprint = foundry_core::obs::thumbprint_bytes(&ephem_public_jwk).unwrap();
+    let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
+        client_id: client_id.clone(),
+        nonce: nonce.clone(),
+        jwk_thumbprint: Some(jwk_thumbprint),
+        response_uri: response_uri.clone(),
+    })
+    .unwrap();
     let protected = coset::HeaderBuilder::new()
         .algorithm(coset::iana::Algorithm::ES256)
         .build();

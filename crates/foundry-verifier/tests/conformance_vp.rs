@@ -570,12 +570,15 @@ async fn haip_0052_encrypted_response_enc_values_supported_lists_only_one_value(
 #[test]
 #[ignore = "GAP-VP-06: OpenID4VP Format / mdoc / Invocation via Redirects (L2833, L2865) — the Handover CBOR structure's first element MUST be the literal string 'OpenID4VPHandover', but serialize_session_transcript places the raw client_id text there instead and never constructs the spec-defined hashed HandoverInfo structure at all"]
 fn gap_vp_06_mdoc_session_transcript_handover_should_contain_the_spec_defined_literal() {
-    // Exactly the shape `serialize_session_transcript` is called with for a
-    // redirect-based mdoc presentation (foundry_mdoc::verifier::verify_mdoc).
-    let bytes = foundry_mdoc::types::serialize_session_transcript(
-        Some("x509_san_dns:issuer.example.com".to_string()),
-        Some("https://issuer.example.com/vp/response/tx1".to_string()),
-        "some-nonce-value".to_string(),
+    // Exactly the shape the transcript builder is called with for a
+    // redirect-based mdoc presentation (see foundry-verifier's `verify.rs`).
+    let bytes = foundry_mdoc::types::build_session_transcript(
+        &foundry_mdoc::types::SessionTranscriptParams::Redirect {
+            client_id: "x509_san_dns:issuer.example.com".to_string(),
+            nonce: "some-nonce-value".to_string(),
+            jwk_thumbprint: None,
+            response_uri: "https://issuer.example.com/vp/response/tx1".to_string(),
+        },
     )
     .unwrap();
 

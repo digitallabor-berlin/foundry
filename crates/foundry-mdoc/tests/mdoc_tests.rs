@@ -63,17 +63,9 @@ fn rejects_expired_mdoc() {
     };
     let mdoc_bytes = build_mdoc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
 
-    // Expiry is checked before device-signature binding, so an empty device sig is fine.
-    let err = verify_mdoc(
-        &mdoc_bytes,
-        &trust_store,
-        Some("client".to_string()),
-        Some("uri".to_string()),
-        "nonce".to_string(),
-        &[],
-        now,
-    )
-    .unwrap_err();
+    // Expiry is checked before device-signature binding, so an empty device sig
+    // and an empty SessionTranscript are both fine — neither is reached.
+    let err = verify_mdoc(&mdoc_bytes, &trust_store, &[], &[], now).unwrap_err();
     assert!(matches!(err, FormatError::Expired));
 }
 
@@ -95,15 +87,8 @@ fn rejects_untrusted_anchor_mdoc() {
     };
     let mdoc_bytes = build_mdoc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
 
-    let err = verify_mdoc(
-        &mdoc_bytes,
-        &trust_store,
-        Some("client".to_string()),
-        Some("uri".to_string()),
-        "nonce".to_string(),
-        &[],
-        now,
-    )
-    .unwrap_err();
+    // The chain is rejected before device-signature binding, so an empty device
+    // sig and an empty SessionTranscript are both fine — neither is reached.
+    let err = verify_mdoc(&mdoc_bytes, &trust_store, &[], &[], now).unwrap_err();
     assert!(matches!(err, FormatError::SignatureVerification(_)));
 }

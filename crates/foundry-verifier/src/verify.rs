@@ -9,6 +9,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
+use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
 use josekit::jwk::Jwk;
 use serde_json::Value;
 
@@ -460,13 +461,65 @@ async fn do_verify_vp_response(
                 VerificationError::Failed(format!("device_signature base64 decode: {e}"))
             })?;
 
-            let response_uri = format!("{base_url}/vp/response/{}", tx.id);
+            // OpenID4VP L2870 (redirects) / L2999 (DC API): the third
+            // `…HandoverInfo` element is the RFC 7638 thumbprint of the
+            // Verifier's response-encryption public key when the response is
+            // encrypted, and CBOR `null` when it is not. An unrecognised
+            // Response Mode is an error rather than a silent `None`: guessing
+            // would build a transcript that fails to verify for a reason no
+            // operator could diagnose.
+            let jwk_thumbprint: Option<[u8; 32]> = match tx.response_mode.as_str() {
+                "dc_api.jwt" | "direct_post.jwt" => Some(
+                    foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).map_err(|e| {
+                        VerificationError::Failed(format!(
+                            "cannot compute the response-encryption key thumbprint: {e}"
+                        ))
+                    })?,
+                ),
+                "dc_api" | "direct_post" => None,
+                other => {
+                    return Err(VerificationError::Failed(format!(
+                        "unsupported response_mode for the mdoc SessionTranscript: {other}"
+                    )))
+                }
+            };
+
+            // The invocation method selects the Handover structure: the DC API
+            // binds to the request's Origin (L2959-L2999), every other
+            // transport binds to the Client Identifier and response URI
+            // (L2829-L2873). Building the wrong one yields a transcript no
+            // conformant wallet's Device Signature can verify against.
+            let transcript_params = if tx.transport == "dc_api" {
+                // L2997: the Origin element MUST NOT carry the `origin:`
+                // prefix. That prefix belongs to the KB-JWT audience above — a
+                // different mechanism that happens to name the same value.
+                let origin = config
+                    .verifier
+                    .dc_api_expected_origins
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| base_url.to_string());
+                SessionTranscriptParams::DcApi {
+                    origin,
+                    nonce: tx.nonce.clone(),
+                    jwk_thumbprint,
+                }
+            } else {
+                SessionTranscriptParams::Redirect {
+                    client_id: client_id.clone(),
+                    nonce: tx.nonce.clone(),
+                    jwk_thumbprint,
+                    response_uri: format!("{base_url}/vp/response/{}", tx.id),
+                }
+            };
+
+            let session_transcript = build_session_transcript(&transcript_params)
+                .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
+
             let mdoc_res = foundry_mdoc::verifier::verify_mdoc(
                 &mdoc_bytes,
                 &trust_store,
-                Some(client_id.clone()),
-                Some(response_uri),
-                tx.nonce.clone(),
+                &session_transcript,
                 &dev_sig_bytes,
                 now_unix,
             )
@@ -526,7 +579,6 @@ mod tests {
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-    use foundry_mdoc::types::serialize_session_transcript;
     use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
@@ -1439,12 +1491,20 @@ mod tests {
         let mdoc_bytes =
             build_mdoc(mdoc_claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        // Build the detached DeviceAuth COSE_Sign1 over the OpenID4VP SessionTranscript.
-        let client_id = "x509_san_dns:localhost".to_string();
-        let response_uri = format!("https://localhost:8443/vp/response/{}", tx.id);
-        let transcript =
-            serialize_session_transcript(Some(client_id), Some(response_uri), tx.nonce.clone())
-                .unwrap();
+        // Build the detached DeviceAuth COSE_Sign1 over the OpenID4VP
+        // SessionTranscript. `sample_tx` uses transport `direct_post` with
+        // response_mode `direct_post.jwt`, so the "Invocation via Redirects"
+        // Handover applies (L2829-L2873) and the encrypted-response thumbprint
+        // is present rather than null (L2870).
+        let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
+            client_id: "x509_san_dns:localhost".to_string(),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
         let protected = coset::HeaderBuilder::new()
             .algorithm(coset::iana::Algorithm::ES256)
             .build();
