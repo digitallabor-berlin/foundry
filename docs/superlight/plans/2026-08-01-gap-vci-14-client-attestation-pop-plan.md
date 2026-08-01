@@ -100,11 +100,11 @@ grep -q 'oauth-client-attestation-pop+jwt' docs/specs/draft-ietf-oauth-attestati
 The §4.4 table must list four spec rows, and the new row must state that where
 OpenID4VCI Appendix E defers to ABCA §5.1/§5.2, ABCA governs.
 
-- [ ] Red — n/a (documentation task; no behaviour to fail)
-- [ ] Green — file vendored verbatim, AGENTS.md §4.4 row added
-- [ ] Refactor — n/a
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — n/a (documentation task; no behaviour to fail)
+- [x] Green — file vendored verbatim, AGENTS.md §4.4 row added
+- [x] Refactor — n/a
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -583,3 +583,5 @@ Docs:
 ## Progress Log
 
 Append one line per completed task: date, task, commit SHA.
+
+- 2026-08-01 — Task 1 (vendored ABCA draft -07 verbatim to `docs/specs/`; AGENTS.md §4.4 gained its row) — `a5fea96`
