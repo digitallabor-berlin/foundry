@@ -430,25 +430,32 @@ async fn token_handler(
     let attestation_hdr = headers
         .get("OAuth-Client-Attestation")
         .and_then(|v| v.to_str().ok());
+    // axum's `HeaderMap` lookup is already case-insensitive (header names are
+    // normalized to lowercase per RFC 9110), satisfying ABCA §6.1's header
+    // matching requirement without any extra normalization here.
+    let pop_hdr = headers
+        .get("OAuth-Client-Attestation-PoP")
+        .and_then(|v| v.to_str().ok());
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // TODO(Task 10): read OAuth-Client-Attestation-PoP alongside the
-    // existing header (case-insensitively per ABCA §6.1) and supply
-    // issuer_identifier from build_authorization_server_metadata's own
-    // `issuer` field, not re-derived from config, so the published and
-    // checked values cannot drift. Until then no caller can supply a PoP, so
-    // only Mode::Disabled is exercised in practice.
+    // Sourced from the published AS metadata's own `issuer` field -- not
+    // re-derived from `config.issuer.credential_issuer` -- so the value
+    // advertised at /.well-known/oauth-authorization-server and the value a
+    // PoP's `aud` is checked against can never drift apart.
+    let issuer_identifier =
+        foundry_issuer::build_authorization_server_metadata(&state.config).issuer;
+
     foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
         &state.config.issuer.wallet_attestation,
         attestation_hdr,
-        None,
-        "",
+        pop_hdr,
+        &issuer_identifier,
         now,
     )
     .await

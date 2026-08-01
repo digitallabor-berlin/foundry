@@ -513,6 +513,312 @@ async fn a_real_request_carries_the_documented_correlation_fields() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Task 10 (GAP-VCI-14): the Client Attestation PoP JWT and its raw `jti` are
+// new secret-bearing values introduced by this change; AGENTS.md sect-4.5 makes
+// redaction a *behavioural* requirement, so these must be asserted, not just
+// reviewed.
+// ---------------------------------------------------------------------------
+
+const POP_JTI_PLANTED: &str = "Zzyzx-Planted-Pop-Jti-4471";
+
+/// Same shape as `setup()`, but with `wallet_attestation: Mode::Required`
+/// pointed at a fresh CA -- needed to drive a real attestation+pop /token
+/// request. Returns `(state, _tempdir, _ca_tempdir)`.
+async fn setup_with_required_attestation() -> (
+    AppState,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+    String,
+) {
+    use foundry_core::config::TrustAnchor;
+    use foundry_core::pki::new_ca;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("foundry.db");
+    let key_path = dir.path().join("issuer.pem");
+
+    let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).expect("key");
+    std::fs::write(&key_path, km.private_pem).expect("write key");
+
+    let storage = SqliteStorage::connect(db_path.to_str().expect("db path"))
+        .await
+        .expect("storage");
+
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        "issuer_key".to_string(),
+        KeyEntry {
+            private_key: key_path.to_str().expect("key path").to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+
+    let ca = new_ca("Test Wallet Provider Root CA", 3650).expect("ca");
+    let ca_dir = tempfile::tempdir().expect("ca tempdir");
+    let ca_path = ca_dir.path().join("wallet-provider-ca.pem");
+    std::fs::write(&ca_path, &ca.cert_pem).expect("write ca");
+
+    let config = Config {
+        server: ServerConfig {
+            wallet_facing: WalletFacingConfig {
+                public_base_url: ISSUER.to_string(),
+                bind: "0.0.0.0:8443".to_string(),
+                swagger_ui_enabled: false,
+            },
+            admin: AdminConfig {
+                bind: "127.0.0.1:9000".to_string(),
+                api_key: Some(ADMIN_KEY.to_string()),
+                api_key_env: None,
+                swagger_ui_enabled: false,
+                console_enabled: false,
+            },
+        },
+        storage: StorageConfig {
+            path: db_path.to_str().expect("db path").to_string(),
+            transaction_ttl_secs: 600,
+        },
+        keys,
+        trust_anchors: Vec::new(),
+        issuer: IssuerConfig {
+            credential_issuer: ISSUER.to_string(),
+            wallet_attestation: AttestationMode {
+                mode: Mode::Required,
+                trusted_anchors: vec![TrustAnchor {
+                    name: "wallet-provider-ca".to_string(),
+                    certs: ca_path.to_str().expect("ca path").to_string(),
+                }],
+                pop_max_age_secs: 300,
+            },
+            key_attestation: AttestationMode {
+                mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
+            },
+            status_list: StatusListConfig {
+                enabled: false,
+                signing_key: Some("issuer_key".to_string()),
+                list_size: None,
+                public_base_url: None,
+            },
+        },
+        credential_types: vec![CredentialType {
+            id: "pid".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some(format!("{ISSUER}/vct/pid")),
+            doctype: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![ClaimDef {
+                path: vec!["given_name".to_string()],
+                selectively_disclosable: true,
+                display: vec![],
+            }],
+        }],
+        verifier: VerifierConfig {
+            client_id_scheme: "x509_san_dns".to_string(),
+            signing_key: "issuer_key".to_string(),
+            response_encryption: None,
+            transaction_data_hashes_alg: vec![],
+            named_queries: vec![],
+            webhook: None,
+            dc_api_expected_origins: Vec::new(),
+        },
+        logging: LoggingConfig::default(),
+    };
+
+    (
+        AppState::new(Arc::new(storage), Arc::new(config)),
+        dir,
+        ca_dir,
+        ca.cert_pem,
+        ca.key_pem,
+    )
+}
+
+/// A validly signed Wallet Attestation JWT (chained to the CA identified by
+/// `ca_cert_pem`/`ca_key_pem`) plus a Client Attestation PoP JWT carrying
+/// `POP_JTI_PLANTED` as its `jti`, that verifies against the attestation's
+/// `cnf.jwk`.
+fn signed_attestation_and_pop_with_planted_jti(
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+) -> (String, String) {
+    use base64::Engine as _;
+    use foundry_core::crypto::{FileSigner, SignatureAlgorithm as SigAlg, Signer};
+    use foundry_core::pki::issue_leaf;
+    use foundry_core::trust::build_x5c;
+    use josekit::jws::JwsSigner;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs() as i64;
+
+    let kp = EcKeyPair::generate(EcCurve::P256).expect("pop keypair");
+    let mut cnf_jwk = kp.to_jwk_public_key();
+    cnf_jwk.set_algorithm("ES256");
+    let pop_signer = ES256
+        .signer_from_jwk(&kp.to_jwk_private_key())
+        .expect("pop signer");
+
+    let leaf = issue_leaf(
+        ca_cert_pem,
+        ca_key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .expect("issue_leaf");
+    let x5c = build_x5c(&[leaf.cert_pem.clone().into_bytes()]).expect("x5c");
+
+    let wallet_sub = "https://wallet.example.org";
+    let header = serde_json::json!({
+        "typ": "oauth-client-attestation+jwt", "alg": "ES256", "x5c": x5c,
+    });
+    let payload = serde_json::json!({
+        "iss": "https://wallet-provider.example.com",
+        "sub": wallet_sub,
+        "exp": now + 100_000,
+        "cnf": { "jwk": cnf_jwk },
+    });
+    let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).unwrap());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let leaf_signer =
+        FileSigner::from_pem(leaf.key_pem.as_bytes(), SigAlg::Es256).expect("leaf signer");
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(leaf_signer.sign(signing_input.as_bytes()).unwrap());
+    let attestation_jwt = format!("{signing_input}.{sig_b64}");
+
+    let pop_header = serde_json::json!({
+        "typ": "oauth-client-attestation-pop+jwt", "alg": "ES256",
+    });
+    let pop_payload = serde_json::json!({
+        "iss": wallet_sub, "aud": ISSUER, "jti": POP_JTI_PLANTED, "iat": now,
+    });
+    let pop_header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&pop_header).unwrap());
+    let pop_payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&pop_payload).unwrap());
+    let pop_signing_input = format!("{pop_header_b64}.{pop_payload_b64}");
+    let pop_sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(pop_signer.sign(pop_signing_input.as_bytes()).unwrap());
+    let pop_jwt = format!("{pop_signing_input}.{pop_sig_b64}");
+
+    (attestation_jwt, pop_jwt)
+}
+
+/// Creates a `pre-authorized_code` offer and drives `/token` with the given
+/// attestation/pop headers attached. Returns the response status.
+async fn drive_token_with_attestation_and_pop(
+    state: &AppState,
+    attestation_jwt: &str,
+    pop_jwt: &str,
+) -> StatusCode {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": { "given_name": "Alice" },
+        "tx_code_required": false,
+    });
+    let offer_res = admin_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(offer_req_body.to_string()))
+                .expect("offer request"),
+        )
+        .await
+        .expect("offer response");
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer_json = body_json(offer_res).await;
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized_code");
+
+    let wallet_app = wallet_router(state.clone());
+    let token_res = wallet_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("OAuth-Client-Attestation", attestation_jwt)
+                .header("OAuth-Client-Attestation-PoP", pop_jwt)
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .expect("token request"),
+        )
+        .await
+        .expect("token response");
+    token_res.status()
+}
+
+/// The raw PoP JWT and its raw `jti` must never appear in the log with
+/// payload logging *disabled* -- the ordinary production posture.
+#[tokio::test]
+async fn token_request_never_logs_the_raw_pop_jwt_or_jti_when_locked() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir, _ca_dir, ca_cert_pem, ca_key_pem) = setup_with_required_attestation().await;
+    let (attestation_jwt, pop_jwt) =
+        signed_attestation_and_pop_with_planted_jti(&ca_cert_pem, &ca_key_pem);
+
+    let (guard, log) = capture_at_trace();
+    let _ = drive_token_with_attestation_and_pop(&state, &attestation_jwt, &pop_jwt).await;
+    drop(guard);
+
+    assert!(!log.events().is_empty(), "captured nothing");
+    assert!(
+        !log.contains_value(&pop_jwt),
+        "the raw Client Attestation PoP JWT leaked into the log (sensitive disabled)"
+    );
+    assert!(
+        !log.contains_value(POP_JTI_PLANTED),
+        "the raw pop jti leaked into the log (sensitive disabled)"
+    );
+}
+
+/// The same two values must stay out of the log even with payload logging
+/// *enabled* -- sect-4.5's floor applies regardless of the dev-only flag; only a
+/// `debug`/`trace` level payload field is conditionally unlocked, and the raw
+/// PoP JWT / jti are never that kind of field.
+#[tokio::test]
+async fn token_request_never_logs_the_raw_pop_jwt_or_jti_even_with_sensitive_enabled() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(true);
+
+    let (state, _dir, _ca_dir, ca_cert_pem, ca_key_pem) = setup_with_required_attestation().await;
+    let (attestation_jwt, pop_jwt) =
+        signed_attestation_and_pop_with_planted_jti(&ca_cert_pem, &ca_key_pem);
+
+    let (guard, log) = capture_at_trace();
+    let _ = drive_token_with_attestation_and_pop(&state, &attestation_jwt, &pop_jwt).await;
+    drop(guard);
+    foundry_core::obs::set_sensitive(false);
+
+    assert!(!log.events().is_empty(), "captured nothing");
+    assert!(
+        !log.contains_value(&pop_jwt),
+        "the raw Client Attestation PoP JWT leaked into the log (sensitive enabled)"
+    );
+    assert!(
+        !log.contains_value(POP_JTI_PLANTED),
+        "the raw pop jti leaked into the log (sensitive enabled)"
+    );
+}
+
 /// A whole presentation flow must be reconstructible from one `tx_id`, across
 /// three requests on two different listeners. That is the property that turns a
 /// pile of log lines into a diagnosis.

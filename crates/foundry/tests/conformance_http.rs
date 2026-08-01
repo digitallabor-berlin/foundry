@@ -27,7 +27,8 @@ use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
-    Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
+    WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use josekit::jwk::alg::ec::EcKeyPair;
@@ -1003,4 +1004,336 @@ async fn vp_0152_status_fetch_network_failure_maps_to_http_502() {
         .unwrap();
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body_json["error"], "status_unavailable");
+}
+
+// ---------------------------------------------------------------------------
+// Task 10 (GAP-VCI-14): server.rs's /token handler wiring for the Client
+// Attestation PoP JWT (ABCA draft -07 sect-5.2/sect-6.2/sect-6.3) -- reading the
+// OAuth-Client-Attestation-PoP header alongside the existing attestation
+// header, and sourcing the expected `aud` from the published AS metadata's
+// own `issuer` field (not re-derived from config) so the two can never drift.
+// ---------------------------------------------------------------------------
+
+const POP_TEST_WALLET_SUB: &str = "https://wallet.example.org";
+
+/// Real wall-clock time -- pki::new_ca/pki::issue_leaf stamp validity windows
+/// using now_utc(), not an injectable clock, so a fixed fixture timestamp
+/// would spuriously fail chain validation.
+fn pop_test_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// A validly signed Wallet Attestation JWT (chained to a fresh CA) plus a
+/// Client Attestation PoP JWT that verifies against its `cnf.jwk` (ABCA
+/// sect-5.2 r3). Returns `(attestation_jwt, pop_jwt, ca_cert_pem)`.
+fn signed_attestation_and_pop(now: i64, aud: &str, jti: &str) -> (String, String, String) {
+    use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
+    use foundry_core::pki::{issue_leaf, new_ca};
+    use foundry_core::trust::build_x5c;
+    use josekit::jws::JwsSigner;
+
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let mut cnf_jwk = kp.to_jwk_public_key();
+    cnf_jwk.set_algorithm("ES256");
+    let pop_signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+
+    let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let x5c = build_x5c(&[leaf.cert_pem.clone().into_bytes()]).unwrap();
+
+    let header = serde_json::json!({
+        "typ": "oauth-client-attestation+jwt", "alg": "ES256", "x5c": x5c,
+    });
+    let payload = serde_json::json!({
+        "iss": "https://wallet-provider.example.com",
+        "sub": POP_TEST_WALLET_SUB,
+        "exp": now + 100_000,
+        "cnf": { "jwk": cnf_jwk },
+    });
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let leaf_signer =
+        FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let sig_b64 = URL_SAFE_NO_PAD.encode(leaf_signer.sign(signing_input.as_bytes()).unwrap());
+    let attestation_jwt = format!("{signing_input}.{sig_b64}");
+
+    let pop_header = serde_json::json!({
+        "typ": "oauth-client-attestation-pop+jwt", "alg": "ES256",
+    });
+    let pop_payload = serde_json::json!({
+        "iss": POP_TEST_WALLET_SUB, "aud": aud, "jti": jti, "iat": now,
+    });
+    let pop_header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&pop_header).unwrap());
+    let pop_payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&pop_payload).unwrap());
+    let pop_signing_input = format!("{pop_header_b64}.{pop_payload_b64}");
+    let pop_sig_b64 =
+        URL_SAFE_NO_PAD.encode(pop_signer.sign(pop_signing_input.as_bytes()).unwrap());
+    let pop_jwt = format!("{pop_signing_input}.{pop_sig_b64}");
+
+    (attestation_jwt, pop_jwt, ca.cert_pem)
+}
+
+/// Same shape as `setup_test_app`, but with `wallet_attestation: Mode::Required`
+/// pointed at `ca_pem` (written to a temp file -- `TrustStore::from_config`
+/// reads `certs` from disk).
+async fn setup_pop_test_app(ca_pem: &str) -> (AppState, tempfile::TempDir, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("foundry.db");
+    let storage = SqliteStorage::connect(db_path.to_str().unwrap())
+        .await
+        .unwrap();
+
+    let key_path = dir.path().join("issuer.pem");
+    let km = foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+        .unwrap();
+    std::fs::write(&key_path, km.private_pem).unwrap();
+    let mut keys = BTreeMap::new();
+    keys.insert(
+        "issuer_key".to_string(),
+        foundry_core::config::KeyEntry {
+            private_key: key_path.to_str().unwrap().to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+
+    let ca_dir = tempfile::tempdir().unwrap();
+    let ca_path = ca_dir.path().join("wallet-provider-ca.pem");
+    std::fs::write(&ca_path, ca_pem).unwrap();
+
+    let config = Config {
+        server: ServerConfig {
+            wallet_facing: WalletFacingConfig {
+                public_base_url: "https://issuer.example.com".to_string(),
+                bind: "0.0.0.0:8443".to_string(),
+                swagger_ui_enabled: true,
+            },
+            admin: AdminConfig {
+                bind: "127.0.0.1:9000".to_string(),
+                api_key: Some("test-admin-key".to_string()),
+                api_key_env: None,
+                swagger_ui_enabled: true,
+                console_enabled: true,
+            },
+        },
+        storage: StorageConfig {
+            path: db_path.to_str().unwrap().to_string(),
+            transaction_ttl_secs: 600,
+        },
+        keys,
+        trust_anchors: Vec::new(),
+        issuer: IssuerConfig {
+            credential_issuer: "https://issuer.example.com".to_string(),
+            wallet_attestation: AttestationMode {
+                mode: Mode::Required,
+                trusted_anchors: vec![TrustAnchor {
+                    name: "wallet-provider-ca".to_string(),
+                    certs: ca_path.to_str().unwrap().to_string(),
+                }],
+                pop_max_age_secs: 300,
+            },
+            key_attestation: AttestationMode {
+                mode: Mode::Optional,
+                trusted_anchors: Vec::new(),
+                pop_max_age_secs: 300,
+            },
+            status_list: StatusListConfig {
+                enabled: false,
+                signing_key: None,
+                list_size: None,
+                public_base_url: None,
+            },
+        },
+        credential_types: vec![CredentialType {
+            id: "pid".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://issuer.example.com/vct/pid".to_string()),
+            doctype: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![ClaimDef {
+                path: vec!["given_name".to_string()],
+                selectively_disclosable: true,
+                display: vec![],
+            }],
+        }],
+        verifier: VerifierConfig {
+            client_id_scheme: "x509_san_dns".to_string(),
+            signing_key: "verifier_signing".to_string(),
+            response_encryption: None,
+            transaction_data_hashes_alg: vec![],
+            named_queries: vec![],
+            webhook: None,
+            dc_api_expected_origins: Vec::new(),
+        },
+        logging: LoggingConfig::default(),
+    };
+
+    let state = AppState::new(Arc::new(storage), Arc::new(config));
+    (state, dir, ca_dir)
+}
+
+/// Creates a `pre-authorized_code` offer via the Admin API and returns its
+/// code, without redeeming it -- the caller drives the `/token` request
+/// itself so it can attach the attestation/pop headers.
+async fn create_pre_auth_offer(state: &AppState) -> String {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": { "given_name": "Alice" },
+        "tx_code_required": false,
+    });
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri("/admin/issuance/offers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(offer_req_body.to_string()))
+        .unwrap();
+    let offer_res = admin_app.oneshot(offer_req).await.unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+    offer_json["credential_offer"]["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+        ["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn gap_vci_14_token_request_with_attestation_and_matching_pop_is_accepted() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-happy-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        .header("OAuth-Client-Attestation-PoP", &pop_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::OK,
+        "a valid attestation + matching pop must be accepted"
+    );
+}
+
+#[tokio::test]
+async fn gap_vci_14_token_request_with_attestation_but_no_pop_is_rejected_as_invalid_client() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, _pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-nopop-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(token_res.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_client");
+}
+
+/// ABCA sect-6.1: the `OAuth-Client-Attestation-PoP` header MUST be read
+/// case-insensitively. A lower-case wire header name must still be found.
+#[tokio::test]
+async fn gap_vci_14_pop_header_is_read_case_insensitively() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, pop_jwt, ca_pem) =
+        signed_attestation_and_pop(now, "https://issuer.example.com", "jti-http-case-1");
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("oauth-client-attestation", &attestation_jwt)
+        .header("oauth-client-attestation-pop", &pop_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::OK,
+        "a lower-case wire header name must still be recognised as the PoP header"
+    );
+}
+
+/// Proves the wiring passes the issuer identifier -- not the token endpoint
+/// URL or any other AS-metadata URL -- as the PoP's expected `aud`.
+#[tokio::test]
+async fn gap_vci_14_pop_aud_as_token_endpoint_url_is_rejected() {
+    let now = pop_test_now_secs();
+    let (attestation_jwt, pop_jwt, ca_pem) = signed_attestation_and_pop(
+        now,
+        "https://issuer.example.com/token",
+        "jti-http-wrongaud-1",
+    );
+    let (state, _dir, _ca_dir) = setup_pop_test_app(&ca_pem).await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("OAuth-Client-Attestation", &attestation_jwt)
+        .header("OAuth-Client-Attestation-PoP", &pop_jwt)
+        .body(Body::from(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+        )))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+
+    assert_eq!(
+        token_res.status(),
+        StatusCode::BAD_REQUEST,
+        "a pop whose aud is the token endpoint URL rather than the issuer identifier must be rejected"
+    );
+    let body_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_client");
 }
