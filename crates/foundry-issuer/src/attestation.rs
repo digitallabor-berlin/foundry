@@ -4,9 +4,11 @@ use crate::error::IssuanceError;
 use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
 use foundry_core::config::Mode;
+use foundry_core::storage::Storage;
 use foundry_core::trust::{validate_chain, x5c_entry_to_pem, TrustStore};
 use josekit::jwk::Jwk;
 use josekit::jws::ES256;
+use sha2::{Digest, Sha256};
 
 pub trait WalletAttestationVerifier: Send + Sync {
     fn verify_wallet_attestation(
@@ -218,10 +220,6 @@ pub struct PopClaims {
 /// the future relative to this server's clock. Never used to widen how far
 /// into the past an `iat` may be -- that is `max_age_secs`, a distinct policy
 /// knob (`AttestationMode.pop_max_age_secs`).
-///
-/// `#[allow(dead_code)]`: not yet called from production code -- Task 8 wires
-/// this into `verify_wallet_attestation`. Only `#[cfg(test)]` uses it so far.
-#[allow(dead_code)]
 const POP_CLOCK_SKEW_SECS: i64 = 60;
 
 /// Verify a Client Attestation PoP JWT (ABCA draft -07 §5.2) against the
@@ -392,6 +390,50 @@ fn validate_client_attestation_pop_jwt(
         jti: jti.to_string(),
         iat,
     })
+}
+
+/// KV storage namespace for Client Attestation PoP `jti` replay claims
+/// (GAP-VCI-14).
+#[allow(dead_code)]
+const POP_JTI_NAMESPACE: &str = "client_attestation_pop_jti";
+
+/// Atomically claims a Client Attestation PoP JWT's `(iss, jti)` pair,
+/// rejecting a replay (ABCA draft -07 §10.6, §12.1).
+///
+/// Keyed on a hash of `(iss, jti)` rather than bare `jti`: a bare-`jti`
+/// namespace would let one wallet pre-claim `jti` values and deny service to
+/// another. Hashing also keeps the raw, attacker-controlled `iss`/`jti`
+/// strings out of the SQL key and out of any log line derived from it.
+///
+/// No `now_unix` parameter: the TTL derives from `claims.iat`, which
+/// `validate_client_attestation_pop_jwt` has already bounded against `now` --
+/// passing `now` again here would create a second source of truth for the
+/// same fact.
+/// `skip_all` is mandatory: `claims` carries the raw `iss` and `jti`.
+#[allow(dead_code)]
+#[tracing::instrument(skip_all)]
+pub(crate) async fn claim_pop_jti(
+    storage: &dyn Storage,
+    claims: &PopClaims,
+    max_age_secs: u64,
+) -> Result<(), IssuanceError> {
+    let mut hasher = Sha256::new();
+    hasher.update(claims.iss.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(claims.jti.as_bytes());
+    let key = B64URL.encode(hasher.finalize());
+
+    let expires_at = claims.iat + max_age_secs as i64 + POP_CLOCK_SKEW_SECS;
+
+    let claimed = storage
+        .insert_kv_if_absent(POP_JTI_NAMESPACE, &key, "1", Some(expires_at))
+        .await?;
+    if !claimed {
+        return Err(IssuanceError::InvalidClient(
+            "client attestation pop: jti has already been used".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Verify a key-attestation JWT (OpenID4VCI Appendix D.1) against `trust_store`
@@ -1557,5 +1599,115 @@ mod tests {
 
         validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
             .expect("an exp claim, even an already-past one, must be ignored, not rejected");
+    }
+
+    // -- claim_pop_jti: atomic replay detection (GAP-VCI-14) --
+
+    async fn test_storage() -> foundry_core::storage::SqliteStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        // Keep the tempdir alive for the storage's lifetime -- dropping it
+        // would delete the SQLite file out from under the pool.
+        std::mem::forget(dir);
+        foundry_core::storage::SqliteStorage::connect(db.to_str().unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn pop_claims(iss: &str, jti: &str, iat: i64) -> PopClaims {
+        PopClaims {
+            iss: iss.to_string(),
+            jti: jti.to_string(),
+            iat,
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_pop_jti_first_claim_succeeds() {
+        let storage = test_storage().await;
+        let claims = pop_claims("https://client.example.com", "jti-1", 1_700_000_000);
+
+        claim_pop_jti(&storage, &claims, 300)
+            .await
+            .expect("the first claim for a (iss, jti) pair must succeed");
+    }
+
+    #[tokio::test]
+    async fn claim_pop_jti_rejects_an_immediate_replay() {
+        let storage = test_storage().await;
+        let claims = pop_claims("https://client.example.com", "jti-1", 1_700_000_000);
+        claim_pop_jti(&storage, &claims, 300).await.unwrap();
+
+        let err = claim_pop_jti(&storage, &claims, 300).await.unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    #[tokio::test]
+    async fn claim_pop_jti_a_different_jti_under_the_same_iss_succeeds() {
+        let storage = test_storage().await;
+        let claims_a = pop_claims("https://client.example.com", "jti-1", 1_700_000_000);
+        let claims_b = pop_claims("https://client.example.com", "jti-2", 1_700_000_000);
+        claim_pop_jti(&storage, &claims_a, 300).await.unwrap();
+
+        claim_pop_jti(&storage, &claims_b, 300)
+            .await
+            .expect("a different jti under the same iss must succeed");
+    }
+
+    /// Proves `(iss, jti)` keying rather than bare `jti`: a bare-`jti`
+    /// namespace would let one wallet pre-claim `jti` values and deny
+    /// service to another.
+    #[tokio::test]
+    async fn claim_pop_jti_the_same_jti_under_a_different_iss_succeeds() {
+        let storage = test_storage().await;
+        let claims_a = pop_claims("https://wallet-a.example.com", "jti-shared", 1_700_000_000);
+        let claims_b = pop_claims("https://wallet-b.example.com", "jti-shared", 1_700_000_000);
+        claim_pop_jti(&storage, &claims_a, 300).await.unwrap();
+
+        claim_pop_jti(&storage, &claims_b, 300)
+            .await
+            .expect("the same jti under a different iss must succeed");
+    }
+
+    #[tokio::test]
+    async fn claim_pop_jti_expires_at_iat_plus_max_age_plus_skew() {
+        let storage = test_storage().await;
+        let claims = pop_claims("https://client.example.com", "jti-1", 1_000);
+        claim_pop_jti(&storage, &claims, 300).await.unwrap();
+
+        // expected expires_at = iat(1000) + max_age(300) + skew(60) = 1360.
+        let removed_before = storage.purge_expired(1359).await.unwrap();
+        assert_eq!(
+            removed_before, 0,
+            "must not have expired yet at iat + max_age + skew - 1"
+        );
+
+        let removed_at = storage.purge_expired(1360).await.unwrap();
+        assert_eq!(
+            removed_at, 1,
+            "must expire at exactly iat + max_age + skew, not now + max_age + skew"
+        );
+    }
+
+    /// The anti-log-leak property: the raw `jti` must never be usable
+    /// verbatim as the storage key.
+    #[tokio::test]
+    async fn claim_pop_jti_does_not_store_the_raw_jti_as_the_key() {
+        let storage = test_storage().await;
+        let claims = pop_claims(
+            "https://client.example.com",
+            "a-very-identifiable-jti-value",
+            1_700_000_000,
+        );
+        claim_pop_jti(&storage, &claims, 300).await.unwrap();
+
+        assert_eq!(
+            storage
+                .get_kv(POP_JTI_NAMESPACE, &claims.jti)
+                .await
+                .unwrap(),
+            None,
+            "the raw jti string must never be used as the storage key"
+        );
     }
 }
