@@ -29,6 +29,16 @@ use josekit::jwt::{self, JwtPayload};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// `Mode::Disabled`, wrapped in the `AttestationMode` `handle_token_request`
+/// now takes. Keeps the many call sites below that don't exercise wallet
+/// attestation readable.
+fn disabled_attestation() -> AttestationMode {
+    AttestationMode {
+        mode: Mode::Disabled,
+        trusted_anchors: Vec::new(),
+    }
+}
+
 fn test_config() -> Config {
     Config {
         server: ServerConfig {
@@ -257,12 +267,24 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         code_verifier: None,
     };
 
-    handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .expect("first redemption must succeed");
+    handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .expect("first redemption must succeed");
 
-    let replay =
-        handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_020).await;
+    let replay = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_020,
+    )
+    .await;
     assert!(
         replay.is_err(),
         "a second /token call with the same pre-authorized_code must be rejected"
@@ -362,9 +384,15 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         client_id: Some("wallet-dev".to_string()),
         code_verifier: Some(code_verifier.to_string()),
     };
-    handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .expect("authorization_code grant must issue an access token");
+    handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .expect("authorization_code grant must issue an access token");
 }
 
 // ---------------------------------------------------------------------------
@@ -480,9 +508,15 @@ async fn setup_credential_flow(
         client_id: None,
         code_verifier: None,
     };
-    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .unwrap();
+    let token = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .unwrap();
 
     let secret = NonceSecret::from_bytes([7u8; 32]);
     (cfg, storage, token.access_token, secret)
@@ -651,9 +685,15 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         client_id: None,
         code_verifier: None,
     };
-    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .unwrap();
+    let token = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .unwrap();
     let access_token = token.access_token;
     let secret = NonceSecret::from_bytes([7u8; 32]);
 
@@ -765,9 +805,15 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         client_id: None,
         code_verifier: None,
     };
-    let token = handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .unwrap();
+    let token = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(
         token.token_type, "DPoP",
@@ -782,7 +828,6 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
 // attestation MUST be a validly signed JWT, not an arbitrary opaque string.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-HAIP-04: HAIP OpenID4VCI / Wallet Attestation (L225) — the Wallet Attestation MUST be a validly signed JWT with an x5c-verified chain, not merely present"]
 async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
     let cfg = test_config();
     let storage = test_storage().await;
@@ -808,10 +853,14 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
 
     // Not a JWT at all — no dots, no header, no signature. A conformant
     // issuer requiring Wallet Attestation must reject this.
+    let required = AttestationMode {
+        mode: Mode::Required,
+        trusted_anchors: Vec::new(),
+    };
     let result = handle_token_request(
         &storage,
         &token_req,
-        Mode::Required,
+        &required,
         Some("not-a-jwt-at-all"),
         1_700_000_010,
     )
@@ -840,8 +889,14 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         code_verifier: None,
     };
 
-    let result =
-        handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_000).await;
+    let result = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_000,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -883,8 +938,14 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         code_verifier: None,
     };
 
-    let result =
-        handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010).await;
+    let result = handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -953,9 +1014,15 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         client_id: Some("wallet-dev".to_string()),
         code_verifier: Some(code_verifier.to_string()),
     };
-    handle_token_request(&storage, &token_req, Mode::Disabled, None, 1_700_000_010)
-        .await
-        .expect("a stray tx_code must not affect the authorization_code grant");
+    handle_token_request(
+        &storage,
+        &token_req,
+        &disabled_attestation(),
+        None,
+        1_700_000_010,
+    )
+    .await
+    .expect("a stray tx_code must not affect the authorization_code grant");
 }
 
 // ---------------------------------------------------------------------------
@@ -1058,6 +1125,112 @@ fn key_attestation_jwt_custom(
     let signer = FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
     let sig_b64 = URL_SAFE_NO_PAD.encode(signer.sign(signing_input.as_bytes()).unwrap());
     (format!("{signing_input}.{sig_b64}"), ca.cert_pem)
+}
+
+/// Builds a validly signed, fully-formed Wallet Attestation JWT (OpenID4VCI
+/// Appendix E) chained to a fresh CA, with no Client Attestation PoP JWT --
+/// there is nowhere in this workspace's public API to even supply one.
+/// Returns (jwt, ca_cert_pem).
+fn signed_wallet_attestation_no_pop(exp: i64) -> (String, String) {
+    use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
+    use foundry_core::pki::{issue_leaf, new_ca};
+
+    let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let leaf_der = {
+        let cert = foundry_core::trust::parse_cert_pem(leaf.cert_pem.as_bytes()).unwrap();
+        use x509_cert::der::Encode;
+        cert.to_der().unwrap()
+    };
+    let x5c = vec![base64::engine::general_purpose::STANDARD.encode(&leaf_der)];
+
+    let header = serde_json::json!({
+        "typ": "oauth-client-attestation+jwt",
+        "alg": "ES256",
+        "x5c": x5c,
+    });
+    let payload = serde_json::json!({
+        "iss": "https://wallet-provider.example.com",
+        "sub": "https://wallet.example.org",
+        "exp": exp,
+        "cnf": { "jwk": sample_attested_jwk() },
+    });
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let signer = FileSigner::from_pem(leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+    let sig_b64 = URL_SAFE_NO_PAD.encode(signer.sign(signing_input.as_bytes()).unwrap());
+
+    (format!("{signing_input}.{sig_b64}"), ca.cert_pem)
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-14 — OpenID4VCI Wallet Attestation (L2600): the Wallet MUST
+// generate, and per draft-ietf-oauth-attestation-based-client-auth Sec5.2
+// (which OpenID4VCI Appendix E incorporates) the Authorization Server MUST
+// verify, a Client Attestation PoP JWT proving possession of the key the
+// Wallet Attestation's cnf.jwk attests to.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-14: OpenID4VCI Wallet Attestation (L2600) -- the Client Attestation PoP JWT is never verified; handle_token_request has no parameter for one at all, so a stolen or replayed Wallet Attestation JWT is accepted with no proof the presenter holds the attested key"]
+async fn vci_0232_wallet_attestation_pop_jwt_is_never_verified() {
+    let cfg = test_config();
+    let storage = test_storage().await;
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+        .await
+        .unwrap();
+    let code = resp
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+
+    let token_req = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+
+    let now = now_secs();
+    let (attestation_jwt, ca_pem) = signed_wallet_attestation_no_pop(now + 100_000);
+    // TrustAnchor.certs is a file path (TrustStore::from_config reads it from
+    // disk), not inline PEM text -- mirrors the pattern in credential.rs's
+    // own key-attestation trust-anchor tests.
+    let ca_dir = tempfile::tempdir().unwrap();
+    let ca_path = ca_dir.path().join("wallet-provider-ca.pem");
+    std::fs::write(&ca_path, &ca_pem).unwrap();
+    let required = AttestationMode {
+        mode: Mode::Required,
+        trusted_anchors: vec![foundry_core::config::TrustAnchor {
+            name: "wallet-provider-ca".to_string(),
+            certs: ca_path.to_str().unwrap().to_string(),
+        }],
+    };
+
+    // No Client Attestation PoP JWT is presented at all -- there is no
+    // parameter on handle_token_request to carry one. A conformant issuer
+    // must still reject this, since presenting a Wallet Attestation with no
+    // proof of key possession is exactly what the PoP JWT exists to prevent.
+    let result =
+        handle_token_request(&storage, &token_req, &required, Some(&attestation_jwt), now).await;
+
+    assert!(
+        result.is_err(),
+        "a Wallet Attestation presented without a Client Attestation PoP JWT proving possession \
+         of the attested key must be rejected"
+    );
 }
 
 /// Builds a `jwt`-proof-type JWT with an overridable `typ` header and `aud`

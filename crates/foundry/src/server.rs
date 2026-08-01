@@ -435,7 +435,7 @@ async fn token_handler(
     foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
-        state.config.issuer.wallet_attestation.mode.clone(),
+        &state.config.issuer.wallet_attestation,
         attestation_hdr,
         now,
     )

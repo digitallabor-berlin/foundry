@@ -10,8 +10,9 @@ use crate::transaction::{
 };
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use foundry_core::config::Mode;
+use foundry_core::config::AttestationMode;
 use foundry_core::storage::Storage;
+use foundry_core::trust::TrustStore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -42,23 +43,30 @@ pub struct TokenResponse {
 
 /// `skip_all` is mandatory: `req` carries the pre-authorized code, the
 /// authorization code and the transaction code, none of which may ever be
-/// logged.
+/// logged; `wallet_attestation` carries the issuer's trusted Wallet-Provider
+/// CAs and `attestation_header` carries the wallet's raw attestation JWT.
 #[tracing::instrument(skip_all, fields(grant_type = %req.grant_type))]
 pub async fn handle_token_request(
     storage: &dyn Storage,
     req: &TokenRequest,
-    attestation_mode: Mode,
+    wallet_attestation: &AttestationMode,
     attestation_header: Option<&str>,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
     tracing::info!(
-        wallet_attestation_mode = ?attestation_mode,
+        wallet_attestation_mode = ?wallet_attestation.mode,
         wallet_attestation_present = attestation_header.is_some(),
         "token request received"
     );
     let verifier = DefaultAttestationVerifier;
+    let trust_store = TrustStore::from_config(&wallet_attestation.trusted_anchors)?;
     verifier
-        .verify_wallet_attestation(attestation_mode, attestation_header)
+        .verify_wallet_attestation(
+            wallet_attestation.mode.clone(),
+            attestation_header,
+            &trust_store,
+            now_unix,
+        )
         .inspect_err(|e| {
             tracing::warn!(error.kind = e.kind(), "wallet attestation rejected");
         })?;
@@ -200,7 +208,18 @@ async fn mint_and_save_tokens(
 mod tests {
     use super::*;
     use crate::transaction::{load_transaction, IssuanceState, IssuanceTransaction};
+    use foundry_core::config::Mode;
     use foundry_core::storage::SqliteStorage;
+
+    /// `Mode::Disabled`, wrapped in the `AttestationMode` `handle_token_request`
+    /// now takes. Keeps the 15+ call sites below that don't exercise wallet
+    /// attestation readable.
+    fn disabled() -> AttestationMode {
+        AttestationMode {
+            mode: Mode::Disabled,
+            trusted_anchors: Vec::new(),
+        }
+    }
 
     async fn test_storage() -> SqliteStorage {
         let dir = tempfile::tempdir().unwrap();
@@ -248,7 +267,7 @@ mod tests {
             code_verifier: None,
         };
 
-        let res = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let res = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap();
 
@@ -280,7 +299,7 @@ mod tests {
             code_verifier: None,
         };
 
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
 
@@ -308,7 +327,7 @@ mod tests {
             client_id: None,
             code_verifier: None,
         };
-        handle_token_request(&storage, &wrong_req, Mode::Disabled, None, 1_700_000_010)
+        handle_token_request(&storage, &wrong_req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
 
@@ -321,7 +340,7 @@ mod tests {
             client_id: None,
             code_verifier: None,
         };
-        let res = handle_token_request(&storage, &good_req, Mode::Disabled, None, 1_700_000_020)
+        let res = handle_token_request(&storage, &good_req, &disabled(), None, 1_700_000_020)
             .await
             .expect("the legitimate holder must still be able to redeem the code afterwards");
 
@@ -352,11 +371,11 @@ mod tests {
             code_verifier: None,
         };
 
-        handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .expect("first redemption must succeed");
 
-        let replay_err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_020)
+        let replay_err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_020)
             .await
             .unwrap_err();
 
@@ -382,7 +401,7 @@ mod tests {
             code_verifier: None,
         };
 
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
 
@@ -433,7 +452,7 @@ mod tests {
             .unwrap();
 
         let req = auth_code_req();
-        let res = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let res = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap();
 
@@ -448,7 +467,7 @@ mod tests {
         assert!(updated_tx.authorization_code.is_none());
 
         // Replay: the code must no longer resolve to any transaction.
-        let replay_err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_020)
+        let replay_err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_020)
             .await
             .unwrap_err();
         assert!(matches!(replay_err, IssuanceError::InvalidGrant(_)));
@@ -465,7 +484,7 @@ mod tests {
         let mut req = auth_code_req();
         req.code_verifier = Some("totally-wrong-verifier-value-1234567890".to_string());
 
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidGrant(_)));
@@ -473,7 +492,7 @@ mod tests {
         // The code must still be usable afterward: a failed PKCE check must
         // not burn a legitimate holder's code.
         let good_req = auth_code_req();
-        handle_token_request(&storage, &good_req, Mode::Disabled, None, 1_700_000_020)
+        handle_token_request(&storage, &good_req, &disabled(), None, 1_700_000_020)
             .await
             .unwrap();
     }
@@ -489,7 +508,7 @@ mod tests {
         let mut req = auth_code_req();
         req.redirect_uri = Some("https://evil.example.com/callback".to_string());
 
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidGrant(_)));
@@ -502,7 +521,7 @@ mod tests {
         let mut req = auth_code_req();
         req.code = Some("no-such-code".to_string());
 
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidGrant(_)));
@@ -518,7 +537,7 @@ mod tests {
             .unwrap();
 
         let req = auth_code_req();
-        let err = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let err = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidGrant(_)));
@@ -543,7 +562,7 @@ mod tests {
             code_verifier: None,
         };
 
-        let res = handle_token_request(&storage, &req, Mode::Disabled, None, 1_700_000_010)
+        let res = handle_token_request(&storage, &req, &disabled(), None, 1_700_000_010)
             .await
             .unwrap();
         assert!(!res.access_token.is_empty());
