@@ -35,6 +35,16 @@ pub struct KeyAttestationClaims {
     pub nonce: String,
 }
 
+/// The claims a verified Wallet Attestation JWT (OpenID4VCI Appendix E) vouches
+/// for, carried forward so the Client Attestation PoP JWT (ABCA draft -07) can
+/// be checked against them: `sub` is the PoP's expected `iss`, `cnf_jwk` is the
+/// key the PoP's signature must verify against (GAP-VCI-14).
+#[derive(Debug, Clone)]
+pub struct ValidatedAttestation {
+    pub sub: String,
+    pub cnf_jwk: Jwk,
+}
+
 /// Verify a Wallet Attestation JWT (OpenID4VCI Appendix E "Wallet Attestation",
 /// L2564) against `trust_store` (the issuer's configured Wallet-Provider CAs).
 ///
@@ -47,45 +57,44 @@ pub struct KeyAttestationClaims {
 ///
 /// This validates the attestation JWT only, not the Client Attestation PoP
 /// JWT `draft-ietf-oauth-attestation-based-client-auth` also requires
-/// (OpenID4VCI Appendix E, L2600) — that is GAP-VCI-14, tracked separately.
-/// `cnf.jwk` and `sub` are required and parsed here (per Appendix E) so a
-/// future PoP implementation has them available, even though this function's
-/// caller does not yet consume them.
+/// (OpenID4VCI Appendix E, L2600) — that PoP check is
+/// `validate_client_attestation_pop_jwt`, a separate function, against the
+/// `sub`/`cnf_jwk` this function returns.
 /// `skip_all` is mandatory: the argument is the attestation JWT itself.
 #[tracing::instrument(skip_all)]
 fn validate_wallet_attestation_jwt(
     attestation_jwt: &str,
     trust_store: &TrustStore,
     now_unix: i64,
-) -> Result<(), IssuanceError> {
+) -> Result<ValidatedAttestation, IssuanceError> {
     let parts: Vec<&str> = attestation_jwt.split('.').collect();
     if parts.len() != 3 {
-        return Err(IssuanceError::InvalidRequest(
+        return Err(IssuanceError::InvalidClient(
             "wallet attestation: invalid JWS format, expected 3 dot-separated parts".into(),
         ));
     }
 
     let header_bytes = B64URL.decode(parts[0]).map_err(|e| {
-        IssuanceError::InvalidRequest(format!("wallet attestation: invalid base64url header: {e}"))
+        IssuanceError::InvalidClient(format!("wallet attestation: invalid base64url header: {e}"))
     })?;
     let header: serde_json::Value = serde_json::from_slice(&header_bytes).map_err(|e| {
-        IssuanceError::InvalidRequest(format!("wallet attestation: invalid header JSON: {e}"))
+        IssuanceError::InvalidClient(format!("wallet attestation: invalid header JSON: {e}"))
     })?;
 
     let typ = header.get("typ").and_then(|v| v.as_str()).ok_or_else(|| {
-        IssuanceError::InvalidRequest("wallet attestation: missing typ header".into())
+        IssuanceError::InvalidClient("wallet attestation: missing typ header".into())
     })?;
     if typ != "oauth-client-attestation+jwt" {
-        return Err(IssuanceError::InvalidRequest(format!(
+        return Err(IssuanceError::InvalidClient(format!(
             "wallet attestation: invalid typ header: {typ}, expected oauth-client-attestation+jwt"
         )));
     }
 
     let alg = header.get("alg").and_then(|v| v.as_str()).ok_or_else(|| {
-        IssuanceError::InvalidRequest("wallet attestation: missing alg header".into())
+        IssuanceError::InvalidClient("wallet attestation: missing alg header".into())
     })?;
     if alg == "none" || alg.starts_with("HS") {
-        return Err(IssuanceError::InvalidRequest(format!(
+        return Err(IssuanceError::InvalidClient(format!(
             "wallet attestation: alg '{alg}' is not permitted (must not be none or symmetric)"
         )));
     }
@@ -97,10 +106,10 @@ fn validate_wallet_attestation_jwt(
         .and_then(|v| v.as_array())
         .filter(|c| !c.is_empty())
         .ok_or_else(|| {
-            IssuanceError::InvalidRequest("wallet attestation: header has no x5c chain".into())
+            IssuanceError::InvalidClient("wallet attestation: header has no x5c chain".into())
         })?;
     let leaf_b64 = x5c[0].as_str().ok_or_else(|| {
-        IssuanceError::InvalidRequest("wallet attestation: x5c[0] is not a string".into())
+        IssuanceError::InvalidClient("wallet attestation: x5c[0] is not a string".into())
     })?;
     let leaf_pem = x5c_entry_to_pem(leaf_b64)?;
     let intermediates: Vec<Vec<u8>> = x5c[1..]
@@ -116,7 +125,7 @@ fn validate_wallet_attestation_jwt(
         .subject_public_key_info()
         .to_der()
         .map_err(|e| {
-            IssuanceError::InvalidRequest(format!(
+            IssuanceError::InvalidClient(format!(
                 "wallet attestation: failed to re-encode leaf public key: {e}"
             ))
         })?;
@@ -129,12 +138,12 @@ fn validate_wallet_attestation_jwt(
     spki_pem.push_str("-----END PUBLIC KEY-----\n");
 
     let verifier = ES256.verifier_from_pem(spki_pem.as_bytes()).map_err(|e| {
-        IssuanceError::InvalidRequest(format!(
+        IssuanceError::InvalidClient(format!(
             "wallet attestation: unable to build verifier from leaf cert: {e}"
         ))
     })?;
     josekit::jwt::decode_with_verifier(attestation_jwt, &verifier).map_err(|e| {
-        IssuanceError::InvalidRequest(format!(
+        IssuanceError::InvalidClient(format!(
             "wallet attestation: signature verification failed: {e}"
         ))
     })?;
@@ -144,52 +153,55 @@ fn validate_wallet_attestation_jwt(
     validate_chain(&leaf_pem, &intermediates, trust_store, now_unix as u64)?;
 
     let payload_bytes = B64URL.decode(parts[1]).map_err(|e| {
-        IssuanceError::InvalidRequest(format!(
+        IssuanceError::InvalidClient(format!(
             "wallet attestation: invalid base64url payload: {e}"
         ))
     })?;
     let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).map_err(|e| {
-        IssuanceError::InvalidRequest(format!("wallet attestation: invalid payload JSON: {e}"))
+        IssuanceError::InvalidClient(format!("wallet attestation: invalid payload JSON: {e}"))
     })?;
 
     let exp = payload.get("exp").and_then(|v| v.as_i64()).ok_or_else(|| {
-        IssuanceError::InvalidRequest("wallet attestation: missing exp claim".into())
+        IssuanceError::InvalidClient("wallet attestation: missing exp claim".into())
     })?;
     if now_unix > exp {
-        return Err(IssuanceError::InvalidRequest(
+        return Err(IssuanceError::InvalidClient(
             "wallet attestation: has expired".into(),
         ));
     }
     if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64()) {
         if now_unix < nbf {
-            return Err(IssuanceError::InvalidRequest(
+            return Err(IssuanceError::InvalidClient(
                 "wallet attestation: not yet valid (nbf in the future)".into(),
             ));
         }
     }
 
     // OpenID4VCI Appendix E: cnf.jwk and sub are REQUIRED. Parsed (not just
-    // presence-checked) so a malformed cnf.jwk cannot silently pass, and kept
-    // available for a future PoP implementation (GAP-VCI-14) even though
-    // this function's caller does not yet consume them.
+    // presence-checked) so a malformed cnf.jwk cannot silently pass. Returned
+    // to the caller: sub is the Client Attestation PoP JWT's expected `iss`,
+    // cnf_jwk is the key its signature must verify against (GAP-VCI-14).
     let cnf_jwk_value = payload
         .get("cnf")
         .and_then(|v| v.get("jwk"))
         .ok_or_else(|| {
-            IssuanceError::InvalidRequest("wallet attestation: missing cnf.jwk claim".into())
+            IssuanceError::InvalidClient("wallet attestation: missing cnf.jwk claim".into())
         })?;
-    let _cnf_jwk: Jwk = serde_json::from_value(cnf_jwk_value.clone()).map_err(|e| {
-        IssuanceError::InvalidRequest(format!("wallet attestation: invalid cnf.jwk: {e}"))
+    let cnf_jwk: Jwk = serde_json::from_value(cnf_jwk_value.clone()).map_err(|e| {
+        IssuanceError::InvalidClient(format!("wallet attestation: invalid cnf.jwk: {e}"))
     })?;
-    let _sub = payload
+    let sub = payload
         .get("sub")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
-            IssuanceError::InvalidRequest("wallet attestation: missing or empty sub claim".into())
+            IssuanceError::InvalidClient("wallet attestation: missing or empty sub claim".into())
         })?;
 
-    Ok(())
+    Ok(ValidatedAttestation {
+        sub: sub.to_string(),
+        cnf_jwk,
+    })
 }
 
 /// Verify a key-attestation JWT (OpenID4VCI Appendix D.1) against `trust_store`
@@ -354,21 +366,26 @@ impl WalletAttestationVerifier for DefaultAttestationVerifier {
         trust_store: &TrustStore,
         now_unix: i64,
     ) -> Result<(), IssuanceError> {
+        // `validate_wallet_attestation_jwt` now returns `ValidatedAttestation`
+        // (Task 5), but this trait's own signature does not change until
+        // Task 8 rewires it to return `Option<PopClaims>`; discard it here.
         match mode {
             // Disabled skips validation entirely, even if a header happens
             // to be present.
             Mode::Disabled => Ok(()),
             Mode::Required => {
                 let jwt = attestation_header.ok_or_else(|| {
-                    IssuanceError::InvalidRequest("wallet attestation is required".into())
+                    IssuanceError::InvalidClient("wallet attestation is required".into())
                 })?;
-                validate_wallet_attestation_jwt(jwt, trust_store, now_unix)
+                validate_wallet_attestation_jwt(jwt, trust_store, now_unix).map(|_| ())
             }
             // Optional tolerates absence, but a *present* attestation must
             // still be a validly signed, trust-anchored JWT — presence and
             // validity are distinct checks (GAP-HAIP-04).
             Mode::Optional => match attestation_header {
-                Some(jwt) => validate_wallet_attestation_jwt(jwt, trust_store, now_unix),
+                Some(jwt) => {
+                    validate_wallet_attestation_jwt(jwt, trust_store, now_unix).map(|_| ())
+                }
                 None => Ok(()),
             },
         }
@@ -410,7 +427,7 @@ mod tests {
         include_x5c: bool,
         exp: Option<i64>,
         nbf: Option<i64>,
-        include_cnf_jwk: bool,
+        cnf_jwk: Option<serde_json::Value>,
         include_sub: bool,
     ) -> (String, String) {
         let ca = new_ca("Test Wallet Provider Root CA", 3650).unwrap();
@@ -456,11 +473,8 @@ mod tests {
         if let Some(v) = nbf {
             payload.insert("nbf".to_string(), serde_json::json!(v));
         }
-        if include_cnf_jwk {
-            payload.insert(
-                "cnf".to_string(),
-                serde_json::json!({ "jwk": sample_jwk() }),
-            );
+        if let Some(cnf_jwk) = cnf_jwk {
+            payload.insert("cnf".to_string(), serde_json::json!({ "jwk": cnf_jwk }));
         }
 
         let header_b64 =
@@ -487,7 +501,7 @@ mod tests {
             true,
             Some(exp),
             None,
-            true,
+            Some(sample_jwk()),
             true,
         )
     }
@@ -503,6 +517,56 @@ mod tests {
             .expect("a validly signed, trust-anchored attestation must be accepted");
     }
 
+    /// GAP-VCI-14: `sub` and `cnf_jwk` are the two claims the Client
+    /// Attestation PoP JWT is verified against (Task 6) -- this proves they
+    /// actually come back from a valid attestation, not just that validation
+    /// passes.
+    #[test]
+    fn returns_the_attestations_sub_and_a_usable_cnf_jwk() {
+        let now = now_secs();
+        let (jwt, ca_pem) = signed_wallet_attestation(now + 100_000);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let validated = validate_wallet_attestation_jwt(&jwt, &store, now)
+            .expect("a validly signed, trust-anchored attestation must be accepted");
+        assert_eq!(validated.sub, "https://wallet.example.org");
+        // Must be usable as a real ES256 verification key, not merely "some
+        // JSON value" -- proves it was parsed as a Jwk, not just presence-checked.
+        ES256
+            .verifier_from_jwk(&validated.cnf_jwk)
+            .expect("cnf_jwk must be usable as an ES256 verification key");
+    }
+
+    /// The `cnf.jwk` claim can be well-formed JSON and still be unusable as an
+    /// ES256 verification key (wrong curve). This must be rejected, not
+    /// silently accepted as "parses as *a* JWK".
+    #[test]
+    fn rejects_a_cnf_jwk_that_is_not_an_ec_p256_key() {
+        let now = now_secs();
+        let (jwt, ca_pem) = wallet_attestation_jwt_custom(
+            "ES256",
+            "oauth-client-attestation+jwt",
+            true,
+            Some(now + 100_000),
+            None,
+            Some(wrong_curve_jwk()),
+            true,
+        );
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        // The wrong-curve JWK still parses structurally, so acceptance would
+        // be silent here; the failure must surface downstream when the PoP
+        // check (Task 6) tries to build a verifier from it. Confirmed here
+        // via ES256::verifier_from_jwk directly, since attestation.rs
+        // currently has no caller that does this check itself.
+        let validated = validate_wallet_attestation_jwt(&jwt, &store, now)
+            .expect("the attestation JWT itself is validly signed and trust-anchored");
+        assert!(
+            ES256.verifier_from_jwk(&validated.cnf_jwk).is_err(),
+            "a P-384 EC key must not be usable as an ES256 verification key"
+        );
+    }
+
     /// GAP-HAIP-04: this is the bypass the gap describes. Before the fix, an
     /// arbitrary non-JWT string passed `Mode::Required` because the checker
     /// only tested presence.
@@ -514,7 +578,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some("not-a-jwt-at-all"), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -539,7 +603,7 @@ mod tests {
             true,
             Some(now + 100_000),
             None,
-            true,
+            Some(sample_jwk()),
             true,
         );
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
@@ -547,7 +611,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -559,7 +623,7 @@ mod tests {
             true,
             Some(now + 100_000),
             None,
-            true,
+            Some(sample_jwk()),
             true,
         );
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
@@ -567,7 +631,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -579,7 +643,7 @@ mod tests {
             false,
             Some(now + 100_000),
             None,
-            true,
+            Some(sample_jwk()),
             true,
         );
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
@@ -587,7 +651,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -599,7 +663,7 @@ mod tests {
             true,
             Some(now + 100_000),
             None,
-            true,
+            Some(sample_jwk()),
             true,
         );
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
@@ -607,7 +671,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -619,7 +683,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, Some(&jwt), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -642,7 +706,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Optional, Some("not-a-jwt-at-all"), &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     #[test]
@@ -666,7 +730,7 @@ mod tests {
         let err = DefaultAttestationVerifier
             .verify_wallet_attestation(Mode::Required, None, &store, now)
             .unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
     use super::verify_key_attestation_jwt;
@@ -728,6 +792,15 @@ mod tests {
         let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
         let mut jwk = kp.to_jwk_public_key();
         jwk.set_algorithm("ES256");
+        serde_json::to_value(&jwk).unwrap()
+    }
+
+    /// Structurally valid EC JWK, but the wrong curve for ES256 -- `kty` is
+    /// still "EC" so it clears the coarse `kty` check, but `crv` is "P-384"
+    /// so `ES256.verifier_from_jwk` must still reject it.
+    fn wrong_curve_jwk() -> serde_json::Value {
+        let kp = EcKeyPair::generate(EcCurve::P384).unwrap();
+        let jwk = kp.to_jwk_public_key();
         serde_json::to_value(&jwk).unwrap()
     }
 
