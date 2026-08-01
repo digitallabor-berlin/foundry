@@ -326,11 +326,14 @@ spec's check table. Every failure is `IssuanceError::InvalidClient`.
 
 **Verify:** `cargo test -p foundry-issuer`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output; also ran full `cargo test
+  --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo fmt --check` (all clean, with a temporary documented
+  `#[allow(dead_code)]` since Task 8 is the production caller)
+- [x] Commit
 
 ---
 
@@ -596,3 +599,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 3 (`AttestationMode.pop_max_age_secs`, default 300; 46-literal ripple across 19 files via a brace-aware script, isolated from semantic tasks; caught and fixed the script's own `-> AttestationMode {` false-positive bug via full revert + re-run before committing; 4 deserialization tests) — `7242464`
 - 2026-08-01 — Task 4 (`IssuanceError::InvalidClient` -> HTTP 400 `invalid_client` per RFC 6749 sect-5.2, migrated onto `wallet_error_response`; admin surface falls through its existing catch-all to 500; identified and characterized a pre-existing `log_capture` test-harness flake in server.rs — confirmed present on the base commit before this task, out of scope, noted for final review) — `08147e0`
 - 2026-08-01 — Task 5 (`ValidatedAttestation { sub, cnf_jwk }` returned from `validate_wallet_attestation_jwt`; migrated 21/22 `InvalidRequest` sites to `InvalidClient`, deliberately excluding the unused `verify_key_attestation` dead-code path as a distinct non-client-auth mechanism; `token.rs` needed no edits, contrary to the plan's file list, since it only calls the unchanged trait method) — `47e1c53`
+- 2026-08-01 — Task 6 (`validate_client_attestation_pop_jwt`, 9 ABCA sect-5.2 checks each citing its clause; 29 tests; no `exp` check by design, pinned by a dedicated test; temporary `#[allow(dead_code)]` on the new items pending Task 8's wiring) — `45ea004`
