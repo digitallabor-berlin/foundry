@@ -80,29 +80,48 @@ pass against a single canonicalization.
 
 **Files:** `crates/foundry-mdoc/src/types.rs`
 
-- [ ] Add `SessionTranscriptParams` enum (`Redirect`, `DcApi`) with spec
+- [x] Add `SessionTranscriptParams` enum (`Redirect`, `DcApi`) with spec
       citations on each variant.
-- [ ] Add `build_session_transcript(&SessionTranscriptParams) -> Result<Vec<u8>, String>`
+- [x] Add `build_session_transcript(&SessionTranscriptParams) -> Result<Vec<u8>, String>`
       emitting `[null, null, Handover]`, where `Handover` is
       `["OpenID4VPHandover" | "OpenID4VPDCAPIHandover", bstr sha256(cbor(info))]`.
-- [ ] `jwk_thumbprint: None` MUST encode CBOR `null` as the third info element.
-- [ ] **KAT — redirects:** exact equality against the published
+- [x] `jwk_thumbprint: None` MUST encode CBOR `null` as the third info element.
+- [x] **KAT — redirects:** exact equality against the published
       `SessionTranscript` hex
       `83f6f682714f70656e494434565048616e646f7665725820048bc053c00442af9b8eed494cefdd9d95240d254b046b11b68013722aad38ac`
       using inputs `client_id="x509_san_dns:example.com"`,
       `nonce="exc7gBkxjx1rdc9udRrveKvSsJIq80avlXeLHhGwqtA"`,
       `jwk_thumbprint=Some(4283ec92…9047)`,
       `response_uri="https://example.com/response"`.
-- [ ] **KAT — DC API:** exact equality against
+- [x] **KAT — DC API:** exact equality against
       `83f6f682764f70656e4944345650444341504948616e646f7665725820fbece366f4212f9762c74cfdbf83b8c69e371d5d68cea09cb4c48ca6daab761a`
       using `origin="https://example.com"`, same nonce, same thumbprint.
-- [ ] Assert the intermediate `…HandoverInfo` encodings too, so a failure
+- [x] Assert the intermediate `…HandoverInfo` encodings too, so a failure
       localises to info-vs-hash rather than "bytes differ".
-- [ ] `serialize_session_transcript` stays for now — Task 3 deletes it.
-- [ ] Gates ×4.
+- [x] `serialize_session_transcript` stays for now — Task 3 deletes it.
+- [x] Gates ×4.
 
 **Done when:** both published `SessionTranscript` vectors reproduce
 byte-for-byte.
+
+**Landed:** `f327937`.
+
+**Deviation — test transcription method changed mid-task.** The plan implied
+inlining the vectors as ordinary literals. The first draft re-joined the
+spec's line-wrapped hex by hand and transposed four characters
+(`6578633767` → `6563376742`), producing a *test* failure against *correct*
+code. Replaced with a `spec_hex()` helper that strips whitespace at runtime,
+so the spec's blocks are pasted in their published layout and can be diffed
+against the spec line-for-line. Recorded because it changes how a reviewer
+should check these literals.
+
+**Why these KATs cannot pass vacuously:** the expected `SessionTranscript`
+literals embed SHA-256 digests authored by the spec (`048bc053…`,
+`fbece366…`); the implementation reproduced them from the input parameters
+alone. The transposition failure additionally proved the assertions are live
+to a 4-character difference. Two extra tests pin the axes the vectors cannot:
+redirect-vs-DC-API transcripts never collide, and the thumbprint genuinely
+affects the hash.
 
 ---
 
