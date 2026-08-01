@@ -185,32 +185,68 @@ prediction exactly.
 `foundry-verifier/tests/conformance_vp.rs`,
 `docs/conformance/openid4vc-conformance.md`
 
-- [ ] Replace single-Origin selection with candidate iteration: one `DcApi`
+- [x] Replace single-Origin selection with candidate iteration: one `DcApi`
       params per configured origin (plus fallback when unset); call
       `verify_mdoc` per candidate; accept the first that verifies; on total
       failure surface the last error.
-- [ ] Test: device signature over the spec-correct transcript verifies; the
+- [x] Test: device signature over the spec-correct transcript verifies; the
       same signature over the **old ad-hoc** transcript does **not** (guards
       against the fix being vacuous).
-- [ ] Test: the **second** configured Origin verifies (proves retry, not
+- [x] Test: the **second** configured Origin verifies (proves retry, not
       first-only).
-- [ ] Test: an Origin matching neither a configured entry nor the fallback is
+- [x] Test: an Origin matching neither a configured entry nor the fallback is
       rejected.
-- [ ] Test: `dc_api` vs `dc_api.jwt` select `null` vs thumbprint.
-- [ ] Remove `#[ignore]` from `gap_vp_06_…`.
-- [ ] **Bookkeeping, same commit:** delete the GAP-VP-06 register row; flip
+- [x] Test: `dc_api` vs `dc_api.jwt` select `null` vs thumbprint — asserted in
+      **both** directions (correct choice accepted, opposite rejected).
+- [x] Remove `#[ignore]` from `gap_vp_06_…`.
+- [x] **Bookkeeping, same commit:** delete the GAP-VP-06 register row; flip
       VP-0229, VP-0232–VP-0240, VP-0243–VP-0250 to `conforming` with evidence
       naming `build_session_transcript`; recount the OpenID4VP Summary row.
-- [ ] **VP-0209 — judgement call, re-verify against the code, do not assume.**
-      Read `verify.rs` as it now stands and decide whether both format halves
-      are conformant. If it flips, its `Test` column needs a test that
-      actually passes. Record the reasoning in the Progress Log either way.
-- [ ] `cargo test -p foundry --test conformance_report` (11/11) **before**
+- [x] **VP-0209 — judgement call, re-verify against the code, do not assume.**
+- [x] `cargo test -p foundry --test conformance_report` (11/11) **before**
       committing.
-- [ ] Gates ×4.
+- [x] Gates ×4. One `cargo fmt` fixup applied and re-verified.
 
 **Done when:** GAP-VP-06 is absent from the register, every citing clause is
 reconciled, and the 11 consistency checks are green.
+
+**Landed:** `facbcfa`.
+
+**VP-0209 verdict and reasoning (as required, recorded not assumed).** Re-read
+`verify.rs` as it now stands. The clause covers *all* DC API response formats.
+Its SD-JWT VC half became conforming in the Tier 1 run (VP-0265); its mdoc half
+is closed here, because a DC API presentation is now bound by
+`OpenID4VPDCAPIHandover` carrying the Origin. Flipped to `conforming`.
+
+The substantive point worth recording: the two mechanisms **differ in
+prefixing**. The KB-JWT `aud` carries `origin:`; the Handover's Origin element
+MUST NOT (L2997). VP-0209's requirement text names the prefixed form, which is
+the SD-JWT VC mechanism only. They are reconciled separately and must not be
+conflated — a future reader could otherwise "fix" one to match the other and
+break interop. That is now written into the clause's evidence.
+
+**Second declared exception to "never rewrite gap tests".** The gap test's
+block comment *and* its assertion message both named
+`serialize_session_transcript`, deleted in Task 3. The needle
+(`b"OpenID4VPHandover"`), the assertion logic and the test name are untouched;
+only the symbol references were retargeted. Rationale: a failure message
+pointing at a nonexistent function would misdirect whoever hits a future
+regression, and the block comment asserting "foundry never constructs this"
+next to a passing test would be actively false. Recorded rather than taken
+silently, since the plan authorised only the constructor swap.
+
+**Scope creep, deliberate and small:** four clauses that were *already*
+`conforming` (VP-0230/0231/0241/0242) cited `serialize_session_transcript` as
+evidence. Verdicts unchanged, evidence retargeted — a stale symbol reference in
+a conformance record is still a defect, and leaving four of them behind while
+closing this gap would have been dishonest bookkeeping.
+
+**Counts verified, not asserted:** the OpenID4VP Summary was recomputed by
+counting inventory rows programmatically (conforming 85, gap 11) and only then
+compared against the 66+19 / 30−19 arithmetic. Both agreed. `--ignored` sweep
+landed at **22 FAILED + 1 ok** against **21** remaining register rows, the
+extra failing test being GAP-VCI-05's second citation — matching the plan's
+prediction exactly.
 
 ---
 
