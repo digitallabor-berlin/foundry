@@ -2059,7 +2059,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // GAP-VP-06 — mdoc SessionTranscript Handover binding.
+    // mdoc SessionTranscript Handover binding (formerly GAP-VP-06, closed
+    // 2026-08-02).
     //
     // `foundry-mdoc`'s own tests pin the transcript bytes against OpenID4VP's
     // published vectors. These tests cover the other half: that the verifier

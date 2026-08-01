@@ -252,14 +252,36 @@ prediction exactly.
 
 ### Task 5: Reconciliation
 
-- [ ] `cargo test --workspace --no-fail-fast -- --ignored`: enumerate the
-      failing set and **diff it line-by-line against the prediction** — 21 gap
-      register rows remain (22 − GAP-VP-06), and GAP-VCI-05 is cited by two
-      tests, so expect **22 failing gap tests** plus the passing E2E
-      `full_flow_issue_verify_revoke_reverify`. Do not merely count.
-- [ ] Confirm `openapi.json` / `openapi-wallet.json` byte-identical to `main`.
-- [ ] Confirm no stale narrative gap counts elsewhere in the report.
-- [ ] Gates ×4 on the final tree.
+- [x] `cargo test --workspace --no-fail-fast -- --ignored`: enumerate the
+      failing set and **diff it line-by-line against the prediction**.
+- [x] Confirm `openapi.json` / `openapi-wallet.json` byte-identical to `main`.
+- [x] Confirm no stale narrative gap counts elsewhere in the report.
+- [x] Gates ×4 on the final tree.
+
+**Reconciliation was set-diffed, not counted.** A script parsed the gap
+register's `Test` column and diffed it against the actual `--ignored` results:
+
+```
+register rows          : 21
+distinct cited tests    : 21
+cited-but-not-failing   : none
+failing-but-not-cited   : vci_0186_key_attestation_without_iat_is_rejected
+actual ok (ignored)     : full_flow_issue_verify_revoke_reverify
+```
+
+The single "failing-but-not-cited" entry is GAP-VCI-05's **second** citing
+test (the register row names `vci_0199_0209_0224_…`, while clause VCI-0186
+names `vci_0186_…`) — the known double-citation carried over from the Tier 1
+run, not a new discrepancy. So 22 FAILED = 21 gaps + 1 second citation, and
+every remaining gap is accounted for **by name**.
+
+**Also checked:** 7 gap clauses carry an empty `Test` column — identical to the
+count on `main`, so pre-existing (their register row carries the test), not
+introduced here. `openapi.json`/`openapi-wallet.json` produce an empty
+`git diff main..HEAD`. The report's Status line carries no baked-in gap count.
+Residual `GAP-VP-06` mentions in code are all explicitly historical
+("Formerly…", "before … was closed"); one section header that still read like
+an active marker was reworded so a future grep for open gaps is not misled.
 
 ---
 
