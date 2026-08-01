@@ -254,13 +254,13 @@ renumber. Recount the OpenID4VCI and HAIP Summary rows (VCI total 230 → 232).
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — un-`#[ignore]` the gap test, confirm the arbitrary-string bypass
-- [ ] Green — implement validation modelled on `verify_key_attestation_jwt`; thread `&AttestationMode` through `handle_token_request` and `server.rs`
-- [ ] Refactor — factor whatever `verify_key_attestation_jwt` and the new path genuinely share; do not force a shared abstraction where the claim sets differ
-- [ ] Add the GAP-VCI-14 `#[ignore]`d PoP test
-- [ ] Bookkeeping — verdicts, two new clauses, register add + delete, Identifiers note, Summary counts
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — un-`#[ignore]` the gap test, confirm the arbitrary-string bypass
+- [x] Green — implement validation modelled on `verify_key_attestation_jwt`; thread `&AttestationMode` through `handle_token_request` and `server.rs`
+- [x] Refactor — factored the JWS parse/decode/typ/alg checks into `validate_wallet_attestation_jwt`; did not force a shared abstraction with `verify_key_attestation_jwt` since the claim sets (cnf.jwk/sub vs attested_key) genuinely differ
+- [x] Add the GAP-VCI-14 `#[ignore]`d PoP test — `vci_0232_wallet_attestation_pop_jwt_is_never_verified`; confirmed genuinely red (fails on the assertion, not on an unrelated helper bug — caught and fixed a `TrustAnchor.certs`-is-a-path-not-PEM mistake in the test itself first)
+- [x] Bookkeeping — HAIP-0031 → conforming, HAIP-0030/HAIP-0088 citations reworded, VCI-0231/VCI-0232 appended, GAP-HAIP-04 row deleted, GAP-VCI-14 row added, Identifiers note added, VCI and HAIP Summary rows recounted
+- [x] Verify — `cargo test --workspace`, `cargo test --workspace --no-fail-fast -- --ignored` (24 failing gap tests + 1 passing E2E, cross-checked against 23 gap register rows via GAP-VCI-05's two citing tests), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean
+- [x] Commit — `416063d`
 
 ---
 
@@ -348,3 +348,4 @@ must not be counted as one.
 - 2026-08-01 — Task 1 (GAP-VCI-03: base64url mdoc credential; VCI-0071/VCI-0176 -> conforming) — `f5fcb8b`
 - 2026-08-01 — Task 2 (GAP-VCI-01: single-use pre-authorized_code; VCI-0003/VCI-0012 -> conforming) — `07323f7`
 - 2026-08-01 — Task 3 (GAP-HAIP-06: status index dedup keyed on physical list, not credential_type_id; HAIP-0081 -> conforming; corrected the plan's own non-deterministic list_size=2 test design in the process) — `f53dbb5`
+- 2026-08-01 — Task 4 (GAP-HAIP-04: Wallet Attestation JWT now cryptographically validated -- x5c chain, trust anchoring, alg/typ, exp/nbf; HAIP-0031 -> conforming; filed GAP-VCI-14 for the still-unverified PoP JWT and added VCI-0231/VCI-0232 for the L2555 extraction miss found while closing this gap) — `416063d`
