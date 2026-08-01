@@ -100,12 +100,12 @@ OpenID4VCI Summary row.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — un-`#[ignore]` the gap test, confirm it fails on the standard-base64 output
-- [ ] Green — switch the encoder to `B64URL`, with a comment citing OpenID4VCI L976
-- [ ] Refactor — clean while green
-- [ ] Bookkeeping — verdicts, register row, Summary counts, in this same change
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — un-`#[ignore]` the gap test, confirm it fails on the standard-base64 output
+- [x] Green — switch the encoder to `B64URL`, with a comment citing OpenID4VCI L976
+- [x] Refactor — scoped the now-test-only `B64STD` import to `#[cfg(test)]` (clippy caught it as genuinely unused otherwise, not a false positive)
+- [x] Bookkeeping — verdicts, register row, Summary counts, in this same change
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -334,3 +334,5 @@ must not be counted as one.
 *Append one line per completed task: date, task, commit SHA.*
 
 - 2026-08-01 — Spec — `2ec0acb`
+- 2026-08-01 — Plan — `327ade4`
+- 2026-08-01 — Task 1 (GAP-VCI-03: base64url mdoc credential; VCI-0071/VCI-0176 -> conforming) — `f5fcb8b`
