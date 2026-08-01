@@ -67,12 +67,33 @@ pub fn truncate(s: &str, max: usize) -> String {
 /// same key without the key itself ever reaching the log. Never returns an
 /// error: an input this cannot canonicalise yields [`INVALID_JWK_THUMBPRINT`].
 pub fn thumbprint(jwk: &serde_json::Value) -> String {
-    let Some(obj) = jwk.as_object() else {
-        return INVALID_JWK_THUMBPRINT.to_string();
-    };
-    let Some(kty) = obj.get("kty").and_then(|v| v.as_str()) else {
-        return INVALID_JWK_THUMBPRINT.to_string();
-    };
+    match thumbprint_bytes(jwk) {
+        Ok(digest) => base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest),
+        Err(_) => INVALID_JWK_THUMBPRINT.to_string(),
+    }
+}
+
+/// RFC 7638 JWK thumbprint as raw SHA-256 bytes — **fail-closed**.
+///
+/// [`thumbprint`] is a logging helper and is infallible by contract: a JWK it
+/// cannot canonicalise degrades to [`INVALID_JWK_THUMBPRINT`]. That is the
+/// wrong contract for a caller that embeds the digest in a signed or hashed
+/// structure, where a placeholder would silently produce bytes that verify
+/// against nothing. Such callers use this function and propagate the error.
+///
+/// The sole canonicalisation lives here; `thumbprint` delegates to it, so both
+/// forms are covered by the same known-answer tests.
+///
+/// The returned error names only the structural defect (which member, which
+/// `kty`) and never echoes key material.
+pub fn thumbprint_bytes(jwk: &serde_json::Value) -> Result<[u8; 32], String> {
+    let obj = jwk
+        .as_object()
+        .ok_or_else(|| "JWK is not a JSON object".to_string())?;
+    let kty = obj
+        .get("kty")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "JWK has no string `kty` member".to_string())?;
 
     // RFC 7638 §3.2 — only the required members of each key type participate,
     // and they are serialised in lexicographic order with no whitespace.
@@ -81,26 +102,23 @@ pub fn thumbprint(jwk: &serde_json::Value) -> String {
         "RSA" => &["e", "kty", "n"],
         "OKP" => &["crv", "kty", "x"],
         "oct" => &["k", "kty"],
-        _ => return INVALID_JWK_THUMBPRINT.to_string(),
+        other => return Err(format!("unsupported JWK `kty` `{other}`")),
     };
 
     // BTreeMap serialises in key order, which is the lexicographic ordering the
     // RFC requires.
     let mut canonical: BTreeMap<&str, &str> = BTreeMap::new();
     for member in required {
-        match obj.get(*member).and_then(|v| v.as_str()) {
-            Some(value) => {
-                canonical.insert(member, value);
-            }
-            None => return INVALID_JWK_THUMBPRINT.to_string(),
-        }
+        let value = obj
+            .get(*member)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("JWK of `kty` `{kty}` is missing required member `{member}`"))?;
+        canonical.insert(member, value);
     }
 
-    let Ok(json) = serde_json::to_string(&canonical) else {
-        return INVALID_JWK_THUMBPRINT.to_string();
-    };
-    let digest = Sha256::digest(json.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    let json = serde_json::to_string(&canonical)
+        .map_err(|e| format!("JWK canonicalisation failed: {e}"))?;
+    Ok(Sha256::digest(json.as_bytes()).into())
 }
 
 #[cfg(test)]
@@ -201,6 +219,62 @@ mod tests {
             thumbprint(&jwk),
             "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
         );
+    }
+
+    /// OpenID4VP 1.0's own worked example for the mdoc `SessionTranscript`
+    /// handover: this JWK's RFC 7638 thumbprint is the `jwkThumbprint` byte
+    /// string embedded in both published `…HandoverInfo` vectors (spec
+    /// L2878-L2886, L2888-L2910, L3013-L3035).
+    ///
+    /// A second, independent KAT alongside the RFC 7638 §3.1 vector, and the
+    /// only one that pins the **raw bytes** — the base64url form cannot, and
+    /// raw bytes are what the handover CBOR embeds.
+    #[test]
+    fn thumbprint_bytes_matches_openid4vp_handover_vector() {
+        let jwk = json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "DxiH5Q4Yx3UrukE2lWCErq8N8bqC9CHLLrAwLz5BmE0",
+            "y": "XtLM4-3h5o3HUH0MHVJV0kyq0iBlrBwlh8qEDMZ4-Pc",
+            "use": "enc",
+            "alg": "ECDH-ES",
+            "kid": "1",
+        });
+        let got = thumbprint_bytes(&jwk).expect("the spec's own example JWK must canonicalise");
+        let hex: String = got.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "4283ec927ae0f208daaa2d026a814f2b22dca52cf85ffa8f3f8626c6bd669047",
+            "OpenID4VP mdoc handover vector: jwkThumbprint bytes must match the spec"
+        );
+    }
+
+    /// The two functions deliberately have *opposite* contracts on bad input:
+    /// the logging helper must degrade so a log statement cannot fail, the
+    /// crypto helper must fail so a placeholder never reaches a hashed
+    /// structure. Asserting both in one test keeps that divergence intentional
+    /// rather than accidental.
+    #[test]
+    fn thumbprint_bytes_fails_closed_where_thumbprint_degrades() {
+        let cases = [
+            ("non-object", json!("not-a-jwk")),
+            ("missing kty", json!({"crv": "P-256", "x": "a", "y": "b"})),
+            ("unknown kty", json!({"kty": "XYZ"})),
+            (
+                "missing required member",
+                json!({"kty": "EC", "crv": "P-256", "x": "a"}),
+            ),
+        ];
+        for (label, jwk) in cases {
+            assert_eq!(
+                thumbprint(&jwk),
+                INVALID_JWK_THUMBPRINT,
+                "{label}: the logging helper must degrade, never fail"
+            );
+            assert!(
+                thumbprint_bytes(&jwk).is_err(),
+                "{label}: the crypto helper must fail closed, never degrade"
+            );
+        }
     }
 
     #[test]
