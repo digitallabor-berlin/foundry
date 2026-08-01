@@ -132,11 +132,11 @@ affects the hash.
 `foundry-verifier/tests/conformance_vp.rs`,
 `foundry/tests/wallet_verification.rs`
 
-- [ ] `verify_mdoc`: replace `client_id`/`response_uri`/`nonce` with
+- [x] `verify_mdoc`: replace `client_id`/`response_uri`/`nonce` with
       `session_transcript: &[u8]`. It must no longer build anything.
-- [ ] Migrate all 4 `verify_mdoc` call sites (`mdoc_tests.rs:67`, `:98`,
+- [x] Migrate all 4 `verify_mdoc` call sites (`mdoc_tests.rs:67`, `:98`,
       `verifier.rs:441`, `verify.rs:464`).
-- [ ] In `verify.rs`, implement **full handover selection**, single Origin:
+- [x] In `verify.rs`, implement **full handover selection**, single Origin:
       - `response_mode` → thumbprint: `dc_api.jwt`/`direct_post.jwt` →
         `Some(thumbprint_bytes(&tx.ephem_public_jwk)?)`; `dc_api`/`direct_post`
         → `None`; anything else → typed error, never a silent `None`.
@@ -144,17 +144,38 @@ affects the hash.
         origin (L2997 forbids the `origin:` prefix) taken from the first
         `dc_api_expected_origins` entry, else the `public_base_url` fallback.
       - otherwise → `Redirect{ client_id, nonce, thumbprint, response_uri }`.
-- [ ] Migrate the 3 `serialize_session_transcript` call sites, then **delete**
+- [x] Migrate the `serialize_session_transcript` call sites, then **delete**
       the function and its `https://localhost:8443` fallback.
-- [ ] Adapt the gap test's constructor call **only** (see Declared Exception).
+- [x] Adapt the gap test's constructor call **only** (see Declared Exception).
       Keep `#[ignore]`.
-- [ ] `wallet_verification.rs`'s test-wallet builds the spec-correct
+- [x] `wallet_verification.rs`'s test-wallet builds the spec-correct
       transcript so the E2E mdoc round-trip stays green — this is the
       end-to-end proof the verifier and a "wallet" agree.
-- [ ] Gates ×4.
+- [x] Gates ×4. One `cargo fmt` fixup applied and re-verified.
 
 **Done when:** the workspace compiles with one transcript builder, the E2E
 mdoc round-trip passes, and no report edits have been made yet.
+
+**Landed:** `183ed12`.
+
+**Correction — the spec's call-site count was wrong.** The spec claimed 3
+`serialize_session_transcript` call sites; there were **5**. The two missed
+sites were both inside `foundry-verifier/src/verify.rs`'s own test module
+(the `use` at :584 and the call at :1501). Cause: the research grep's output
+was truncated mid-list and the count was taken from the visible portion
+rather than re-run. Caught immediately by the compiler, not by review. The
+omitted call site turned out to matter substantively — `sample_tx` uses
+`direct_post` + `direct_post.jwt`, so it needed the thumbprint-bearing
+Redirect handover rather than a null one.
+
+**Verification:** all five mdoc tests pass by name
+(`mdoc_presentation_is_accepted`,
+`verifier::tests::parses_and_verifies_valid_mdoc_presentation`,
+`verify::tests::test_verify_vp_response_mdoc_presentation`,
+`rejects_expired_mdoc`, `rejects_untrusted_anchor_mdoc`) — confirmed by name,
+not inferred from a green summary. `--ignored` sweep moved from 23 FAILED + 1
+ok to **22 FAILED + 2 ok**, the single flip being `gap_vp_06_…`, matching the
+prediction exactly.
 
 ---
 
