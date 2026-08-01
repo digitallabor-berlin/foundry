@@ -167,17 +167,27 @@ test `crates/foundry-issuer/tests/conformance_vci.rs` (`:1941`), plus inline
    simply fail, and "fixing" it by loosening the assertion would re-enshrine the
    bug.
 
-2. **The GAP-HAIP-06 test cannot pass as literally written.** It calls
-   `allocate_status_index(.., 1)` twice and `.unwrap()`s both, then asserts
-   `assert_ne!(pid_idx, mdl_idx)`. Once both draws share one list of size 1,
-   the *second* call correctly returns `StatusListExhausted` and the `.unwrap()`
-   panics — the test fails even though the code is right. This is the scoped
-   exception to the "never rewrite a gap test" constraint: change `list_size`
-   from `1` to `2` and pass the shared list id, so both allocations succeed and
-   the `assert_ne!` still measures exactly what it was written to measure. The
-   assertion and its intent are preserved; only the arguments change, and the
-   change is forced by the signature. Record the reason in the test's doc
-   comment.
+2. **The GAP-HAIP-06 test cannot pass as literally written, and the first fix
+   attempted here (`list_size: 1 -> 2`) was itself wrong — caught by actually
+   running it, not by reasoning.** The test calls `allocate_status_index(.., 1)`
+   twice and `.unwrap()`s both, then asserts `assert_ne!(pid_idx, mdl_idx)`.
+   Once both draws share one list of size 1, the *second* call correctly
+   returns `StatusListExhausted` and the `.unwrap()` panics — the test fails
+   even though the code is right. Changing `list_size` to `2` (the original
+   plan) lets both draws succeed, but a per-type-keyed CSPRNG draw at
+   `list_size=2` only collides with the *other* type's draw about half the
+   time — it is not deterministic, so `assert_ne!` could pass by chance against
+   the still-buggy code. Verified genuinely red required actually running the
+   old key scheme repeatedly, which surfaced this. The scoped exception to
+   "never rewrite a gap test" is instead: keep `list_size = 1`, assert the
+   *first* allocation succeeds at index 0, then assert the *second* allocation
+   (a different credential type, same list id) returns `Err`. This is
+   deterministic in both directions — the buggy per-type key independently
+   succeeds with the same index (`Ok(0)`, red), the fix correctly exhausts
+   (`Err`, green) — and it preserves the assertion's original intent (two
+   different types must never share an index in one physical list) without
+   depending on randomness. Confirm 10+ repeated runs each side, not one, since
+   this is exactly the class of bug a single lucky run would hide.
 
 **Behaviors to test:**
 - Two different `credential_type_id`s allocating against the same list receive **different** indices — the gap
@@ -192,13 +202,13 @@ recount the HAIP Summary row.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — un-`#[ignore]` the gap test with corrected arguments; confirm it fails on the shared-list collision
-- [ ] Green — key the used-marker on `list_id`; pass `"1"` from `create_offer`
-- [ ] Rewrite `different_credential_types_do_not_collide` to assert the post-fix invariant, renamed accordingly
-- [ ] Refactor — reword `StatusListExhausted` so it no longer implies a per-type list
-- [ ] Bookkeeping — verdict, register row, Summary counts
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — un-`#[ignore]` the gap test with corrected arguments; confirm it fails on the shared-list collision (verified deterministically red over 15 runs, after discovering the plan's original `list_size=2` design was itself non-deterministic)
+- [x] Green — key the used-marker on `list_id`; pass `"1"` from `create_offer`
+- [x] Rewrite `different_credential_types_do_not_collide` to assert the post-fix invariant, renamed accordingly
+- [x] Refactor — `StatusListExhausted`'s message; `credential_type_id` retained for diagnostics only
+- [x] Bookkeeping — verdict, register row, Summary counts
+- [x] Verify — run the command, pristine output (15 consecutive green runs)
+- [x] Commit
 
 ---
 
@@ -337,3 +347,4 @@ must not be counted as one.
 - 2026-08-01 — Plan — `327ade4`
 - 2026-08-01 — Task 1 (GAP-VCI-03: base64url mdoc credential; VCI-0071/VCI-0176 -> conforming) — `f5fcb8b`
 - 2026-08-01 — Task 2 (GAP-VCI-01: single-use pre-authorized_code; VCI-0003/VCI-0012 -> conforming) — `07323f7`
+- 2026-08-01 — Task 3 (GAP-HAIP-06: status index dedup keyed on physical list, not credential_type_id; HAIP-0081 -> conforming; corrected the plan's own non-deterministic list_size=2 test design in the process) — `f53dbb5`
