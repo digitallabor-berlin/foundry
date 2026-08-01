@@ -135,12 +135,12 @@ recount OpenID4VCI.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — un-`#[ignore]` the gap test; add the wrong-`tx_code`-does-not-burn test and confirm both fail for the right reasons
-- [ ] Green — add `invalidate_pre_authorized_code`, call it after `tx_code` validation, clear the field
-- [ ] Refactor — clean while green
-- [ ] Bookkeeping — verdicts, register row, Summary counts
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — un-`#[ignore]` the gap test; add the wrong-`tx_code`-does-not-burn test and confirm both fail for the right reasons
+- [x] Green — add `invalidate_pre_authorized_code`, call it after `tx_code` validation, clear the field
+- [x] Refactor — clean while green
+- [x] Bookkeeping — verdicts, register row, Summary counts
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -336,3 +336,4 @@ must not be counted as one.
 - 2026-08-01 — Spec — `2ec0acb`
 - 2026-08-01 — Plan — `327ade4`
 - 2026-08-01 — Task 1 (GAP-VCI-03: base64url mdoc credential; VCI-0071/VCI-0176 -> conforming) — `f5fcb8b`
+- 2026-08-01 — Task 2 (GAP-VCI-01: single-use pre-authorized_code; VCI-0003/VCI-0012 -> conforming) — `07323f7`
