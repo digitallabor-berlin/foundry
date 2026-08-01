@@ -583,7 +583,6 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
 // expressed as binary data MUST be base64url-encoded and returned as a string.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-03: OpenID4VCI Credential Response (L976) — binary Credential Formats MUST be base64url-encoded"]
 async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
     let (_key_dir, key_path) = write_test_issuer_key();
     let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "mdl").await;

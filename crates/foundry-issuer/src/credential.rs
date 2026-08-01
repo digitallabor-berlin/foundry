@@ -6,7 +6,9 @@ use crate::proof::{verify_holder_proof, ProofsRequest};
 use crate::transaction::{
     load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
 };
+#[cfg(test)]
 use base64::engine::general_purpose::STANDARD as B64STD;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::crypto::FileSigner;
@@ -205,7 +207,11 @@ pub async fn handle_credential_request(
                     IssuanceError::InvalidRequest(format!("mdoc build failed: {e}"))
                 })?;
 
-                B64STD.encode(cbor_bytes)
+                // OpenID4VCI 1.0 Credential Response (L976): Credential Formats
+                // expressed as binary data MUST be base64url-encoded, not standard
+                // base64 — a decoder expecting the URL-safe alphabet rejects '+',
+                // '/' and '=' padding.
+                B64URL.encode(cbor_bytes)
             }
             other => {
                 return Err(IssuanceError::InvalidRequest(format!(
