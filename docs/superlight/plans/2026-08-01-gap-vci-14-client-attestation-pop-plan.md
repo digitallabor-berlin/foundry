@@ -428,11 +428,18 @@ pass).
 
 **Verify:** `cargo test -p foundry-issuer`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — full `cargo test --workspace`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo fmt --check` all clean
+- [x] Commit
+
+Deviation: required a minimal, compile-preserving placeholder update to
+`token.rs`'s single call site (`pop_header: None`, `expected_aud: ""`) since
+the trait signature change breaks that file's compile; full wiring is
+Task 9. Also deleted one now-invalid happy-path test and replaced two
+blended tests with the explicit 9-row matrix (see commit `39ce70a`).
 
 ---
 
@@ -602,3 +609,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-01 — Task 5 (`ValidatedAttestation { sub, cnf_jwk }` returned from `validate_wallet_attestation_jwt`; migrated 21/22 `InvalidRequest` sites to `InvalidClient`, deliberately excluding the unused `verify_key_attestation` dead-code path as a distinct non-client-auth mechanism; `token.rs` needed no edits, contrary to the plan's file list, since it only calls the unchanged trait method) — `47e1c53`
 - 2026-08-01 — Task 6 (`validate_client_attestation_pop_jwt`, 9 ABCA sect-5.2 checks each citing its clause; 29 tests; no `exp` check by design, pinned by a dedicated test; temporary `#[allow(dead_code)]` on the new items pending Task 8's wiring) — `45ea004`
 - 2026-08-01 — Task 7 (`claim_pop_jti` atomic `(iss, jti)` replay claim via `insert_kv_if_absent`, hashed key, `expires_at` derived solely from `claims.iat`; 6 tests; removed the now-unnecessary `#[allow(dead_code)]` from `POP_CLOCK_SKEW_SECS`) — `d7714e4`
+- 2026-08-01 — Task 8 (`verify_wallet_attestation` 9-row mode matrix; all rows tested; minimal placeholder fix to `token.rs`'s call site to keep the crate compiling ahead of Task 9's full wiring) — `39ce70a`
