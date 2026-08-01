@@ -331,11 +331,11 @@ must not be counted as one.
 
 **Verify:** `cargo test --workspace && cargo test --workspace --no-fail-fast -- --ignored && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
 
-- [ ] Run all four gates, capture the output
-- [ ] Confirm the still-failing `--ignored` set is exactly the expected 22
-- [ ] Verify the OpenAPI specs
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Run all four gates, capture the output — `cargo test --workspace` (46 test binaries, 0 failed), `cargo test --workspace --no-fail-fast -- --ignored`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --check` all clean
+- [x] Confirm the still-failing `--ignored` set is exactly the expected set — 23 failing gap tests (matching 22 gap register rows, GAP-VCI-05 cited by two tests) plus `full_flow_issue_verify_revoke_reverify` passing as the one unrelated E2E test; verified by exact diff against the predicted list, not just a count
+- [x] Verify the OpenAPI specs — `git diff main..HEAD --stat -- openapi.json openapi-wallet.json` is empty (no endpoint shape changed across any of the five tasks); `openapi_endpoints.rs`'s own checked-in-vs-generated sync test passed as part of gate 1
+- [x] Verify — report's Status line carries no baked-in gap count ("complete — audit finished 2026-07-31" only); Summary table's per-spec `gap` column (24+30+9=63 gap-verdict *clauses*) is consistent with 22 unique gap register *entries* since several clauses share one GAP-* id (e.g. GAP-VP-06 alone is cited by 17); no stale narrative count references found elsewhere in the document
+- [x] Commit — no code changes were needed (all checks passed as-is); this reconciliation is recorded via the plan ledger tick alone
 
 ---
 
@@ -350,3 +350,4 @@ must not be counted as one.
 - 2026-08-01 — Task 3 (GAP-HAIP-06: status index dedup keyed on physical list, not credential_type_id; HAIP-0081 -> conforming; corrected the plan's own non-deterministic list_size=2 test design in the process) — `f53dbb5`
 - 2026-08-01 — Task 4 (GAP-HAIP-04: Wallet Attestation JWT now cryptographically validated -- x5c chain, trust anchoring, alg/typ, exp/nbf; HAIP-0031 -> conforming; filed GAP-VCI-14 for the still-unverified PoP JWT and added VCI-0231/VCI-0232 for the L2555 extraction miss found while closing this gap) — `416063d`
 - 2026-08-01 — Task 5 (GAP-VP-07: dc_api transport now accepts an Origin-prefixed KB-JWT audience via new `verifier.dc_api_expected_origins` config with a public_base_url-derived fallback; VP-0265 -> conforming; VP-0209 re-cited to GAP-VP-06, still gap for mdoc) — `c233c0e`
+- 2026-08-01 — Task 6 (Reconciliation: all four gates clean; `--ignored` set is exactly the predicted 23 failing gap tests + 1 passing E2E against 22 gap register rows; OpenAPI specs confirmed unchanged) — no code changes, ledger-only
