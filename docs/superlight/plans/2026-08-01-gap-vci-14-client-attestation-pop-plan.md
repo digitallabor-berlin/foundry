@@ -143,11 +143,11 @@ unaffected.
 
 **Verify:** `cargo test -p foundry-core`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -585,3 +585,4 @@ Docs:
 Append one line per completed task: date, task, commit SHA.
 
 - 2026-08-01 — Task 1 (vendored ABCA draft -07 verbatim to `docs/specs/`; AGENTS.md §4.4 gained its row) — `a5fea96`
+- 2026-08-01 — Task 2 (`Storage::insert_kv_if_absent` — atomic INSERT ... ON CONFLICT DO NOTHING; 6 tests incl. no-overwrite-on-rejection and per-namespace scoping) — `5183bee`
