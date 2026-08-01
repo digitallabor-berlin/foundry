@@ -276,6 +276,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -286,6 +288,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_020,
     )
     .await;
@@ -393,6 +397,8 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -517,6 +523,8 @@ async fn setup_credential_flow(
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -694,6 +702,8 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -814,6 +824,8 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -867,6 +879,8 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         &token_req,
         &required,
         Some("not-a-jwt-at-all"),
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await;
@@ -899,6 +913,8 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_000,
     )
     .await;
@@ -948,6 +964,8 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await;
@@ -1024,6 +1042,8 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         &token_req,
         &disabled_attestation(),
         None,
+        None,
+        "https://issuer.example.com",
         1_700_000_010,
     )
     .await
@@ -1177,15 +1197,16 @@ fn signed_wallet_attestation_no_pop(exp: i64) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// GAP-VCI-14 — OpenID4VCI Wallet Attestation (L2600): the Wallet MUST
-// generate, and per draft-ietf-oauth-attestation-based-client-auth Sec5.2
-// (which OpenID4VCI Appendix E incorporates) the Authorization Server MUST
-// verify, a Client Attestation PoP JWT proving possession of the key the
-// Wallet Attestation's cnf.jwk attests to.
+// VCI-0232 / GAP-VCI-14 (closed) — OpenID4VCI Wallet Attestation (L2600): the
+// Wallet MUST generate, and per draft-ietf-oauth-attestation-based-client-auth
+// Sec5.2 (which OpenID4VCI Appendix E incorporates) the Authorization Server
+// MUST verify, a Client Attestation PoP JWT proving possession of the key the
+// Wallet Attestation's cnf.jwk attests to. Renamed from
+// vci_0232_wallet_attestation_pop_jwt_is_never_verified: that name asserted
+// the bug rather than the requirement.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-14: OpenID4VCI Wallet Attestation (L2600) -- the Client Attestation PoP JWT is never verified; handle_token_request has no parameter for one at all, so a stolen or replayed Wallet Attestation JWT is accepted with no proof the presenter holds the attested key"]
-async fn vci_0232_wallet_attestation_pop_jwt_is_never_verified() {
+async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
     let cfg = test_config();
     let storage = test_storage().await;
     let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
@@ -1225,12 +1246,19 @@ async fn vci_0232_wallet_attestation_pop_jwt_is_never_verified() {
         pop_max_age_secs: 300,
     };
 
-    // No Client Attestation PoP JWT is presented at all -- there is no
-    // parameter on handle_token_request to carry one. A conformant issuer
-    // must still reject this, since presenting a Wallet Attestation with no
-    // proof of key possession is exactly what the PoP JWT exists to prevent.
-    let result =
-        handle_token_request(&storage, &token_req, &required, Some(&attestation_jwt), now).await;
+    // No Client Attestation PoP JWT is presented at all. A conformant issuer
+    // must reject this, since presenting a Wallet Attestation with no proof
+    // of key possession is exactly what the PoP JWT exists to prevent.
+    let result = handle_token_request(
+        &storage,
+        &token_req,
+        &required,
+        Some(&attestation_jwt),
+        None,
+        "https://issuer.example.com",
+        now,
+    )
+    .await;
 
     assert!(
         result.is_err(),

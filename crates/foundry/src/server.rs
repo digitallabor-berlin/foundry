@@ -436,11 +436,19 @@ async fn token_handler(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
+    // TODO(Task 10): read OAuth-Client-Attestation-PoP alongside the
+    // existing header (case-insensitively per ABCA §6.1) and supply
+    // issuer_identifier from build_authorization_server_metadata's own
+    // `issuer` field, not re-derived from config, so the published and
+    // checked values cannot drift. Until then no caller can supply a PoP, so
+    // only Mode::Disabled is exercised in practice.
     foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
         &state.config.issuer.wallet_attestation,
         attestation_hdr,
+        None,
+        "",
         now,
     )
     .await

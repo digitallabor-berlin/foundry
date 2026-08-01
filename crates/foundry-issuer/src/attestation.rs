@@ -401,7 +401,6 @@ fn validate_client_attestation_pop_jwt(
 
 /// KV storage namespace for Client Attestation PoP `jti` replay claims
 /// (GAP-VCI-14).
-#[allow(dead_code)]
 const POP_JTI_NAMESPACE: &str = "client_attestation_pop_jti";
 
 /// Atomically claims a Client Attestation PoP JWT's `(iss, jti)` pair,
@@ -417,7 +416,6 @@ const POP_JTI_NAMESPACE: &str = "client_attestation_pop_jti";
 /// passing `now` again here would create a second source of truth for the
 /// same fact.
 /// `skip_all` is mandatory: `claims` carries the raw `iss` and `jti`.
-#[allow(dead_code)]
 #[tracing::instrument(skip_all)]
 pub(crate) async fn claim_pop_jti(
     storage: &dyn Storage,
