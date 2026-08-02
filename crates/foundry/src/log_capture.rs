@@ -12,10 +12,12 @@
 //! secret reaches the log.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tracing::field::{Field, Visit};
+use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Level, Subscriber};
+use tracing::subscriber::Interest;
+use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
@@ -78,11 +80,85 @@ impl CaptureHandle {
     }
 }
 
+/// A subscriber that records nothing but always insists on being asked.
+///
+/// Its only job is to exist. See [`keep_interest_cache_resolvable`].
+#[derive(Debug)]
+struct AlwaysAsk;
+
+impl Subscriber for AlwaysAsk {
+    /// Never `never` and never `always`: `sometimes` forces `tracing` to call
+    /// [`Subscriber::enabled`] on whichever dispatcher is current, which is the
+    /// only answer that stays correct when subscribers are per-thread.
+    fn register_callsite(&self, _: &Metadata<'_>) -> Interest {
+        Interest::sometimes()
+    }
+
+    fn max_level_hint(&self) -> Option<LevelFilter> {
+        Some(LevelFilter::TRACE)
+    }
+
+    fn enabled(&self, _: &Metadata<'_>) -> bool {
+        false
+    }
+
+    fn new_span(&self, _: &Attributes<'_>) -> Id {
+        Id::from_u64(1)
+    }
+
+    fn record(&self, _: &Id, _: &Record<'_>) {}
+    fn record_follows_from(&self, _: &Id, _: &Id) {}
+    fn event(&self, _: &Event<'_>) {}
+    fn enter(&self, _: &Id) {}
+    fn exit(&self, _: &Id) {}
+}
+
+/// Keep two dispatchers registered for the life of the process, so that a
+/// callsite's cached `Interest` can never collapse to "never".
+///
+/// # The failure this prevents
+///
+/// `tracing-core` caches `Interest` **per callsite in a process-global slot**,
+/// computed once, on the callsite's first use, by `rebuild_callsite_interest`.
+/// While at most one dispatcher is registered, `Dispatchers::rebuilder` takes
+/// its `JustOne` fast path and asks only `dispatcher::get_default` — *the
+/// registering thread's own* subscriber. A test thread that has installed no
+/// subscriber therefore answers with `NoSubscriber`, yielding
+/// `Interest::never()`, and that verdict is cached **for every thread**. Any
+/// other thread sitting inside `with_default` with a live capture subscriber
+/// then loses its events: the `event!` macro short-circuits on the cached
+/// interest before consulting any subscriber at all. The next dispatcher
+/// registration rebuilds the cache and the symptom vanishes, which is what made
+/// this present as a rare flake rather than a hard failure.
+/// (tracing-core 0.1.36: `callsite.rs:505`, `callsite.rs` `dispatchers` module.)
+///
+/// Two are registered, not one, because `has_just_one` is set from
+/// `dispatchers.len() <= 1` — a single keep-alive would leave the fast path
+/// armed. Because both are held here forever, the `retain` in
+/// `register_dispatch` can never drop the count back to one.
+///
+/// Registering them also rebuilds the interest cache for every callsite already
+/// known, so a callsite poisoned before the first capture is repaired here.
+///
+/// This is a test-support concern only: nothing in the served binary calls
+/// [`capture_layer`], and `AlwaysAsk` records nothing.
+fn keep_interest_cache_resolvable() {
+    static KEEPALIVE: OnceLock<[tracing::Dispatch; 2]> = OnceLock::new();
+    KEEPALIVE.get_or_init(|| {
+        [
+            tracing::Dispatch::new(AlwaysAsk),
+            tracing::Dispatch::new(AlwaysAsk),
+        ]
+    });
+}
+
 /// A [`Layer`] that records every event it is passed, plus a handle to read them.
 ///
 /// Compose it into a registry and scope it with
 /// `tracing::subscriber::with_default`, or use [`init_for_test`].
 pub fn capture_layer() -> (CaptureLayer, CaptureHandle) {
+    // Must happen before the caller emits anything: see the function's docs.
+    keep_interest_cache_resolvable();
     let events = Arc::new(Mutex::new(Vec::new()));
     (
         CaptureLayer {
@@ -225,6 +301,45 @@ mod tests {
         let subscriber = Registry::default().with(layer);
         tracing::subscriber::with_default(subscriber, body);
         handle.events()
+    }
+
+    /// A thread with **no** subscriber that happens to be the first to touch a
+    /// callsite must not be able to silence that callsite for a thread that
+    /// *does* have one.
+    ///
+    /// `tracing-core` caches `Interest` per callsite in a process-global slot.
+    /// While only one dispatcher is registered, `Dispatchers::rebuilder` takes
+    /// its `JustOne` fast path and asks *the registering thread's own* default
+    /// subscriber — `NoSubscriber` on a bare thread — which answers
+    /// `Interest::never()`. That verdict is then cached for every thread, and
+    /// the `event!` macro drops the event before any subscriber is consulted.
+    /// (tracing-core 0.1.36: `callsite.rs:505` and the `dispatchers` module.)
+    ///
+    /// This is a cold-start race, so it is staged deterministically here: the
+    /// dispatch is registered *before* the callsite exists, and then entered
+    /// with `dispatcher::with_default`, which does not re-register and so does
+    /// not incidentally repair the cache.
+    #[test]
+    fn a_subscriberless_thread_cannot_silence_a_capture() {
+        fn virgin_callsite() {
+            warn!("interest-cache canary");
+        }
+
+        let (layer, handle) = capture_layer();
+        let subscriber = Registry::default().with(LevelFilter::TRACE).with(layer);
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        // First touch of the callsite comes from a thread with no subscriber.
+        std::thread::spawn(virgin_callsite).join().unwrap();
+
+        tracing::dispatcher::with_default(&dispatch, virgin_callsite);
+
+        assert_eq!(
+            handle.events().len(),
+            1,
+            "event dropped at the process-global callsite-interest cache before \
+             the capture subscriber was consulted"
+        );
     }
 
     #[test]
