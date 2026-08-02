@@ -159,6 +159,18 @@ cargo test -p foundry --test e2e_full_flow
 - **`logging::init` must be called exactly once per process** —
   `tracing_subscriber`'s `init()` panics on a second call. Tests use
   `log_capture::capture_layer` with a scoped subscriber instead.
+- **Do not delete `log_capture::keep_interest_cache_resolvable` — it looks inert
+  and is not.** `tracing-core` caches `Interest` per callsite in a
+  process-global slot, and while at most one dispatcher is registered it
+  computes that verdict from *the registering thread's own* subscriber. A test
+  that calls a logging code path without installing a subscriber then caches
+  `Interest::never()` for every thread, silently emptying a concurrent test's
+  capture buffer. The two permanently-registered dispatchers keep that fast path
+  disarmed. Removing them reintroduces a ~15%-per-process flake in
+  `server::tests` *and* makes the `logging_redaction.rs` "secret appears
+  nowhere" assertions pass vacuously. Guarded by
+  `log_capture::tests::a_subscriberless_thread_cannot_silence_a_capture`, which
+  is deterministic when run alone.
 - **Error logging lives inside the four mappers, never at their call sites.**
   Every typed error passes through exactly one mapper exactly once, so that
   placement is what makes coverage complete and double-logging impossible. A
