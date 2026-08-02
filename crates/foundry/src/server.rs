@@ -279,6 +279,15 @@ fn wallet_error_response(
         UnknownCredentialType(_) | ClaimValidation(_) => {
             (StatusCode::BAD_REQUEST, "invalid_credential_request")
         }
+        // OpenID4VCI 1.0 Credential Request (L851): credential_configuration_id
+        // is REQUIRED and MUST identify the Credential Type the Access Token
+        // was issued for -- GAP-VCI-02. Distinct codes so a Wallet can tell
+        // "fix your request" (present-but-wrong or absent) from "re-read
+        // metadata" (names a configuration this issuer doesn't have).
+        InvalidCredentialRequest(_) => (StatusCode::BAD_REQUEST, "invalid_credential_request"),
+        UnknownCredentialConfiguration(_) => {
+            (StatusCode::BAD_REQUEST, "unknown_credential_configuration")
+        }
         // RFC 6749 sect-5.2: a failed client-authentication mechanism (an absent,
         // malformed, or unverifiable Wallet Attestation / Client Attestation
         // PoP JWT, GAP-VCI-14) is `invalid_client`, not `invalid_request`.

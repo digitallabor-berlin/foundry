@@ -192,3 +192,12 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   prefix rather than collapsing it back to `InvalidProof`. The wallet's
   recovery ("fetch a fresh `c_nonce` and retry") is identical regardless of
   which nested JWT carried the invalid nonce.
+- **`handle_credential_request` validates `credential_configuration_id`
+  against `tx.credential_type_id` before proof verification** (GAP-VCI-02,
+  OpenID4VCI L851): absent, or naming a *configured* Credential Type the
+  Access Token was not issued for, is `InvalidCredentialRequest`; naming a
+  Credential Type this issuer does not have configured at all is
+  `UnknownCredentialConfiguration` -- a Wallet needs to tell "fix your
+  request" apart from "re-read metadata". `req.format` is deliberately never
+  read: it is not a Credential Request parameter in OpenID4VCI 1.0 §7.2, and
+  every existing caller (including `foundry-wallet`) sends it regardless.
