@@ -383,27 +383,34 @@ async fn authorize_handler(
         .unwrap_or(0);
     let tx_ttl_secs = state.config.storage.transaction_ttl_secs;
 
-    let outcome =
-        foundry_issuer::handle_authorize_request(state.storage.as_ref(), &params, tx_ttl_secs, now)
-            .await;
+    let outcome = foundry_issuer::handle_authorize_request(
+        state.storage.as_ref(),
+        &params,
+        &state.config.issuer.credential_issuer,
+        tx_ttl_secs,
+        now,
+    )
+    .await;
 
     match outcome {
         foundry_issuer::AuthorizeOutcome::Success {
             redirect_uri,
             code,
             state: wallet_state,
+            iss,
         } => Ok(axum::response::Redirect::to(&append_query(
             &redirect_uri,
-            &[("code", code.as_str())],
+            &[("code", code.as_str()), ("iss", iss.as_str())],
             wallet_state.as_deref(),
         ))),
         foundry_issuer::AuthorizeOutcome::ErrorRedirect {
             redirect_uri,
             error,
             state: wallet_state,
+            iss,
         } => Ok(axum::response::Redirect::to(&append_query(
             &redirect_uri,
-            &[("error", error.as_str())],
+            &[("error", error.as_str()), ("iss", iss.as_str())],
             wallet_state.as_deref(),
         ))),
         foundry_issuer::AuthorizeOutcome::DirectError(e) => Err(wallet_error_response(&e)),

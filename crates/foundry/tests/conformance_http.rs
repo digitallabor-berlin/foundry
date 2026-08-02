@@ -433,7 +433,6 @@ async fn vci_0030_authorize_ignores_unrecognized_query_parameters() {
 // Authorization response per RFC9207.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-HAIP-02: HAIP OpenID4VCI (L159) — the Authorization response MUST include `iss` per RFC9207"]
 async fn haip_0008_authorization_response_includes_iss() {
     let (state, _dir) = setup_test_app().await;
     let issuer_state = create_authz_code_offer_issuer_state(&state).await;
@@ -465,6 +464,63 @@ async fn haip_0008_authorization_response_includes_iss() {
     assert!(
         location.contains("iss="),
         "RFC9207 requires the `iss` parameter in a successful Authorization Response; got {location}"
+    );
+    // `append_query` percent-encodes with NON_ALPHANUMERIC, which also escapes
+    // `:` and `/` -- assert against the encoded form of the configured
+    // credential_issuer, matching the pattern vci_0032 already uses for `error`.
+    assert!(
+        location.contains("iss=https%3A%2F%2Fissuer%2Eexample%2Ecom"),
+        "iss must equal the configured issuer.credential_issuer, percent-encoded; got {location}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9207 §2, GAP-HAIP-02: "In authorization responses to the client,
+// including error responses, an authorization server ... MUST indicate its
+// identity by including the iss parameter" -- the error redirect path must
+// carry iss too, not only the success path haip_0008 above covers.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn gap_haip_02_error_redirect_also_includes_iss() {
+    let (state, _dir) = setup_test_app().await;
+    let issuer_state = create_authz_code_offer_issuer_state(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let code_challenge = code_challenge_for(CODE_VERIFIER);
+    // code_challenge_method=plain forces AuthorizeOutcome::ErrorRedirect, the
+    // same trick vci_0032_authorize_error_redirect_encodes_error_per_rfc6749
+    // already uses.
+    let authorize_uri = format!(
+        "/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}\
+         &state=xyz-state&code_challenge={code_challenge}&code_challenge_method=plain\
+         &issuer_state={issuer_state}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri(authorize_uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let authorize_res = wallet_app.oneshot(authorize_req).await.unwrap();
+    assert_eq!(authorize_res.status(), StatusCode::SEE_OTHER);
+    let location = authorize_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    // `append_query` percent-encodes with NON_ALPHANUMERIC, which also escapes
+    // `_` (%5F) -- see vci_0032_authorize_error_redirect_encodes_error_per_rfc6749.
+    assert!(
+        location.contains("error=invalid%5Frequest"),
+        "expected the ErrorRedirect path (invalid_request), got: {location}"
+    );
+    assert!(
+        location.contains("iss=https%3A%2F%2Fissuer%2Eexample%2Ecom"),
+        "RFC9207 s2 requires iss on error responses too, not only success; got {location}"
     );
 }
 

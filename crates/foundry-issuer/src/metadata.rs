@@ -58,6 +58,12 @@ pub struct AuthorizationServerMetadata {
     pub code_challenge_methods_supported: Vec<String>,
     #[serde(rename = "pre-authorized_grant_anonymous_access_supported")]
     pub pre_authorized_grant_anonymous_access_supported: bool,
+    /// RFC 9207 §2.3: an authorization server publishing metadata per RFC 8414
+    /// MUST indicate its support for the `iss` parameter by setting this to
+    /// `true` -- GAP-HAIP-02. Deliberately a plain required field (no
+    /// `skip_serializing_if`): §2.3 wants it present and `true`, not merely
+    /// inferable from its absence.
+    pub authorization_response_iss_parameter_supported: bool,
 }
 
 /// Build the Credential Issuer Metadata document, fully derived from
@@ -133,6 +139,7 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
         response_types_supported: vec!["code".to_string()],
         code_challenge_methods_supported: vec!["S256".to_string()],
         pre_authorized_grant_anonymous_access_supported: true,
+        authorization_response_iss_parameter_supported: true,
     }
 }
 
@@ -311,5 +318,7 @@ mod tests {
                 "authorization_code".to_string(),
             ]
         );
+        // RFC 9207 §2.3, GAP-HAIP-02.
+        assert!(meta.authorization_response_iss_parameter_supported);
     }
 }

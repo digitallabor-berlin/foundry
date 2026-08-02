@@ -201,3 +201,11 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   request" apart from "re-read metadata". `req.format` is deliberately never
   read: it is not a Credential Request parameter in OpenID4VCI 1.0 §7.2, and
   every existing caller (including `foundry-wallet`) sends it regardless.
+- **`handle_authorize_request` takes an explicit `issuer_identifier: &str`
+  parameter** (inserted after `params`), and both `AuthorizeOutcome::Success`
+  and `AuthorizeOutcome::ErrorRedirect` carry the resulting `iss` field --
+  RFC 9207 §2 requires `iss` "including error responses", not only success
+  (GAP-HAIP-02). `AuthorizeOutcome::DirectError` deliberately does not: it
+  renders as a JSON error body, not a redirect, so RFC 9207 §2 never reaches
+  it. `AuthorizationServerMetadata.authorization_response_iss_parameter_supported`
+  is hardcoded `true` per RFC 9207 §2.3.

@@ -374,6 +374,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
     let outcome = handle_authorize_request(
         &storage,
         &params,
+        "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
     )
@@ -1116,6 +1117,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
     let outcome = handle_authorize_request(
         &storage,
         &params,
+        "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
     )
