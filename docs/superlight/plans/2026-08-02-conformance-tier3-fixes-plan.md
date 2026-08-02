@@ -211,11 +211,11 @@ wrong in both ways reports the more fundamental problem.
 
 **Verify:** `cargo test -p foundry-verifier && cargo test -p foundry --test conformance_report`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -452,3 +452,4 @@ sed -n '112,117p' docs/conformance/openid4vc-conformance.md
 Append one line per completed task: date, task, commit SHA.
 
 - 2026-08-02 — Task 1 (GAP-VCI-08, GAP-VCI-09) — `6e41ae2`
+- 2026-08-02 — Task 2 (GAP-VP-01, GAP-VP-02) — `509c2b8`
