@@ -49,8 +49,52 @@ impl Config {
                 }
             }
         }
+
+        // OpenID4VCI 1.0 Credential Issuer Metadata (L1368, L1369): `credential_endpoint`
+        // and `nonce_endpoint`, both derived unconditionally from `issuer.credential_issuer`
+        // (see `build_issuer_metadata`), MUST use the `https` scheme.
+        //
+        // Deliberate deviation (GAP-VCI-08, AGENTS.md §4.4): loopback hosts are exempt.
+        // The repository's own dev config (`config.yaml`) runs `issuer.credential_issuer`
+        // over plain `http://localhost:8443`, and enforcing the MUST unconditionally
+        // would make that shipped config fail to boot. See `foundry-core/AGENTS.md`
+        // Gotchas for the accepted consequence: a loopback deployment's RFC 9207 `iss`
+        // value (also required to be `https`, RFC 9207 §2) will not be conformant either.
+        if !self.issuer.credential_issuer.starts_with("https://") {
+            let host = crate::url::dns_host_only(&self.issuer.credential_issuer);
+            if !is_loopback_host(&host) {
+                return Err(ConfigError::Validation(format!(
+                    "issuer.credential_issuer '{}' must use the https scheme (OpenID4VCI \
+                     credential_endpoint/nonce_endpoint MUST use https), unless its host is \
+                     a loopback address",
+                    self.issuer.credential_issuer
+                )));
+            }
+        }
+
+        // OpenID4VCI 1.0 Credential Issuer Metadata (L1366): `credential_issuer` MUST be
+        // identical -- "compared using a simple string comparison with no normalization" --
+        // to the identifier used to build the well-known URL, which in this deployment is
+        // `server.wallet_facing.public_base_url` (the router `credential_issuer` is actually
+        // served under). No trailing-slash or case tolerance.
+        if self.issuer.credential_issuer != self.server.wallet_facing.public_base_url {
+            return Err(ConfigError::Validation(format!(
+                "issuer.credential_issuer '{}' must be byte-identical to \
+                 server.wallet_facing.public_base_url '{}' (OpenID4VCI credential_issuer \
+                 identity requires a simple string comparison with no normalization -- a \
+                 trailing slash or scheme/case difference is a mismatch)",
+                self.issuer.credential_issuer, self.server.wallet_facing.public_base_url
+            )));
+        }
+
         Ok(())
     }
+}
+
+/// GAP-VCI-08's documented exemption from the `https` MUST (OpenID4VCI L1368/L1369).
+/// Exactly these four forms -- not private IP ranges, not `*.local`.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 impl Config {
@@ -279,5 +323,87 @@ mod tests {
             });
 
         cfg.validate_key_material(dir.path()).unwrap();
+    }
+
+    /// A config whose `verifier.signing_key` resolves, so that `Config::validate()`
+    /// gets past the pre-existing keyref check and reaches the checks under test here.
+    fn config_passing_keyref_check() -> Config {
+        let mut cfg = minimal_config();
+        cfg.keys.insert(
+            "verifier_signing".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "unused.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn minimal_config_with_matching_https_urls_passes_validate() {
+        // Regression guard: neither new check fires on a well-formed config.
+        // minimal_config() already pairs identical https URLs.
+        config_passing_keyref_check().validate().unwrap();
+    }
+
+    #[test]
+    fn non_loopback_http_credential_issuer_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.credential_issuer = "http://issuer.example.com".to_string();
+        cfg.server.wallet_facing.public_base_url = "http://issuer.example.com".to_string();
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("https"),
+            "expected an https-scheme error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn loopback_http_credential_issuer_localhost_is_accepted() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.credential_issuer = "http://localhost:8443".to_string();
+        cfg.server.wallet_facing.public_base_url = "http://localhost:8443".to_string();
+
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn loopback_http_credential_issuer_127_0_0_1_is_accepted() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.credential_issuer = "http://127.0.0.1:8443".to_string();
+        cfg.server.wallet_facing.public_base_url = "http://127.0.0.1:8443".to_string();
+
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn credential_issuer_diverging_from_public_base_url_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.server.wallet_facing.public_base_url = "https://different-host.example.com".to_string();
+        // cfg.issuer.credential_issuer stays at minimal_config()'s
+        // "https://issuer.example.com" -- the two values now diverge.
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("public_base_url"),
+            "expected an identity-mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn credential_issuer_differing_only_by_trailing_slash_is_rejected() {
+        // OpenID4VCI L1366: "a simple string comparison with no normalization" --
+        // a trailing slash is a mismatch, not a benign variant.
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.credential_issuer = "https://issuer.example.com/".to_string();
+        // public_base_url stays "https://issuer.example.com" (no trailing slash).
+
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("public_base_url"),
+            "expected an identity-mismatch error, got: {err}"
+        );
     }
 }

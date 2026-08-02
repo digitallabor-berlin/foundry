@@ -1928,12 +1928,12 @@ fn vci_0155_credential_configuration_claims_reveal_disclosed_paths() {
 // into both derived endpoint URLs.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "GAP-VCI-08: OpenID4VCI Credential Issuer Metadata (L1368, L1369) — credential_endpoint and nonce_endpoint MUST use the https scheme, but Config::validate() never checks the scheme of issuer.credential_issuer"]
 fn vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls() {
     let mut cfg = test_config();
-    // Satisfy the *only* other check `Config::validate()` performs (that
-    // `verifier.signing_key` resolves in `keys`) so that a failure here can
-    // only be attributed to the https-scheme hypothesis under test.
+    // Satisfy the verifier.signing_key keyref check so that a failure here can
+    // only be attributed to the https-scheme hypothesis under test. (Note:
+    // credential_issuer == public_base_url below, both http, so this test
+    // exercises the https check, not the identity check.)
     cfg.keys.insert(
         "verifier_signing".to_string(),
         KeyEntry {
@@ -1964,12 +1964,11 @@ fn vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls
 // `Config::validate()` never checks that they match.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "GAP-VCI-09: OpenID4VCI Credential Issuer Metadata (L1366) — credential_issuer MUST be identical to the identifier used to build the well-known URL, but Config::validate() never checks server.wallet_facing.public_base_url against issuer.credential_issuer"]
 fn vci_0128_config_validation_does_not_enforce_credential_issuer_identity_match() {
     let mut cfg = test_config();
-    // Satisfy the *only* other check `Config::validate()` performs (that
-    // `verifier.signing_key` resolves in `keys`) so that a failure here can
-    // only be attributed to the identity-mismatch hypothesis under test.
+    // Satisfy the verifier.signing_key keyref check so that a failure here can
+    // only be attributed to the identity-mismatch hypothesis under test. Both
+    // URLs stay https, so this exercises the identity check, not the scheme one.
     cfg.keys.insert(
         "verifier_signing".to_string(),
         KeyEntry {
