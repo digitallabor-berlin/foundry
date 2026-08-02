@@ -339,11 +339,11 @@ misaddressed request must fail on cheap checks, not after signature work.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry --test conformance_http --test wallet_issuance --test e2e_full_flow --test conformance_report`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -454,3 +454,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-02 — Task 1 (GAP-VCI-08, GAP-VCI-09) — `6e41ae2`
 - 2026-08-02 — Task 2 (GAP-VP-01, GAP-VP-02) — `509c2b8`
 - 2026-08-02 — Task 3 (GAP-VCI-04) — `0fca8fe`
+- 2026-08-02 — Task 4 (GAP-VCI-02) — `6c11588`
