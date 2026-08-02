@@ -108,8 +108,12 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   [AGENTS.md](../../AGENTS.md) §4.1.
 - **`VerificationResult` and friends are `utoipa::ToSchema`** — changing them
   changes `openapi-wallet.json` — root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates:** `cargo test --workspace`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo fmt --check` — root [AGENTS.md](../../AGENTS.md) §5.
+- **Gates are scoped by default:** per task, run `cargo test -p foundry-verifier
+  -p foundry` (the integration suite lives in `crates/foundry/tests`), plus
+  `cargo clippy -p foundry-verifier --all-targets -- -D warnings` and
+  `cargo fmt --check`. Save `cargo test --workspace` for the end of a
+  development cycle or when unsure of the blast radius — **not** between tasks.
+  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 

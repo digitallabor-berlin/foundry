@@ -88,9 +88,13 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **Never widen a status/trust helper into reporting success it did not verify.**
   `foundry-verifier` derives its `verified` verdict from these results — full
   rule: root [AGENTS.md](../../AGENTS.md) §4.2.
-- **Gates before completion:** `cargo test --workspace`, `cargo clippy
-  --workspace --all-targets -- -D warnings`, `cargo fmt --check` — root
-  [AGENTS.md](../../AGENTS.md) §5.
+- **Gates are scoped by default:** per task, run `cargo test -p foundry-core`
+  plus the direct consumers of the module you changed (`crypto/` → both engines;
+  `storage/` → `foundry`; `status_list` → `foundry-verifier` + `foundry`), with
+  `cargo clippy -p foundry-core --all-targets -- -D warnings` and
+  `cargo fmt --check`. `cargo test --workspace` is for the end of a development
+  cycle or when a change is cross-cutting (trait/type signature) — **not**
+  between tasks. Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 

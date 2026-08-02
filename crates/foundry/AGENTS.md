@@ -104,8 +104,12 @@ No admin route is mounted on the wallet router, and vice versa.
   `authenticated` group's `route_layer` without intending auth.
 - **Every endpoint change must be reflected in the OpenAPI specs** via `utoipa`
   annotations in `openapi.rs` — full rule: root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates:** `cargo test --workspace`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo fmt --check` — root [AGENTS.md](../../AGENTS.md) §5.
+- **Gates are scoped by default:** per task, run `cargo test -p foundry`
+  (add `-p foundry-wallet` when a route or CLI shape it consumes changed), plus
+  `cargo clippy -p foundry --all-targets -- -D warnings` and
+  `cargo fmt --check`. Save `cargo test --workspace` for the end of a
+  development cycle or when unsure of the blast radius — **not** between tasks.
+  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 

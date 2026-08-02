@@ -176,14 +176,44 @@ section of [`README.md`](README.md).
 
 ## 5. Verification Gates
 
-**Fast loop while iterating** on a single crate:
+The workspace suite is **deliberately slow** (real crypto, subprocess E2E flows,
+status-list fixtures). Testing is therefore **scoped by default**; a full run is
+a deliberate checkpoint, not a reflex. Running `--workspace` after every edit is
+a process defect, not diligence.
+
+### 5.1 Scoped Gate — the default, at every task boundary
+
+For **each individual task**, run only what the change can plausibly break:
 
 ```bash
-cargo test -p <crate>          # e.g. cargo test -p foundry-verifier
+cargo test -p <crate>                                # every crate you touched
+cargo test -p <dependent>                            # + affected dependents (§5.2)
+cargo clippy -p <crate> --all-targets -- -D warnings
+cargo fmt --check                                    # cheap; keep it workspace-wide
 ```
 
-**Required before completing any task, opening a PR, or requesting review** —
-all three must pass cleanly:
+This — and only this — is the gate for finishing a task, marking a `TaskUpdate`
+as `completed`, or handing work to a per-task reviewer. **Do not run
+`cargo test --workspace` at the end of, or between, individual tasks.**
+
+### 5.2 Which Crates Count as "Affected"
+
+Derive the set from the layering in §3: a change can only break the crate itself
+and the crates **below** it in that diagram.
+
+| You touched | Also test |
+|---|---|
+| `foundry-wallet` | — (nothing depends on it) |
+| `foundry` | `foundry-wallet` |
+| `foundry-issuer` / `foundry-verifier` | `foundry` (integration suite); `foundry-wallet` if the flow is exercised E2E |
+| `foundry-sd-jwt-vc` / `foundry-mdoc` | whichever engine consumes the changed format (`foundry-issuer` and/or `foundry-verifier`), then `foundry` |
+| `foundry-core` | the direct consumers of the changed module only — e.g. `crypto/` → both engines; `storage/` → `foundry`; `status_list` → `foundry-verifier` + `foundry` |
+| `crates/foundry/tests/` | `cargo test -p foundry` (narrow further with `--test <file>` while iterating) |
+
+Purely local edits — a doc comment, a test-only helper, a rename confined to one
+private module — need only the owning crate.
+
+### 5.3 Full Gate — reserved for these cases
 
 ```bash
 cargo test --workspace
@@ -191,7 +221,28 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Never claim work is complete without having run these and seen them pass.
+Run all three, **once**, when any of the following holds:
+
+- The **development cycle is finished** — every task of a plan or feature is
+  done and you are about to open a PR, request the final whole-branch review, or
+  merge.
+- You are **not confident** the scoped set covered the blast radius: a
+  cross-cutting refactor, a `foundry-core` type or trait signature change, a
+  dependency bump, a workspace `Cargo.toml` edit, or a change touching the
+  observability / instrumentation-hygiene tests.
+- A **scoped run failed in a way that hints at wider breakage** — a shared
+  trait, a serde shape, a public re-export.
+
+Outside those cases, prefer widening the scoped set (one more `-p <crate>`) over
+escalating to `--workspace`.
+
+### 5.4 Honesty Rule
+
+Never claim work is complete, fixed, or passing without having run the gate that
+actually applies and seen it pass. When reporting, **name the gate you ran** —
+e.g. "scoped: `cargo test -p foundry-verifier -p foundry` green" — so the reader
+knows what was and was not covered. Claiming a full gate you did not run is
+worse than running none.
 
 ---
 
@@ -226,6 +277,13 @@ When executing plans using subagents (e.g. via
 **When dispatching a subagent scoped to one crate, tell it to read that crate's
 `AGENTS.md` first** — it starts with fresh context and will not have this root
 file's routing table.
+
+**Tell each implementer and per-task reviewer which gate applies.** They run the
+**scoped** gate of §5.1 — the touched crate plus its affected dependents — and
+must not run `cargo test --workspace`. The full gate of §5.3 is run exactly
+once, by the `final-reviewer` at the end of the branch (or by you, before
+opening the PR). A subagent that reports "workspace green" per task has burned
+minutes it should not have.
 
 ### Task Tracking (`pi-tasks`)
 

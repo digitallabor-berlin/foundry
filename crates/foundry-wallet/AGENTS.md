@@ -80,8 +80,12 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   *server's* wallet-facing routes, not anything here. Changing this crate never
   requires a spec update — but relying on a route shape does mean a server-side
   change can break it silently.
-- **Gates:** `cargo test --workspace`, `cargo clippy --workspace --all-targets
-  -- -D warnings`, `cargo fmt --check` — root [AGENTS.md](../../AGENTS.md) §5.
+- **Gates are scoped by default:** nothing depends on this crate, so per task
+  `cargo test -p foundry-wallet` plus `cargo clippy -p foundry-wallet
+  --all-targets -- -D warnings` and `cargo fmt --check` is the whole gate. Save
+  `cargo test --workspace` for the end of a development cycle or when unsure of
+  the blast radius — **not** between tasks. Full rule: root
+  [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 

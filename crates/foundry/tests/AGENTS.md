@@ -14,7 +14,7 @@ this directory is where you look.
 cargo test -p foundry                                  # whole suite
 cargo test -p foundry --test wallet_issuance           # one file
 cargo test -p foundry --test wallet_issuance full_issuance_flow_end_to_end
-cargo test --workspace                                 # the gate (root AGENTS.md §5)
+cargo test --workspace                                 # full gate — end of cycle only (root AGENTS.md §5)
 ```
 
 ## Coverage Map
