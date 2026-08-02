@@ -631,8 +631,17 @@ pub fn verify_key_attestation_jwt(
         .ok_or_else(|| {
             IssuanceError::InvalidProof("key_attestation: missing nonce claim".into())
         })?;
-    crate::nonce::verify_nonce(nonce_secret, nonce, now_unix)
-        .map_err(|e| IssuanceError::InvalidProof(format!("key_attestation: {e}")))?;
+    // GAP-VCI-04 Decision 3: propagate InvalidNonce as-is (keeping the
+    // key_attestation: prefix) rather than collapsing it back to InvalidProof --
+    // the Key Attestation JWT's nonce is a c_nonce like any other, and a wallet's
+    // recovery (fetch a fresh nonce and retry) is identical regardless of which
+    // nested JWT carried the invalid value.
+    crate::nonce::verify_nonce(nonce_secret, nonce, now_unix).map_err(|e| match e {
+        IssuanceError::InvalidNonce(msg) => {
+            IssuanceError::InvalidNonce(format!("key_attestation: {msg}"))
+        }
+        other => other,
+    })?;
     let nonce = nonce.to_string();
 
     let attested_keys_json = payload
@@ -1517,7 +1526,17 @@ mod tests {
         let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
 
         let err = verify_key_attestation_jwt(&jwt, &store, &test_secret(), now).unwrap_err();
-        assert!(matches!(err, IssuanceError::InvalidProof(_)));
+        // GAP-VCI-04 Decision 3: propagated as InvalidNonce, not collapsed back
+        // to InvalidProof, with the key_attestation: prefix preserved.
+        match &err {
+            IssuanceError::InvalidNonce(msg) => {
+                assert!(
+                    msg.starts_with("key_attestation:"),
+                    "expected the key_attestation: prefix to survive, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidNonce, got: {other:?}"),
+        }
     }
 
     #[test]

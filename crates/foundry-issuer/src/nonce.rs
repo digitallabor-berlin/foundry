@@ -141,12 +141,17 @@ pub fn verify_nonce(
     c_nonce: &str,
     now_unix: i64,
 ) -> Result<(), IssuanceError> {
+    // OpenID4VCI 1.0 Credential Error Response (L1050): every failure below is
+    // a *present* c_nonce that is invalid (malformed, forged, or expired), so
+    // each reports `InvalidNonce` rather than `InvalidProof` -- the L1049
+    // clause-3 "missing c_nonce" case lives at the proof-payload level
+    // (proof.rs), one layer above this function, and stays `InvalidProof`.
     let raw = B64URL
         .decode(c_nonce)
-        .map_err(|_| IssuanceError::InvalidProof("c_nonce is not valid base64url".into()))?;
+        .map_err(|_| IssuanceError::InvalidNonce("c_nonce is not valid base64url".into()))?;
 
     if raw.len() != NONCE_LEN {
-        return Err(IssuanceError::InvalidProof(
+        return Err(IssuanceError::InvalidNonce(
             "c_nonce has an unexpected length".into(),
         ));
     }
@@ -155,7 +160,7 @@ pub fn verify_nonce(
 
     if !secret.tag_matches(payload, tag)? {
         // Forged, tampered with, or minted by a previous process lifetime.
-        return Err(IssuanceError::InvalidProof(
+        return Err(IssuanceError::InvalidNonce(
             "c_nonce was not issued by this issuer".into(),
         ));
     }
@@ -164,7 +169,7 @@ pub fn verify_nonce(
     exp_bytes.copy_from_slice(&payload[..EXP_LEN]);
     let exp = i64::from_be_bytes(exp_bytes);
     if now_unix > exp {
-        return Err(IssuanceError::InvalidProof("c_nonce has expired".into()));
+        return Err(IssuanceError::InvalidNonce("c_nonce has expired".into()));
     }
 
     Ok(())

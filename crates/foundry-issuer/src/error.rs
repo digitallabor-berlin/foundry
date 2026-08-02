@@ -8,6 +8,13 @@ pub enum IssuanceError {
     InvalidGrant(String),
     #[error("invalid proof: {0}")]
     InvalidProof(String),
+    /// OpenID4VCI 1.0 Credential Error Response (L1041, L1050): the `proofs`
+    /// parameter uses an invalid nonce -- at least one key proof carries a
+    /// `c_nonce` that is malformed, forged, or expired. Deliberately distinct
+    /// from `InvalidProof`, which per L1049 clause 3 stays reserved for a
+    /// *missing* `c_nonce` value -- GAP-VCI-04.
+    #[error("invalid nonce: {0}")]
+    InvalidNonce(String),
     #[error("unknown credential_type_id '{0}'")]
     UnknownCredentialType(String),
     #[error("claim validation failed: {0}")]
@@ -50,6 +57,7 @@ impl IssuanceError {
             IssuanceError::InvalidRequest(_) => "invalid_request",
             IssuanceError::InvalidGrant(_) => "invalid_grant",
             IssuanceError::InvalidProof(_) => "invalid_proof",
+            IssuanceError::InvalidNonce(_) => "invalid_nonce",
             IssuanceError::UnknownCredentialType(_) => "unknown_credential_type",
             IssuanceError::ClaimValidation(_) => "claim_validation",
             IssuanceError::InvalidClient(_) => "invalid_client",
@@ -90,6 +98,7 @@ mod tests {
             (IssuanceError::InvalidRequest(s()), "invalid_request"),
             (IssuanceError::InvalidGrant(s()), "invalid_grant"),
             (IssuanceError::InvalidProof(s()), "invalid_proof"),
+            (IssuanceError::InvalidNonce(s()), "invalid_nonce"),
             (
                 IssuanceError::UnknownCredentialType(s()),
                 "unknown_credential_type",
@@ -135,5 +144,16 @@ mod tests {
         let err = IssuanceError::InvalidClient("pop jti already claimed".to_string());
         assert_eq!(err.kind(), "invalid_client");
         assert_eq!(err.to_string(), "invalid client: pop jti already claimed");
+    }
+
+    /// GAP-VCI-04: `InvalidNonce` is a distinct variant from `InvalidProof`,
+    /// with its own kind and its own Display prefix -- a wallet must be able
+    /// to tell "fetch a fresh c_nonce and retry" apart from "the whole proof
+    /// is broken".
+    #[test]
+    fn invalid_nonce_is_a_distinct_variant_from_invalid_proof() {
+        let err = IssuanceError::InvalidNonce("c_nonce has expired".to_string());
+        assert_eq!(err.kind(), "invalid_nonce");
+        assert_eq!(err.to_string(), "invalid nonce: c_nonce has expired");
     }
 }

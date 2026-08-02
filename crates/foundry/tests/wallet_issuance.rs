@@ -479,6 +479,8 @@ async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
     let _c_nonce = mint_c_nonce(&state).await;
 
     // Build a proof carrying a nonce that does not match the transaction's c_nonce.
+    // This is a *present but invalid* c_nonce, so it reports invalid_nonce
+    // (GAP-VCI-04), not invalid_proof.
     let (proof_jwt, _keypair) = create_proof("not-the-real-nonce", "https://issuer.example.com");
 
     let cred_req_body = serde_json::json!({
@@ -503,7 +505,7 @@ async fn credential_request_with_proof_nonce_mismatch_is_rejected() {
         .await
         .unwrap();
     let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
-    assert_eq!(cred_json["error"], "invalid_proof");
+    assert_eq!(cred_json["error"], "invalid_nonce");
 }
 
 #[tokio::test]
@@ -548,7 +550,7 @@ async fn credential_request_with_expired_c_nonce_is_rejected() {
         .await
         .unwrap();
     let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
-    assert_eq!(cred_json["error"], "invalid_proof");
+    assert_eq!(cred_json["error"], "invalid_nonce");
 }
 
 #[tokio::test]

@@ -179,3 +179,16 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 - **The `pre-authorized_code` field is serde-renamed** (hyphen, not underscore)
   in `TokenRequest`. Renaming the Rust field without preserving `#[serde(rename)]`
   silently breaks wallet compatibility.
+- **`IssuanceError::InvalidNonce` vs `InvalidProof` splits by cause, not by call
+  site** (OpenID4VCI L1049 clause 3 vs L1050; GAP-VCI-04). All four
+  `verify_nonce` (nonce.rs) failure modes -- malformed, forged, or expired -- are
+  `InvalidNonce`: the `c_nonce` is *present but invalid*. A *missing* `nonce`
+  claim stays `InvalidProof`, at both call sites that check for it (`proof.rs`'s
+  outer proof payload and `attestation.rs`'s Key Attestation JWT payload). Don't
+  reason from "nonce-related" to "must be InvalidNonce" — check whether the
+  claim was absent or merely invalid.
+- **`attestation.rs` deliberately propagates `InvalidNonce` from the Key
+  Attestation JWT's own nonce check**, keeping a `key_attestation:` message
+  prefix rather than collapsing it back to `InvalidProof`. The wallet's
+  recovery ("fetch a fresh `c_nonce` and retry") is identical regardless of
+  which nested JWT carried the invalid nonce.

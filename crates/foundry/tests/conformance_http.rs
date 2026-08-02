@@ -343,7 +343,6 @@ async fn vci_0064_0067_credential_response_uses_http_200_and_json_content_type()
 // `invalid_nonce`) rather than a less specific code.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-04: OpenID4VCI Credential Error Response (L1041) — a proof rejected solely for an invalid/expired c_nonce MUST report `invalid_nonce`, not the generic `invalid_proof`"]
 async fn vci_0078_expired_nonce_reports_invalid_nonce_not_invalid_proof() {
     let (state, _dir) = setup_test_app().await;
     let access_token = issue_pre_auth_offer_and_get_access_token(&state).await;

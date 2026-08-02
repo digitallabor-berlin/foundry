@@ -271,6 +271,10 @@ fn wallet_error_response(
     let (status, code) = match e {
         InvalidGrant(_) => (StatusCode::BAD_REQUEST, "invalid_grant"),
         InvalidProof(_) => (StatusCode::BAD_REQUEST, "invalid_proof"),
+        // OpenID4VCI 1.0 Credential Error Response (L1050): a present but
+        // invalid c_nonce is invalid_nonce, distinct from invalid_proof --
+        // GAP-VCI-04.
+        InvalidNonce(_) => (StatusCode::BAD_REQUEST, "invalid_nonce"),
         InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
         UnknownCredentialType(_) | ClaimValidation(_) => {
             (StatusCode::BAD_REQUEST, "invalid_credential_request")
