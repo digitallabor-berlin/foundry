@@ -276,11 +276,11 @@ must sit **before** the `_ =>` catch-all or it silently becomes a 500.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry --test conformance_http --test wallet_issuance --test conformance_report --test logging_redaction`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -453,3 +453,4 @@ Append one line per completed task: date, task, commit SHA.
 
 - 2026-08-02 — Task 1 (GAP-VCI-08, GAP-VCI-09) — `6e41ae2`
 - 2026-08-02 — Task 2 (GAP-VP-01, GAP-VP-02) — `509c2b8`
+- 2026-08-02 — Task 3 (GAP-VCI-04) — `0fca8fe`
