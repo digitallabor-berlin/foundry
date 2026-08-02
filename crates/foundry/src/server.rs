@@ -271,9 +271,22 @@ fn wallet_error_response(
     let (status, code) = match e {
         InvalidGrant(_) => (StatusCode::BAD_REQUEST, "invalid_grant"),
         InvalidProof(_) => (StatusCode::BAD_REQUEST, "invalid_proof"),
+        // OpenID4VCI 1.0 Credential Error Response (L1050): a present but
+        // invalid c_nonce is invalid_nonce, distinct from invalid_proof --
+        // GAP-VCI-04.
+        InvalidNonce(_) => (StatusCode::BAD_REQUEST, "invalid_nonce"),
         InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
         UnknownCredentialType(_) | ClaimValidation(_) => {
             (StatusCode::BAD_REQUEST, "invalid_credential_request")
+        }
+        // OpenID4VCI 1.0 Credential Request (L851): credential_configuration_id
+        // is REQUIRED and MUST identify the Credential Type the Access Token
+        // was issued for -- GAP-VCI-02. Distinct codes so a Wallet can tell
+        // "fix your request" (present-but-wrong or absent) from "re-read
+        // metadata" (names a configuration this issuer doesn't have).
+        InvalidCredentialRequest(_) => (StatusCode::BAD_REQUEST, "invalid_credential_request"),
+        UnknownCredentialConfiguration(_) => {
+            (StatusCode::BAD_REQUEST, "unknown_credential_configuration")
         }
         // RFC 6749 sect-5.2: a failed client-authentication mechanism (an absent,
         // malformed, or unverifiable Wallet Attestation / Client Attestation
@@ -370,27 +383,34 @@ async fn authorize_handler(
         .unwrap_or(0);
     let tx_ttl_secs = state.config.storage.transaction_ttl_secs;
 
-    let outcome =
-        foundry_issuer::handle_authorize_request(state.storage.as_ref(), &params, tx_ttl_secs, now)
-            .await;
+    let outcome = foundry_issuer::handle_authorize_request(
+        state.storage.as_ref(),
+        &params,
+        &state.config.issuer.credential_issuer,
+        tx_ttl_secs,
+        now,
+    )
+    .await;
 
     match outcome {
         foundry_issuer::AuthorizeOutcome::Success {
             redirect_uri,
             code,
             state: wallet_state,
+            iss,
         } => Ok(axum::response::Redirect::to(&append_query(
             &redirect_uri,
-            &[("code", code.as_str())],
+            &[("code", code.as_str()), ("iss", iss.as_str())],
             wallet_state.as_deref(),
         ))),
         foundry_issuer::AuthorizeOutcome::ErrorRedirect {
             redirect_uri,
             error,
             state: wallet_state,
+            iss,
         } => Ok(axum::response::Redirect::to(&append_query(
             &redirect_uri,
-            &[("error", error.as_str())],
+            &[("error", error.as_str()), ("iss", iss.as_str())],
             wallet_state.as_deref(),
         ))),
         foundry_issuer::AuthorizeOutcome::DirectError(e) => Err(wallet_error_response(&e)),

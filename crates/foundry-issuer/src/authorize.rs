@@ -34,17 +34,25 @@ pub struct AuthorizeParams {
 /// (`foundry::server`) maps each variant to the appropriate response: a
 /// redirect for `Success`/`ErrorRedirect`, a direct JSON error body (no
 /// redirect) for `DirectError`.
+///
+/// `Success` and `ErrorRedirect` both carry `iss` (RFC 9207 §2: "In
+/// authorization responses to the client, including error responses ...
+/// MUST indicate its identity by including the iss parameter") -- GAP-HAIP-02.
+/// `DirectError` renders as a JSON error body, not a redirect, so RFC 9207 §2
+/// does not reach it.
 #[derive(Debug)]
 pub enum AuthorizeOutcome {
     Success {
         redirect_uri: String,
         code: String,
         state: Option<String>,
+        iss: String,
     },
     ErrorRedirect {
         redirect_uri: String,
         error: String,
         state: Option<String>,
+        iss: String,
     },
     DirectError(IssuanceError),
 }
@@ -65,15 +73,25 @@ fn is_valid_code_challenge(code_challenge: &str) -> bool {
 /// re-saving the transaction (to persist the minted `authorization_code`)
 /// requires the caller to supply the TTL again, exactly as `create_offer`
 /// and `/token` already do.
+///
+/// `issuer_identifier` is `config.issuer.credential_issuer`, threaded in as
+/// an explicit parameter (rather than appended by the HTTP layer) so the
+/// `iss` value lives on `AuthorizeOutcome` itself and is testable from this
+/// crate's own suite, not only through the HTTP layer -- RFC 9207 §2,
+/// GAP-HAIP-02.
+///
 /// `skip_all` is mandatory: `params` carries `issuer_state` and the redirect
 /// parameters.
 #[tracing::instrument(skip_all)]
 pub async fn handle_authorize_request(
     storage: &dyn Storage,
     params: &AuthorizeParams,
+    issuer_identifier: &str,
     tx_ttl_secs: u64,
     now_unix: i64,
 ) -> AuthorizeOutcome {
+    let iss = issuer_identifier.to_string();
+
     let tx = match load_transaction_by_issuer_state(storage, &params.issuer_state).await {
         Ok(Some(tx)) => tx,
         Ok(None) => {
@@ -116,6 +134,7 @@ pub async fn handle_authorize_request(
             redirect_uri,
             error: "invalid_request".to_string(),
             state,
+            iss,
         };
     }
 
@@ -124,6 +143,7 @@ pub async fn handle_authorize_request(
             redirect_uri,
             error: "access_denied".to_string(),
             state,
+            iss,
         };
     }
 
@@ -144,6 +164,7 @@ pub async fn handle_authorize_request(
         redirect_uri,
         code,
         state,
+        iss,
     }
 }
 
@@ -162,6 +183,7 @@ mod tests {
 
     const REDIRECT_URI: &str = "eudi-openid4ci://authorize";
     const ISSUER_STATE: &str = "issuer-state-abc";
+    const ISSUER_IDENTIFIER: &str = "https://issuer.example.com";
     // 43 chars, valid RFC 7636 unreserved charset.
     const VALID_CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
@@ -207,13 +229,16 @@ mod tests {
             .unwrap();
 
         let params = valid_params();
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_010).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_010)
+                .await;
 
         match outcome {
             AuthorizeOutcome::Success {
                 redirect_uri,
                 code,
                 state,
+                ..
             } => {
                 assert_eq!(redirect_uri, REDIRECT_URI);
                 assert!(!code.is_empty());
@@ -231,13 +256,63 @@ mod tests {
         }
     }
 
+    /// RFC 9207 §2, GAP-HAIP-02: a successful Authorization Response MUST
+    /// carry `iss`, equal to the issuer identifier.
+    #[tokio::test]
+    async fn success_outcome_carries_iss() {
+        let storage = test_storage().await;
+        let tx = sample_tx(IssuanceState::Offered);
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let params = valid_params();
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_010)
+                .await;
+
+        match outcome {
+            AuthorizeOutcome::Success { iss, .. } => assert_eq!(iss, ISSUER_IDENTIFIER),
+            other => panic!("expected Success, got {other:?}"),
+        }
+    }
+
+    /// RFC 9207 §2, GAP-HAIP-02: "In authorization responses to the client,
+    /// including error responses" -- an ErrorRedirect MUST carry `iss` too,
+    /// not only the success path.
+    #[tokio::test]
+    async fn error_redirect_outcome_carries_iss() {
+        let storage = test_storage().await;
+        let tx = sample_tx(IssuanceState::Offered);
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let mut params = valid_params();
+        params.response_type = "token".to_string(); // forces ErrorRedirect
+
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
+
+        match outcome {
+            AuthorizeOutcome::ErrorRedirect { iss, error, .. } => {
+                assert_eq!(iss, ISSUER_IDENTIFIER);
+                assert_eq!(error, "invalid_request");
+            }
+            other => panic!("expected ErrorRedirect, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn unresolvable_issuer_state_is_a_direct_error() {
         let storage = test_storage().await;
         let mut params = valid_params();
         params.issuer_state = "no-such-state".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         assert!(matches!(outcome, AuthorizeOutcome::DirectError(_)));
     }
 
@@ -252,7 +327,9 @@ mod tests {
         let mut params = valid_params();
         params.redirect_uri = "https://evil.example.com/callback".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         assert!(matches!(outcome, AuthorizeOutcome::DirectError(_)));
     }
 
@@ -267,7 +344,9 @@ mod tests {
         let mut params = valid_params();
         params.code_challenge_method = "plain".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         match outcome {
             AuthorizeOutcome::ErrorRedirect {
                 redirect_uri,
@@ -292,7 +371,9 @@ mod tests {
         let mut params = valid_params();
         params.code_challenge = "too-short".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -307,7 +388,9 @@ mod tests {
         let mut params = valid_params();
         params.response_type = "token".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -322,7 +405,9 @@ mod tests {
         let mut params = valid_params();
         params.client_id = "".to_string();
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -335,7 +420,9 @@ mod tests {
             .unwrap();
 
         let params = valid_params();
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         match outcome {
             AuthorizeOutcome::ErrorRedirect { error, .. } => {
                 assert_eq!(error, "access_denied");
@@ -355,7 +442,9 @@ mod tests {
         let mut params = valid_params();
         params.state = None;
 
-        let outcome = handle_authorize_request(&storage, &params, 600, 1_700_000_000).await;
+        let outcome =
+            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
+                .await;
         match outcome {
             AuthorizeOutcome::Success { state, .. } => assert_eq!(state, None),
             other => panic!("expected Success, got {other:?}"),

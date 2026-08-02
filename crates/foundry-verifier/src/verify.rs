@@ -9,6 +9,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
+use foundry_core::url::dns_host_only;
 use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
 use josekit::jwk::Jwk;
 use serde_json::Value;
@@ -381,7 +382,7 @@ async fn do_verify_vp_response(
         .wallet_facing
         .public_base_url
         .trim_end_matches('/');
-    let host = crate::request::dns_host_only(base_url);
+    let host = dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
 
     // OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the

@@ -47,11 +47,15 @@ pub async fn spawn_test_server() -> TestServer {
         365,
     )
     .expect("issue_leaf issuer");
+    // The verifier leaf's dNSName SAN must match the host derived from
+    // `server.wallet_facing.public_base_url` (ISSUER_BASE = "issuer.example.com"
+    // below) -- `build_signed_request_object` (GAP-VP-02) now cross-checks this
+    // and rejects a mismatch, where it previously silently accepted "localhost".
     let verifier_leaf = issue_leaf(
         &root.cert_pem,
         &root.key_pem,
-        "localhost",
-        &["localhost".to_string()],
+        "issuer.example.com",
+        &["issuer.example.com".to_string()],
         365,
     )
     .expect("issue_leaf verifier");

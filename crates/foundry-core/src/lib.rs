@@ -6,3 +6,4 @@ pub mod pki;
 pub mod status_list;
 pub mod storage;
 pub mod trust;
+pub mod url;

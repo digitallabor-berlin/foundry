@@ -7,6 +7,7 @@ use base64::Engine;
 use foundry_core::config::Config;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use foundry_core::storage::Storage;
+use foundry_core::url::dns_host_only;
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -99,14 +100,6 @@ fn annotate_encryption_jwk(mut jwk: serde_json::Value, alg: &str) -> serde_json:
         obj.insert("alg".to_string(), serde_json::json!(alg));
     }
     jwk
-}
-
-pub(crate) fn dns_host_only(base_url: &str) -> String {
-    let host = base_url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-    let host = host.split('/').next().unwrap_or(host);
-    host.split(':').next().unwrap_or(host).to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -365,15 +358,6 @@ pub fn build_signed_request_object(
     let alg: SignatureAlgorithm = key_entry.alg.parse()?;
     let signer = FileSigner::from_pem_file(&key_entry.private_key, alg)?;
 
-    let x5c = if let Some(ref path) = key_entry.x5c {
-        let pem_bytes = std::fs::read(path).map_err(|e| {
-            VerificationError::Crypto(format!("failed to read x5c file '{path}': {e}"))
-        })?;
-        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
-    } else {
-        None
-    };
-
     let base_url = config
         .server
         .wallet_facing
@@ -382,6 +366,28 @@ pub fn build_signed_request_object(
     let host = dns_host_only(base_url);
     let client_id = format!("x509_san_dns:{host}");
     let response_uri = format!("{base_url}/vp/response/{}", tx.id);
+
+    // OpenID4VP 1.0 Defined Client Identifier Prefixes / x509_san_dns (L614): the
+    // Client Identifier without the prefix MUST be a DNS name matching a dNSName
+    // SAN entry in the leaf certificate carried in x5c. GAP-VP-02: cross-check the
+    // derived host against the configured x5c leaf here, so a misconfigured
+    // public_base_url/certificate pairing fails loudly instead of silently signing
+    // a Request Object whose client_id claim contradicts the certificate that
+    // signs it -- relying entirely on the wallet's own SAN check to catch it.
+    let x5c = if let Some(ref path) = key_entry.x5c {
+        let pem_bytes = std::fs::read(path).map_err(|e| {
+            VerificationError::Crypto(format!("failed to read x5c file '{path}': {e}"))
+        })?;
+        if !foundry_core::trust::match_san_dns(&pem_bytes, &host)? {
+            return Err(VerificationError::Crypto(format!(
+                "client_id host '{host}' (derived from server.wallet_facing.public_base_url) \
+                 does not match any dNSName SAN entry in the configured x5c leaf certificate"
+            )));
+        }
+        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
+    } else {
+        None
+    };
 
     let mut payload_map = serde_json::Map::new();
     payload_map.insert(
@@ -393,6 +399,14 @@ pub fn build_signed_request_object(
     payload_map.insert(
         "response_mode".to_string(),
         serde_json::json!("direct_post.jwt"),
+    );
+    // OpenID4VP 1.0 `aud` of a Request Object (L536): MUST be
+    // "https://self-issued.me/v2" under Static Discovery -- the only branch this
+    // verifier ever takes, since it performs no Dynamic Discovery (no
+    // openid_federation Client Identifier Prefix; see VP-0041/VP-0048).
+    payload_map.insert(
+        "aud".to_string(),
+        serde_json::json!("https://self-issued.me/v2"),
     );
     payload_map.insert("nonce".to_string(), serde_json::json!(tx.nonce));
     payload_map.insert("state".to_string(), serde_json::json!(tx.id));

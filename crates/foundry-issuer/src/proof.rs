@@ -369,7 +369,9 @@ mod tests {
     #[test]
     fn rejects_nonce_not_minted_by_this_issuer() {
         // The nonce is no longer compared to per-transaction state, so the
-        // failure mode is a nonce that carries no valid issuer MAC.
+        // failure mode is a nonce that carries no valid issuer MAC -- a
+        // *present but invalid* c_nonce, which is InvalidNonce (GAP-VCI-04),
+        // not InvalidProof.
         let jwt_str = signed_proof_jwt("https://issuer.example.com", "wrong-nonce");
         let empty_store = TrustStore::from_pems(&[]).unwrap();
 
@@ -383,7 +385,53 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, IssuanceError::InvalidProof(_)));
+        assert!(
+            matches!(err, IssuanceError::InvalidNonce(_)),
+            "got: {err:?}"
+        );
+    }
+
+    /// OpenID4VCI 1.0 L1049 clause 3: a proof whose `nonce` claim is *missing*
+    /// entirely stays `InvalidProof`, distinct from a *present but invalid*
+    /// c_nonce (`InvalidNonce`, GAP-VCI-04). This is the boundary that makes
+    /// the split meaningful.
+    #[test]
+    fn rejects_proof_with_missing_nonce_claim_as_invalid_proof_not_invalid_nonce() {
+        let keypair = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let mut public_jwk = keypair.to_jwk_public_key();
+        public_jwk.set_algorithm("ES256");
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("openid4vci-proof+jwt");
+        header
+            .set_claim("jwk", Some(serde_json::to_value(&public_jwk).unwrap()))
+            .unwrap();
+
+        // aud set, nonce deliberately omitted.
+        let mut payload = JwtPayload::new();
+        payload
+            .set_claim("aud", Some(serde_json::json!("https://issuer.example.com")))
+            .unwrap();
+
+        let private_jwk = keypair.to_jwk_private_key();
+        let signer = ES256.signer_from_jwk(&private_jwk).unwrap();
+        let jwt_str = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let empty_store = TrustStore::from_pems(&[]).unwrap();
+        let err = verify_holder_proof(
+            &jwt_str,
+            "https://issuer.example.com",
+            &test_secret(),
+            NOW,
+            Mode::Optional,
+            &empty_store,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, IssuanceError::InvalidProof(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]

@@ -8,8 +8,30 @@ pub enum IssuanceError {
     InvalidGrant(String),
     #[error("invalid proof: {0}")]
     InvalidProof(String),
+    /// OpenID4VCI 1.0 Credential Error Response (L1041, L1050): the `proofs`
+    /// parameter uses an invalid nonce -- at least one key proof carries a
+    /// `c_nonce` that is malformed, forged, or expired. Deliberately distinct
+    /// from `InvalidProof`, which per L1049 clause 3 stays reserved for a
+    /// *missing* `c_nonce` value -- GAP-VCI-04.
+    #[error("invalid nonce: {0}")]
+    InvalidNonce(String),
     #[error("unknown credential_type_id '{0}'")]
     UnknownCredentialType(String),
+    /// OpenID4VCI 1.0 Credential Request (L851): `credential_configuration_id`
+    /// is REQUIRED (this implementation never returns `credential_identifiers`,
+    /// so the exemption never applies) and MUST identify the Credential Type
+    /// the Access Token was issued for -- absent, or present but naming a
+    /// *different* (still-configured) Credential Type, is
+    /// `invalid_credential_request` per L1041/L1046, not a generic code --
+    /// GAP-VCI-02.
+    #[error("invalid credential request: {0}")]
+    InvalidCredentialRequest(String),
+    /// A `credential_configuration_id` naming a configuration this Credential
+    /// Issuer does not have at all, distinct from `InvalidCredentialRequest`
+    /// (present-but-wrong) so a Wallet can tell "re-read metadata" apart from
+    /// "fix your request" -- GAP-VCI-02.
+    #[error("unknown credential_configuration: {0}")]
+    UnknownCredentialConfiguration(String),
     #[error("claim validation failed: {0}")]
     ClaimValidation(String),
     /// Client-authentication failures per RFC 6749 sect-5.2: an absent, malformed,
@@ -50,7 +72,10 @@ impl IssuanceError {
             IssuanceError::InvalidRequest(_) => "invalid_request",
             IssuanceError::InvalidGrant(_) => "invalid_grant",
             IssuanceError::InvalidProof(_) => "invalid_proof",
+            IssuanceError::InvalidNonce(_) => "invalid_nonce",
             IssuanceError::UnknownCredentialType(_) => "unknown_credential_type",
+            IssuanceError::InvalidCredentialRequest(_) => "invalid_credential_request",
+            IssuanceError::UnknownCredentialConfiguration(_) => "unknown_credential_configuration",
             IssuanceError::ClaimValidation(_) => "claim_validation",
             IssuanceError::InvalidClient(_) => "invalid_client",
             IssuanceError::StatusListExhausted(_) => "status_list_exhausted",
@@ -90,9 +115,18 @@ mod tests {
             (IssuanceError::InvalidRequest(s()), "invalid_request"),
             (IssuanceError::InvalidGrant(s()), "invalid_grant"),
             (IssuanceError::InvalidProof(s()), "invalid_proof"),
+            (IssuanceError::InvalidNonce(s()), "invalid_nonce"),
             (
                 IssuanceError::UnknownCredentialType(s()),
                 "unknown_credential_type",
+            ),
+            (
+                IssuanceError::InvalidCredentialRequest(s()),
+                "invalid_credential_request",
+            ),
+            (
+                IssuanceError::UnknownCredentialConfiguration(s()),
+                "unknown_credential_configuration",
             ),
             (IssuanceError::ClaimValidation(s()), "claim_validation"),
             (IssuanceError::InvalidClient(s()), "invalid_client"),
@@ -135,5 +169,30 @@ mod tests {
         let err = IssuanceError::InvalidClient("pop jti already claimed".to_string());
         assert_eq!(err.kind(), "invalid_client");
         assert_eq!(err.to_string(), "invalid client: pop jti already claimed");
+    }
+
+    /// GAP-VCI-04: `InvalidNonce` is a distinct variant from `InvalidProof`,
+    /// with its own kind and its own Display prefix -- a wallet must be able
+    /// to tell "fetch a fresh c_nonce and retry" apart from "the whole proof
+    /// is broken".
+    #[test]
+    fn invalid_nonce_is_a_distinct_variant_from_invalid_proof() {
+        let err = IssuanceError::InvalidNonce("c_nonce has expired".to_string());
+        assert_eq!(err.kind(), "invalid_nonce");
+        assert_eq!(err.to_string(), "invalid nonce: c_nonce has expired");
+    }
+
+    /// GAP-VCI-02: a wallet must be able to distinguish "your
+    /// credential_configuration_id is missing/wrong" from "that configuration
+    /// doesn't exist at all" -- two different recoveries.
+    #[test]
+    fn invalid_credential_request_and_unknown_credential_configuration_are_distinct() {
+        let a = IssuanceError::InvalidCredentialRequest("missing".to_string());
+        assert_eq!(a.kind(), "invalid_credential_request");
+
+        let b = IssuanceError::UnknownCredentialConfiguration("nope".to_string());
+        assert_eq!(b.kind(), "unknown_credential_configuration");
+
+        assert_ne!(a.kind(), b.kind());
     }
 }

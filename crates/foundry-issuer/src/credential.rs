@@ -70,6 +70,30 @@ pub async fn handle_credential_request(
         ));
     }
 
+    // OpenID4VCI 1.0 Credential Request (L851): credential_configuration_id is
+    // REQUIRED here -- this issuer never returns credential_identifiers via
+    // authorization_details, so the exemption never applies -- and MUST
+    // identify the Credential Type the Access Token was issued for. Checked
+    // before proof verification so a misaddressed request fails on this cheap
+    // check rather than after signature work -- GAP-VCI-02.
+    match &req.credential_configuration_id {
+        None => {
+            return Err(IssuanceError::InvalidCredentialRequest(
+                "credential_configuration_id is required".into(),
+            ));
+        }
+        Some(id) if *id == tx.credential_type_id => {}
+        Some(id) if config.credential_types.iter().any(|ct| ct.id == *id) => {
+            return Err(IssuanceError::InvalidCredentialRequest(format!(
+                "credential_configuration_id '{id}' does not identify the Credential Type \
+                 this access_token was issued for"
+            )));
+        }
+        Some(id) => {
+            return Err(IssuanceError::UnknownCredentialConfiguration(id.clone()));
+        }
+    }
+
     let proof_jwts = req
         .proofs
         .as_ref()

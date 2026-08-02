@@ -20,7 +20,7 @@ use foundry_issuer::{
     allocate_status_index, build_authorization_server_metadata, build_issuer_metadata,
     create_offer, handle_authorize_request, handle_credential_request, handle_token_request,
     issue_nonce, verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest,
-    CredentialRequest, NonceSecret, ProofsRequest, TokenRequest,
+    CredentialRequest, IssuanceError, NonceSecret, ProofsRequest, TokenRequest,
 };
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
@@ -374,6 +374,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
     let outcome = handle_authorize_request(
         &storage,
         &params,
+        "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
     )
@@ -595,7 +596,6 @@ fn vci_0059_credential_request_ignores_unrecognized_parameters() {
 // not implemented) and MUST identify the Credential this Access Token binds to.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-02: OpenID4VCI Credential Request (L851) — credential_configuration_id MUST identify the Credential the Access Token was issued for"]
 async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
     let (_key_dir, key_path) = write_test_issuer_key();
     let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
@@ -604,7 +604,8 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
     let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
 
     // The access token was issued for "pid"; requesting an unrelated
-    // configuration id must be rejected, not silently served as "pid".
+    // configuration id -- one this issuer doesn't have at all -- must be
+    // rejected, not silently served as "pid".
     let req = CredentialRequest {
         credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
         format: Some("dc+sd-jwt".to_string()),
@@ -618,8 +619,107 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
             .await;
 
     assert!(
-        result.is_err(),
-        "a credential_configuration_id mismatched with the Access Token's bound Credential Type must be rejected"
+        matches!(result, Err(IssuanceError::UnknownCredentialConfiguration(_))),
+        "an unknown credential_configuration_id must be rejected as UnknownCredentialConfiguration, got: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-02: a credential_configuration_id naming a *configured* Credential
+// Type that the Access Token was NOT issued for is a different case from an
+// altogether-unknown id -- InvalidCredentialRequest ("fix your request"),
+// not UnknownCredentialConfiguration ("re-read metadata").
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invalid_credential_request(
+) {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    // Token issued for "pid", but credential_test_config also configures "mdl".
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("mdl".to_string()),
+        format: Some("mso_mdoc".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        matches!(result, Err(IssuanceError::InvalidCredentialRequest(_))),
+        "a configured-but-unbound credential_configuration_id must be InvalidCredentialRequest, got: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-02: an absent credential_configuration_id is REQUIRED per L851
+// (this issuer never returns credential_identifiers, so the exemption never
+// applies).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn gap_vci_02_absent_credential_configuration_id_is_invalid_credential_request() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: None,
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec![proof_jwt],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        matches!(result, Err(IssuanceError::InvalidCredentialRequest(_))),
+        "an absent credential_configuration_id must be InvalidCredentialRequest, got: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-02: the credential_configuration_id check runs before proof
+// verification, so a request that is wrong on both counts reports the
+// config-id failure, not a proof failure -- the cheap check must run first.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verification() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
+
+    // A syntactically broken "proof" -- not even a well-formed JWS -- paired
+    // with an unknown credential_configuration_id. If proof verification ran
+    // first, this would surface as an InvalidProof failure instead.
+    let req = CredentialRequest {
+        credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
+        format: Some("dc+sd-jwt".to_string()),
+        proofs: Some(ProofsRequest {
+            jwt: vec!["not-a-jwt-at-all".to_string()],
+        }),
+    };
+
+    let result =
+        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
+            .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(IssuanceError::UnknownCredentialConfiguration(_))
+        ),
+        "credential_configuration_id must be checked before proof verification, got: {result:?}"
     );
 }
 
@@ -1017,6 +1117,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
     let outcome = handle_authorize_request(
         &storage,
         &params,
+        "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
     )
@@ -1928,12 +2029,12 @@ fn vci_0155_credential_configuration_claims_reveal_disclosed_paths() {
 // into both derived endpoint URLs.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "GAP-VCI-08: OpenID4VCI Credential Issuer Metadata (L1368, L1369) — credential_endpoint and nonce_endpoint MUST use the https scheme, but Config::validate() never checks the scheme of issuer.credential_issuer"]
 fn vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls() {
     let mut cfg = test_config();
-    // Satisfy the *only* other check `Config::validate()` performs (that
-    // `verifier.signing_key` resolves in `keys`) so that a failure here can
-    // only be attributed to the https-scheme hypothesis under test.
+    // Satisfy the verifier.signing_key keyref check so that a failure here can
+    // only be attributed to the https-scheme hypothesis under test. (Note:
+    // credential_issuer == public_base_url below, both http, so this test
+    // exercises the https check, not the identity check.)
     cfg.keys.insert(
         "verifier_signing".to_string(),
         KeyEntry {
@@ -1964,12 +2065,11 @@ fn vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls
 // `Config::validate()` never checks that they match.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "GAP-VCI-09: OpenID4VCI Credential Issuer Metadata (L1366) — credential_issuer MUST be identical to the identifier used to build the well-known URL, but Config::validate() never checks server.wallet_facing.public_base_url against issuer.credential_issuer"]
 fn vci_0128_config_validation_does_not_enforce_credential_issuer_identity_match() {
     let mut cfg = test_config();
-    // Satisfy the *only* other check `Config::validate()` performs (that
-    // `verifier.signing_key` resolves in `keys`) so that a failure here can
-    // only be attributed to the identity-mismatch hypothesis under test.
+    // Satisfy the verifier.signing_key keyref check so that a failure here can
+    // only be attributed to the identity-mismatch hypothesis under test. Both
+    // URLs stay https, so this exercises the identity check, not the scheme one.
     cfg.keys.insert(
         "verifier_signing".to_string(),
         KeyEntry {

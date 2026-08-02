@@ -179,3 +179,33 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 - **The `pre-authorized_code` field is serde-renamed** (hyphen, not underscore)
   in `TokenRequest`. Renaming the Rust field without preserving `#[serde(rename)]`
   silently breaks wallet compatibility.
+- **`IssuanceError::InvalidNonce` vs `InvalidProof` splits by cause, not by call
+  site** (OpenID4VCI L1049 clause 3 vs L1050; GAP-VCI-04). All four
+  `verify_nonce` (nonce.rs) failure modes -- malformed, forged, or expired -- are
+  `InvalidNonce`: the `c_nonce` is *present but invalid*. A *missing* `nonce`
+  claim stays `InvalidProof`, at both call sites that check for it (`proof.rs`'s
+  outer proof payload and `attestation.rs`'s Key Attestation JWT payload). Don't
+  reason from "nonce-related" to "must be InvalidNonce" — check whether the
+  claim was absent or merely invalid.
+- **`attestation.rs` deliberately propagates `InvalidNonce` from the Key
+  Attestation JWT's own nonce check**, keeping a `key_attestation:` message
+  prefix rather than collapsing it back to `InvalidProof`. The wallet's
+  recovery ("fetch a fresh `c_nonce` and retry") is identical regardless of
+  which nested JWT carried the invalid nonce.
+- **`handle_credential_request` validates `credential_configuration_id`
+  against `tx.credential_type_id` before proof verification** (GAP-VCI-02,
+  OpenID4VCI L851): absent, or naming a *configured* Credential Type the
+  Access Token was not issued for, is `InvalidCredentialRequest`; naming a
+  Credential Type this issuer does not have configured at all is
+  `UnknownCredentialConfiguration` -- a Wallet needs to tell "fix your
+  request" apart from "re-read metadata". `req.format` is deliberately never
+  read: it is not a Credential Request parameter in OpenID4VCI 1.0 §7.2, and
+  every existing caller (including `foundry-wallet`) sends it regardless.
+- **`handle_authorize_request` takes an explicit `issuer_identifier: &str`
+  parameter** (inserted after `params`), and both `AuthorizeOutcome::Success`
+  and `AuthorizeOutcome::ErrorRedirect` carry the resulting `iss` field --
+  RFC 9207 §2 requires `iss` "including error responses", not only success
+  (GAP-HAIP-02). `AuthorizeOutcome::DirectError` deliberately does not: it
+  renders as a JSON error body, not a redirect, so RFC 9207 §2 never reaches
+  it. `AuthorizationServerMetadata.authorization_response_iss_parameter_supported`
+  is hardcoded `true` per RFC 9207 §2.3.

@@ -25,7 +25,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 
 | File | Responsibility |
 |---|---|
-| `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust` |
+| `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
 | `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model` |
 | `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat` |
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
@@ -39,6 +39,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `storage/mod.rs` | The async `Storage` trait; re-exports `SqliteStorage` |
 | `storage/sqlite.rs` | `SqliteStorage` — single `kv` table, connects with `create_if_missing`, runs `migrations/` on connect |
 | `migrations/` | SQL schema migrations (`0001_init.sql`), embedded via `sqlx::migrate!` |
+| `url.rs` | `dns_host_only(base_url) -> String` — strips a `https://`/`http://` scheme and truncates at the first `/` or `:`, leaving a bare DNS host. Shared by `Config::validate()` and `foundry-verifier`'s Request Object signing; the workspace deliberately carries no URL-parsing crate |
 
 ## Key Public Types & Entry Points
 
@@ -137,3 +138,20 @@ cargo test -p foundry-core
 - **`SqliteStorage::connect` runs migrations on every connect** and uses
   `create_if_missing`, so a typo'd path silently creates a fresh empty database
   rather than failing.
+- **`Config::validate()` exempts loopback hosts from the `https` MUST on
+  `issuer.credential_issuer`** (OpenID4VCI L1368/L1369; GAP-VCI-08). This is a
+  deliberate, documented deviation, not an oversight: the repository's own dev
+  config (`config.yaml`) runs `issuer.credential_issuer` over plain
+  `http://localhost:8443`, and enforcing the MUST unconditionally would make
+  that shipped config fail to boot. The exemption set is exactly `localhost`,
+  `127.0.0.1`, `::1`, `[::1]` — do not widen it to private IP ranges or
+  `*.local`, and do not remove it without first migrating `config.yaml` and
+  every fixture that relies on it. **Accepted consequence:** a loopback
+  deployment's RFC 9207 `iss` value (also required to be `https`, RFC 9207 §2)
+  will not be conformant either — this is the same deviation surfacing a second
+  time, not a separate defect.
+- **`Config::validate()` requires `issuer.credential_issuer` to be
+  byte-identical to `server.wallet_facing.public_base_url`** (OpenID4VCI L1366;
+  GAP-VCI-09) — "a simple string comparison with no normalization", so a
+  trailing slash or case difference is a mismatch, not a benign variant. Do not
+  add trimming or case-folding to make this check more lenient.
