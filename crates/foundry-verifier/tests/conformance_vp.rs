@@ -295,7 +295,6 @@ async fn vp_0064_signing_key_and_x5c_chain_are_paired() {
 // discovery, see VP-0041, `not-implemented`).
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VP-01: OpenID4VP `aud` of a Request Object (L536) — aud MUST be https://self-issued.me/v2 under Static Discovery, but build_signed_request_object never emits an aud claim at all"]
 async fn vp_0042_request_object_missing_aud_claim() {
     let dir = tempfile::tempdir().unwrap();
     let key_path = write_key(dir.path(), "verifier.pem");
@@ -342,7 +341,6 @@ async fn vp_0042_request_object_missing_aud_claim() {
 // but request.rs never calls it.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VP-02: OpenID4VP Defined Client Identifier Prefixes / x509_san_dns (L614) — the client_id host MUST match a dNSName SAN entry in the leaf certificate, but build_signed_request_object never validates this"]
 async fn vp_0063_client_id_host_not_validated_against_x5c_certificate_san() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -390,6 +388,88 @@ async fn vp_0063_client_id_host_not_validated_against_x5c_certificate_san() {
         "signing a request object whose x509_san_dns client_id host does not match any \
          dNSName SAN entry in the configured x5c leaf certificate must be rejected"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Positive control for GAP-VP-02: a leaf certificate whose SAN *does* match
+// the derived client_id host must sign successfully. Without this, vp_0063
+// above would also pass if build_signed_request_object were changed to
+// unconditionally error whenever x5c is configured, regardless of SAN
+// content -- this proves the check is a genuine comparison, not a stub.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn build_signed_request_object_succeeds_when_x5c_san_matches_public_base_url_host() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let ca = new_ca("Test Verifier Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "verifier.example.com",
+        &["verifier.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let x5c_path = dir.path().join("leaf.pem");
+    std::fs::write(&x5c_path, leaf.cert_pem.as_bytes()).unwrap();
+    let key_path = dir.path().join("leaf_key.pem");
+    std::fs::write(&key_path, leaf.key_pem.as_bytes()).unwrap();
+
+    // public_base_url's host ("verifier.example.com") matches the leaf
+    // certificate's SAN this time.
+    let config = sample_config(key_path.to_str().unwrap(), Some(x5c_path.to_str().unwrap()));
+    let storage = test_storage().await;
+
+    let req = CreateVerificationRequest {
+        dcql_query: Some(serde_json::json!({
+            "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+        })),
+        named_query_ref: None,
+        transport: "request_uri".to_string(),
+        transaction_data: None,
+    };
+    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+    let tx = load_verification_transaction(&storage, &res.verification_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    build_signed_request_object(&config, &tx)
+        .expect("a matching x509_san_dns SAN must sign successfully");
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VP-02: no x5c configured at all means no certificate for the client_id
+// to contradict -- the SAN cross-check must not fire, and signing must still
+// succeed.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn build_signed_request_object_succeeds_without_x5c_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = write_key(dir.path(), "verifier.pem");
+    let config = sample_config(&key_path, None);
+    let storage = test_storage().await;
+
+    let req = CreateVerificationRequest {
+        dcql_query: Some(serde_json::json!({
+            "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+        })),
+        named_query_ref: None,
+        transport: "request_uri".to_string(),
+        transaction_data: None,
+    };
+    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+    let tx = load_verification_transaction(&storage, &res.verification_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    build_signed_request_object(&config, &tx)
+        .expect("no x5c configured means no SAN check is attempted");
 }
 
 // ---------------------------------------------------------------------------

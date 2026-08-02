@@ -160,8 +160,12 @@ cargo test -p foundry --test wallet_verification
   failure is an early `Err(Decryption(..))` → 400, so a `verified: false` result
   will never carry a failed `jwe_decryption` record.
 - **`client_id` is derived, not configured:** `x509_san_dns:<dns-host-of-public_base_url>`.
-  A mismatch between the configured `public_base_url` and the certificate's
-  dNSName SAN breaks audience binding for both formats.
+  Since GAP-VP-02's closure, `build_signed_request_object` **hard-fails** on a
+  mismatch between the derived host and the configured `x5c` leaf's dNSName SAN
+  entries (`foundry_core::trust::match_san_dns`) — what used to be a silent
+  audience-binding break for both formats is now a `VerificationError::Crypto`
+  raised before the Request Object is ever signed. No `x5c` configured means no
+  check is attempted.
 - **`vp_token` is an OpenID4VP 1.0 §8.1 object keyed by DCQL credential query id,
   with ARRAY values** — `{ "<query id>": [ <presentation> ] }` — and that is the
   same shape for **both** credential formats. The credential format comes from
