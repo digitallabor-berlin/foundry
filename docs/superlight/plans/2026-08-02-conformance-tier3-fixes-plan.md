@@ -410,11 +410,11 @@ misaddressed request must fail on cheap checks, not after signature work.
 
 **Verify:** `cargo test -p foundry-issuer && cargo test -p foundry && git diff --stat openapi.json openapi-wallet.json`
 
-- [ ] Red — failing test per behavior above
-- [ ] Green — minimal implementation
-- [ ] Refactor — clean while green
-- [ ] Verify — run the command, pristine output
-- [ ] Commit
+- [x] Red — failing test per behavior above
+- [x] Green — minimal implementation
+- [x] Refactor — clean while green
+- [x] Verify — run the command, pristine output
+- [x] Commit
 
 ---
 
@@ -455,3 +455,4 @@ Append one line per completed task: date, task, commit SHA.
 - 2026-08-02 — Task 2 (GAP-VP-01, GAP-VP-02) — `509c2b8`
 - 2026-08-02 — Task 3 (GAP-VCI-04) — `0fca8fe`
 - 2026-08-02 — Task 4 (GAP-VCI-02) — `6c11588`
+- 2026-08-02 — Task 5 (GAP-HAIP-02) — `628a6f1`
