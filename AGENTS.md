@@ -236,7 +236,24 @@ Run all three, **once**, when any of the following holds:
 Outside those cases, prefer widening the scoped set (one more `-p <crate>`) over
 escalating to `--workspace`.
 
-### 5.4 Honesty Rule
+### 5.4 Never Re-Run the Full Suite After Merging
+
+Once work has been merged back to `main`, **do not run `cargo test --workspace`
+again to "confirm" the merge.** The full gate of §5.3 was already run once, at
+the end of the development cycle, as part of the final review / pre-PR
+checkpoint. Re-running it post-merge re-pays the most expensive gate in the
+repository for information already established.
+
+- After a merge, the correct action is **none** — report the gate that was
+  already run (§5.5 honesty rule) and stop.
+- The only exception is a merge that **actually changed the tree beyond the
+  reviewed branch** — a non-trivial conflict resolution, or `main` having moved
+  in a way that touches the same crates. Then run the **scoped** gate of §5.1
+  over the conflicted crates, not the full suite.
+- "Just to be safe" is not an exception. If the branch was green and the merge
+  was a fast-forward or a clean auto-merge, there is nothing new to verify.
+
+### 5.5 Honesty Rule
 
 Never claim work is complete, fixed, or passing without having run the gate that
 actually applies and seen it pass. When reporting, **name the gate you ran** —
