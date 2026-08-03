@@ -9,6 +9,7 @@ use utoipa::OpenApi;
         crate::server::create_offer_handler,
         crate::server::create_verification_handler,
         crate::server::get_verification_handler,
+        crate::server::post_admin_dc_api_response_handler,
     ),
     components(schemas(
         foundry_issuer::CreateOfferRequest,
@@ -24,6 +25,7 @@ use utoipa::OpenApi;
         foundry_verifier::VerificationState,
         foundry_verifier::VerificationResult,
         foundry_verifier::CheckResult,
+        crate::server::AdminDcApiResponseBody,
     ))
 )]
 pub struct AdminApiDoc;

@@ -74,6 +74,10 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
             "/admin/verification/requests/:id",
             get(get_verification_handler),
         )
+        .route(
+            "/admin/verification/requests/:id/dc-api-response",
+            post(post_admin_dc_api_response_handler),
+        )
         .route_layer(middleware::from_fn_with_state(api_key, require_api_key))
         .with_state(state);
 
@@ -867,6 +871,40 @@ pub(crate) async fn get_verification_handler(
         Some(tx) => Ok(Json(tx)),
         None => Err(StatusCode::NOT_FOUND),
     }
+}
+
+/// The Digital Credentials API delivers the wallet's encrypted response as a
+/// JS object property (`credentialResponse.data.response`), not a URL-encoded
+/// form body, so the admin console submits it here as JSON instead of the
+/// `application/x-www-form-urlencoded` shape `VpResponseForm` uses.
+/// `foundry-verifier`'s `create_verification_request` always sets
+/// `response_mode: "dc_api.jwt"` for `transport: "dc_api"` (never the
+/// plaintext `dc_api` mode), so this is always the encrypted-JWE shape — there
+/// is no unencrypted variant to additionally support here.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub(crate) struct AdminDcApiResponseBody {
+    /// JWE compact serialization of the VP Token response, as delivered in
+    /// `credentialResponse.data.response` by `navigator.credentials.get()`.
+    response: String,
+}
+
+/// Admin-authenticated counterpart to `post_response_handler`, used by the
+/// test console to relay the browser's Digital Credentials API response for
+/// verification. See `submit_vp_response` for the shared core; the only
+/// difference from the wallet-facing route is the request encoding (JSON, not
+/// form-urlencoded) and the `surface` log label (`"admin"`, not `"wallet"`).
+#[utoipa::path(
+    post,
+    path = "/admin/verification/requests/{id}/dc-api-response",
+    request_body = AdminDcApiResponseBody,
+    responses((status = 200, body = VerificationResult))
+)]
+pub(crate) async fn post_admin_dc_api_response_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<AdminDcApiResponseBody>,
+) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
+    submit_vp_response(&state, &id, &body.response, "admin").await
 }
 
 #[utoipa::path(
