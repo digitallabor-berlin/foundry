@@ -130,6 +130,7 @@ pub struct CreateVerificationResponse {
 fn encode_transaction_data(
     entries: &[serde_json::Value],
     dcql: &serde_json::Value,
+    hashes_alg: &[String],
 ) -> Result<Vec<String>, VerificationError> {
     let known_ids: Vec<&str> = dcql
         .get("credentials")
@@ -185,7 +186,21 @@ fn encode_transaction_data(
                 }
             }
 
-            let bytes = serde_json::to_vec(entry)
+            // OpenID4VP L3142: `transaction_data_hashes_alg` is a member of the
+            // transaction data object. Injected before encoding so the advertised
+            // bytes and the bytes a wallet hashes are identical -- the guarantee this
+            // function's contract rests on. An operator-supplied value is never
+            // silently replaced.
+            let entry = if hashes_alg.is_empty() {
+                entry.clone()
+            } else {
+                let mut with_alg = obj.clone();
+                with_alg
+                    .entry("transaction_data_hashes_alg".to_string())
+                    .or_insert_with(|| serde_json::json!(hashes_alg));
+                serde_json::Value::Object(with_alg)
+            };
+            let bytes = serde_json::to_vec(&entry)
                 .map_err(|e| VerificationError::Serialization(e.to_string()))?;
             Ok(B64URL.encode(bytes))
         })
@@ -264,7 +279,11 @@ pub async fn create_verification_request(
     // Validate and encode before persisting: a bad entry must fail the request,
     // not reach a wallet that will abort the whole presentation over it.
     let encoded_transaction_data = match req.transaction_data.as_deref() {
-        Some(entries) => Some(encode_transaction_data(entries, &dcql)?),
+        Some(entries) => Some(encode_transaction_data(
+            entries,
+            &dcql,
+            &config.verifier.transaction_data_hashes_alg,
+        )?),
         None => None,
     };
 
@@ -1438,6 +1457,99 @@ mod tests {
         let decoded: serde_json::Value =
             serde_json::from_slice(&B64URL.decode(encoded).unwrap()).unwrap();
         assert_eq!(decoded, entry);
+    }
+
+    /// OpenID4VP L3142: `transaction_data_hashes_alg` is a member of each
+    /// transaction data object, and one of its values MUST be used to compute
+    /// `transaction_data_hashes`. It must therefore be inside the entry *before*
+    /// base64url encoding, so what a wallet hashes is what was advertised.
+    #[tokio::test]
+    async fn transaction_data_entries_advertise_the_configured_hash_algorithm() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+        let mut config = sample_config(key_file.to_str().unwrap());
+        config.verifier.transaction_data_hashes_alg = vec!["sha-256".to_string()];
+        let storage = test_storage().await;
+
+        let entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["pid"]
+        });
+
+        let res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "pid", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![entry]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let encoded = &tx.transaction_data.unwrap()[0];
+        let decoded_entry: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(encoded).unwrap()).unwrap();
+        assert_eq!(
+            decoded_entry["transaction_data_hashes_alg"],
+            serde_json::json!(["sha-256"])
+        );
+        // The operator-supplied members survive untouched.
+        assert_eq!(decoded_entry["type"], "payment");
+    }
+
+    /// L3142: absent the field, sha-256 is the default -- so an empty config must
+    /// advertise nothing rather than advertising a guess.
+    #[tokio::test]
+    async fn transaction_data_entries_omit_the_algorithm_when_unconfigured() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+        let mut config = sample_config(key_file.to_str().unwrap());
+        config.verifier.transaction_data_hashes_alg = vec![];
+        let storage = test_storage().await;
+
+        let entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["pid"]
+        });
+
+        let res = create_verification_request(
+            &config,
+            &storage,
+            CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "pid", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: "request_uri".to_string(),
+                transaction_data: Some(vec![entry]),
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let encoded = &tx.transaction_data.unwrap()[0];
+        let decoded_entry: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(encoded).unwrap()).unwrap();
+        assert!(decoded_entry.get("transaction_data_hashes_alg").is_none());
     }
 
     /// A wallet hard-throws on an entry it cannot parse
