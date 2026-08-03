@@ -12,6 +12,11 @@ pub struct VerificationResult {
     pub claims: Value,
     pub holder_jwk: Value,
     pub issuer_x5c: Option<Vec<String>>,
+    /// The verified KB-JWT payload -- signature already checked by this
+    /// function. Callers needing `transaction_data_hashes` (OpenID4VP
+    /// L3144) MUST read it from here rather than re-parsing the
+    /// presentation string, which would inspect an unverified copy.
+    pub kb_jwt_payload: Value,
 }
 
 fn curve_for_alg(alg: &str) -> Result<&'static str, FormatError> {
@@ -197,7 +202,7 @@ pub fn verify_sd_jwt_vc(
     // than surfacing as an unrelated parse error.
     let kb =
         kb_jwt.ok_or_else(|| FormatError::KeyBinding("KB-JWT missing from presentation".into()))?;
-    verify_kb_jwt(
+    let kb_jwt_payload = verify_kb_jwt(
         kb,
         presentation_string,
         &holder_jwk,
@@ -264,6 +269,7 @@ pub fn verify_sd_jwt_vc(
         claims: Value::Object(claims_map),
         holder_jwk,
         issuer_x5c: x5c_vec,
+        kb_jwt_payload,
     })
 }
 
@@ -285,7 +291,7 @@ fn verify_kb_jwt(
     holder_jwk: &Value,
     expected_audiences: &[String],
     expected_nonce: &str,
-) -> Result<(), FormatError> {
+) -> Result<Value, FormatError> {
     let kb_parts: Vec<&str> = kb.split('.').collect();
     if kb_parts.len() != 3 {
         return Err(FormatError::KeyBinding("KB-JWT is not compact JWS".into()));
@@ -342,7 +348,7 @@ fn verify_kb_jwt(
         .map_err(|e| FormatError::KeyBinding(format!("kb signature b64: {e}")))?;
     verify_jws_with_jwk(holder_jwk, curve, signing_input.as_bytes(), &sig)
         .map_err(|e| FormatError::KeyBinding(format!("KB-JWT signature invalid: {e}")))?;
-    Ok(())
+    Ok(kb_payload)
 }
 
 #[cfg(test)]
