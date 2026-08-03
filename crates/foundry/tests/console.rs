@@ -205,3 +205,46 @@ async fn console_has_open_in_wallet_links_for_same_device_flow() {
         "console page should have a verification-open link for the same-device verification flow"
     );
 }
+
+#[tokio::test]
+async fn console_has_digital_credentials_api_trigger_for_dc_api_transport() {
+    // The console must offer a real way to invoke the dc_api transport in the
+    // browser it's running in, not just print a static "use it directly"
+    // string: a transport <select> (not free text) with both options, and a
+    // button that JS wires to navigator.credentials.get().
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"<select id="transport">"#),
+        "console page should render `transport` as a <select>, not a free-text input"
+    );
+    assert!(
+        html.contains(r#"<option value="request_uri""#),
+        "console `transport` select should offer request_uri"
+    );
+    assert!(
+        html.contains(r#"<option value="dc_api">"#),
+        "console `transport` select should offer dc_api"
+    );
+    assert!(
+        html.contains(r#"id="verification-dc-api-btn""#),
+        "console page should have a button to trigger the Digital Credentials API for dc_api transport"
+    );
+}
