@@ -23,6 +23,10 @@ pub struct CredentialIssuerMetadata {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CredentialConfigurationSupported {
     pub format: String,
+    /// HAIP OpenID4VCI L186: the metadata MUST include a scope for every Credential
+    /// Configuration. Neither `Option` nor `skip_serializing_if`: "every" admits no
+    /// omission.
+    pub scope: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vct: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,7 @@ pub fn build_issuer_metadata(cfg: &Config) -> CredentialIssuerMetadata {
             ct.id.clone(),
             CredentialConfigurationSupported {
                 format: ct.format.clone(),
+                scope: ct.resolved_scope().to_string(),
                 vct: ct.vct.clone(),
                 doctype: ct.doctype.clone(),
                 cryptographic_binding_methods_supported,
@@ -198,6 +203,7 @@ mod tests {
                 format: "dc+sd-jwt".to_string(),
                 vct: Some("https://issuer.example.com/vct/pid".to_string()),
                 doctype: None,
+                scope: None,
                 cryptographic_holder_binding: true,
                 display: vec![serde_json::json!({"name": "Person ID", "locale": "en-US"})],
                 claims: vec![ClaimDef {
@@ -207,7 +213,6 @@ mod tests {
                 }],
             }],
             verifier: VerifierConfig {
-                client_id_scheme: "x509_san_dns".to_string(),
                 signing_key: "verifier_signing".to_string(),
                 response_encryption: None,
                 transaction_data_hashes_alg: vec!["sha-256".to_string()],
@@ -320,5 +325,74 @@ mod tests {
         );
         // RFC 9207 §2.3, GAP-HAIP-02.
         assert!(meta.authorization_response_iss_parameter_supported);
+    }
+
+    #[test]
+    fn every_credential_configuration_carries_a_scope() {
+        // HAIP OpenID4VCI L186: the Credential Issuer metadata MUST include a scope
+        // for every Credential Configuration it supports.
+        let cfg = test_config();
+        let metadata = build_issuer_metadata(&cfg);
+        assert!(!metadata.credential_configurations_supported.is_empty());
+        for (id, config) in &metadata.credential_configurations_supported {
+            let json = serde_json::to_value(config).unwrap();
+            let scope = json
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("configuration '{id}' has no scope"));
+            assert!(!scope.is_empty(), "configuration '{id}' has an empty scope");
+        }
+    }
+
+    #[test]
+    fn scope_defaults_to_the_credential_type_id_and_can_be_overridden() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].scope = None;
+        let default_id = cfg.credential_types[0].id.clone();
+        cfg.credential_types.push(CredentialType {
+            id: "override_me".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://example.test/vct/other".to_string()),
+            doctype: None,
+            scope: Some("eu.europa.ec.eudi.pid.1".to_string()),
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![],
+        });
+
+        let metadata = build_issuer_metadata(&cfg);
+        assert_eq!(
+            metadata.credential_configurations_supported[&default_id].scope,
+            default_id
+        );
+        assert_eq!(
+            metadata.credential_configurations_supported["override_me"].scope,
+            "eu.europa.ec.eudi.pid.1"
+        );
+    }
+
+    /// VCI-0145 (OpenID4VCI Credential Issuer Metadata L1392): "The Authorization
+    /// Server MUST be able to uniquely identify the Credential Issuer based on the
+    /// scope value." foundry's Authorization Server always serves exactly one
+    /// Credential Issuer (`config.issuer.credential_issuer`), so `issuer` in
+    /// `AuthorizationServerMetadata` is the same single value no matter which
+    /// Credential Type's scope a Wallet used to get there -- there is only ever one
+    /// candidate to identify.
+    #[test]
+    fn authorization_server_metadata_issuer_is_independent_of_credential_type_scope() {
+        let mut cfg = test_config();
+        cfg.credential_types.push(CredentialType {
+            id: "mdl".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://example.test/vct/mdl".to_string()),
+            doctype: None,
+            scope: Some("eu.europa.ec.eudi.pid.1".to_string()),
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![],
+        });
+
+        let meta = build_authorization_server_metadata(&cfg);
+        assert_eq!(meta.issuer, cfg.issuer.credential_issuer);
     }
 }

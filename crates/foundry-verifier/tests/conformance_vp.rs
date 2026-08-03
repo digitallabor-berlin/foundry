@@ -74,7 +74,6 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
         },
         credential_types: vec![],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec!["sha-256".to_string()],
@@ -101,8 +100,24 @@ fn write_key(dir: &std::path::Path, name: &str) -> String {
 #[tokio::test]
 async fn vp_0085_client_id_matches_between_uri_and_request_object() {
     let dir = tempfile::tempdir().unwrap();
-    let key_path = write_key(dir.path(), "verifier.pem");
-    let config = sample_config(&key_path, None);
+
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash, so both the
+    // unsigned openid4vp:// URI and the signed Request Object now need one.
+    let ca = new_ca("Test Verifier Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "verifier.example.com",
+        &["verifier.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let x5c_path = dir.path().join("leaf.pem");
+    std::fs::write(&x5c_path, leaf.cert_pem.as_bytes()).unwrap();
+    let key_path = dir.path().join("leaf_key.pem");
+    std::fs::write(&key_path, leaf.key_pem.as_bytes()).unwrap();
+
+    let config = sample_config(key_path.to_str().unwrap(), Some(x5c_path.to_str().unwrap()));
     let storage = test_storage().await;
 
     let req = CreateVerificationRequest {
@@ -297,8 +312,25 @@ async fn vp_0064_signing_key_and_x5c_chain_are_paired() {
 #[tokio::test]
 async fn vp_0042_request_object_missing_aud_claim() {
     let dir = tempfile::tempdir().unwrap();
-    let key_path = write_key(dir.path(), "verifier.pem");
-    let config = sample_config(&key_path, None);
+
+    // HAIP OpenID4VP L256: x509_hash requires a certificate; unrelated to what
+    // this test is actually about (the `aud` claim), but building a signed
+    // Request Object now needs one regardless.
+    let ca = new_ca("Test Verifier Root CA", 3650).unwrap();
+    let leaf = issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "verifier.example.com",
+        &["verifier.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+    let x5c_path = dir.path().join("leaf.pem");
+    std::fs::write(&x5c_path, leaf.cert_pem.as_bytes()).unwrap();
+    let key_path = dir.path().join("leaf_key.pem");
+    std::fs::write(&key_path, leaf.key_pem.as_bytes()).unwrap();
+
+    let config = sample_config(key_path.to_str().unwrap(), Some(x5c_path.to_str().unwrap()));
     let storage = test_storage().await;
 
     let req = CreateVerificationRequest {
@@ -331,14 +363,13 @@ async fn vp_0042_request_object_missing_aud_claim() {
 }
 
 // ---------------------------------------------------------------------------
-// VP-0063 — Defined Client Identifier Prefixes / `x509_san_dns` (L614): the
-// Client Identifier without the prefix MUST be a DNS name matching a
-// `dNSName` SAN entry in the leaf certificate carried in `x5c`.
-// `build_signed_request_object` derives `client_id` purely textually from
-// `public_base_url` and separately embeds whatever `x5c` the operator
-// configured, with no cross-check that the two actually agree --
-// `foundry_core::trust::match_san_dns` exists and could perform this check,
-// but request.rs never calls it.
+// VP-0063, re-anchored for GAP-HAIP-05's x509_hash swap -- the check this test
+// proves is no longer about the Client Identifier itself (which under x509_hash
+// carries a certificate hash, not a host), but about the invariant it stands
+// in for: `public_base_url`'s host, the value a wallet reaches this Verifier
+// at, MUST match a `dNSName` SAN entry in the leaf certificate carried in
+// `x5c`. `build_signed_request_object` calls `foundry_core::trust::match_san_dns`
+// against that host before signing.
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn vp_0063_client_id_host_not_validated_against_x5c_certificate_san() {
@@ -385,7 +416,7 @@ async fn vp_0063_client_id_host_not_validated_against_x5c_certificate_san() {
 
     assert!(
         result.is_err(),
-        "signing a request object whose x509_san_dns client_id host does not match any \
+        "signing a request object whose public_base_url host does not match any \
          dNSName SAN entry in the configured x5c leaf certificate must be rejected"
     );
 }
@@ -437,16 +468,18 @@ async fn build_signed_request_object_succeeds_when_x5c_san_matches_public_base_u
         .unwrap();
 
     build_signed_request_object(&config, &tx)
-        .expect("a matching x509_san_dns SAN must sign successfully");
+        .expect("a matching x509_hash leaf certificate must sign successfully");
 }
 
 // ---------------------------------------------------------------------------
-// GAP-VP-02: no x5c configured at all means no certificate for the client_id
-// to contradict -- the SAN cross-check must not fire, and signing must still
-// succeed.
+// Decision 3 (2026-08-03 Tier 4 spec): under x509_hash the Client Identifier
+// *is* the certificate hash, so a signed request with no configured x5c has no
+// identifier to emit at all -- unlike the old x509_san_dns behaviour this test
+// used to cover, absent x5c is now a configuration error, not a degraded-but-
+// working path.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn build_signed_request_object_succeeds_without_x5c_configured() {
+async fn create_verification_request_requires_x5c_for_the_request_uri_transport() {
     let dir = tempfile::tempdir().unwrap();
     let key_path = write_key(dir.path(), "verifier.pem");
     let config = sample_config(&key_path, None);
@@ -460,16 +493,17 @@ async fn build_signed_request_object_succeeds_without_x5c_configured() {
         transport: "request_uri".to_string(),
         transaction_data: None,
     };
-    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
-        .await
-        .unwrap();
-    let tx = load_verification_transaction(&storage, &res.verification_id)
-        .await
-        .unwrap()
-        .unwrap();
 
-    build_signed_request_object(&config, &tx)
-        .expect("no x5c configured means no SAN check is attempted");
+    // The unsigned openid4vp:// URI branch of create_verification_request also
+    // computes the x509_hash Client Identifier now, so the error surfaces here
+    // rather than only in build_signed_request_object.
+    let err = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("x5c"),
+        "expected a typed error naming the missing x5c certificate, got: {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

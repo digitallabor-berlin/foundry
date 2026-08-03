@@ -75,8 +75,22 @@ async fn setup() -> (AppState, tempfile::TempDir) {
     let db_path = dir.path().join("foundry.db");
     let key_path = dir.path().join("issuer.pem");
 
-    let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).expect("key");
-    std::fs::write(&key_path, km.private_pem).expect("write key");
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash. This
+    // KeyEntry ("issuer_key") also signs the verifier's Request Objects
+    // (verifier.signing_key below), so it needs a leaf certificate whose SAN
+    // matches ISSUER's host, not a bare EC key pair.
+    let ca = foundry_core::pki::new_ca("Test Redaction Root CA", 3650).expect("ca");
+    let leaf = foundry_core::pki::issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "issuer.example.com",
+        &["issuer.example.com".to_string()],
+        365,
+    )
+    .expect("issue_leaf");
+    std::fs::write(&key_path, &leaf.key_pem).expect("write key");
+    let cert_path = dir.path().join("issuer_leaf_cert.pem");
+    std::fs::write(&cert_path, &leaf.cert_pem).expect("write cert");
 
     let storage = SqliteStorage::connect(db_path.to_str().expect("db path"))
         .await
@@ -87,7 +101,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
         "issuer_key".to_string(),
         KeyEntry {
             private_key: key_path.to_str().expect("key path").to_string(),
-            x5c: None,
+            x5c: Some(cert_path.to_str().expect("cert path").to_string()),
             alg: "ES256".to_string(),
         },
     );
@@ -137,6 +151,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             format: "dc+sd-jwt".to_string(),
             vct: Some(format!("{ISSUER}/vct/pid")),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -146,7 +161,6 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "issuer_key".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -609,6 +623,7 @@ async fn setup_with_required_attestation() -> (
             format: "dc+sd-jwt".to_string(),
             vct: Some(format!("{ISSUER}/vct/pid")),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -618,7 +633,6 @@ async fn setup_with_required_attestation() -> (
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "issuer_key".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],

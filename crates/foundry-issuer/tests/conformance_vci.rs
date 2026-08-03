@@ -86,6 +86,7 @@ fn test_config() -> Config {
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -95,7 +96,6 @@ fn test_config() -> Config {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -370,6 +370,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         code_challenge: s256_code_challenge(code_verifier),
         code_challenge_method: "S256".to_string(),
         issuer_state,
+        scope: None,
     };
     let outcome = handle_authorize_request(
         &storage,
@@ -377,6 +378,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
+        &std::collections::BTreeMap::new(),
     )
     .await;
     let code = match outcome {
@@ -412,7 +414,6 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
 // Credential Type.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-HAIP-01: HAIP OpenID4VCI (L199) — the Issuer MUST include a scope value for the authorization_code grant"]
 async fn haip_0023_credential_configuration_metadata_carries_a_scope_value() {
     let cfg = test_config();
     let metadata = build_issuer_metadata(&cfg);
@@ -451,6 +452,7 @@ fn credential_test_config(key_path: &str) -> Config {
         format: "mso_mdoc".to_string(),
         vct: None,
         doctype: Some("org.iso.18013.5.1.mDL".to_string()),
+        scope: None,
         cryptographic_holder_binding: true,
         display: vec![],
         claims: vec![ClaimDef {
@@ -1113,6 +1115,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         code_challenge: s256_code_challenge(code_verifier),
         code_challenge_method: "S256".to_string(),
         issuer_state,
+        scope: None,
     };
     let outcome = handle_authorize_request(
         &storage,
@@ -1120,6 +1123,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         "https://issuer.example.com",
         cfg.storage.transaction_ttl_secs,
         1_700_000_005,
+        &std::collections::BTreeMap::new(),
     )
     .await;
     let code = match outcome {

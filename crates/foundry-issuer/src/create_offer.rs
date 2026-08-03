@@ -249,6 +249,7 @@ mod tests {
                 format: "dc+sd-jwt".to_string(),
                 vct: Some("https://issuer.example.com/vct/pid".to_string()),
                 doctype: None,
+                scope: None,
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![
@@ -265,7 +266,6 @@ mod tests {
                 ],
             }],
             verifier: VerifierConfig {
-                client_id_scheme: "x509_san_dns".to_string(),
                 signing_key: "verifier_signing".to_string(),
                 response_encryption: None,
                 transaction_data_hashes_alg: vec![],

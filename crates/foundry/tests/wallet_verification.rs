@@ -95,6 +95,12 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
     std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
     std::fs::write(&verifier_key_path, &verifier_leaf.key_pem).unwrap();
 
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash, so the
+    // verifier's leaf certificate (already generated above, SAN "localhost"
+    // matching public_base_url) must be persisted and wired into x5c.
+    let verifier_cert_path = dir.path().join("verifier_leaf_cert.pem");
+    std::fs::write(&verifier_cert_path, &verifier_leaf.cert_pem).unwrap();
+
     let trust_root_path = dir.path().join("trust_root.pem");
     std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
 
@@ -115,7 +121,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         "verifier_key".to_string(),
         KeyEntry {
             private_key: verifier_key_path.to_str().unwrap().to_string(),
-            x5c: None,
+            x5c: Some(verifier_cert_path.to_str().unwrap().to_string()),
             alg: "ES256".to_string(),
         },
     );
@@ -165,7 +171,6 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         },
         credential_types: vec![],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_key".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -284,7 +289,7 @@ async fn full_verification_flow_end_to_end() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
@@ -434,7 +439,7 @@ async fn resubmitting_a_verification_response_is_rejected() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
@@ -658,7 +663,7 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
@@ -780,7 +785,8 @@ async fn dcql_vct_mismatch_is_rejected() {
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
@@ -902,7 +908,8 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
@@ -1219,7 +1226,8 @@ async fn pending_verification_with_vp_token(
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": make_vp_token(presentation) }),

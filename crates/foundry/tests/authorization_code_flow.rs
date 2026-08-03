@@ -79,21 +79,36 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 public_base_url: None,
             },
         },
-        credential_types: vec![CredentialType {
-            id: "pid".to_string(),
-            format: "dc+sd-jwt".to_string(),
-            vct: Some("https://issuer.example.com/vct/pid".to_string()),
-            doctype: None,
-            cryptographic_holder_binding: true,
-            display: vec![],
-            claims: vec![ClaimDef {
-                path: vec!["given_name".to_string()],
-                selectively_disclosable: true,
+        credential_types: vec![
+            CredentialType {
+                id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://issuer.example.com/vct/pid".to_string()),
+                doctype: None,
+                scope: None,
+                cryptographic_holder_binding: true,
                 display: vec![],
-            }],
-        }],
+                claims: vec![ClaimDef {
+                    path: vec!["given_name".to_string()],
+                    selectively_disclosable: true,
+                    display: vec![],
+                }],
+            },
+            // A second Credential Type, distinct from "pid", so
+            // authorize_rejects_a_scope_naming_a_different_credential_type has a
+            // real (resolved-scope) mismatch to send.
+            CredentialType {
+                id: "mdl".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://issuer.example.com/vct/mdl".to_string()),
+                doctype: None,
+                scope: None,
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![],
+            },
+        ],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -253,6 +268,155 @@ async fn authorize_with_wrong_redirect_uri_returns_400_not_a_redirect() {
     assert_eq!(body_json["error"], "invalid_request");
 }
 
+/// HAIP OpenID4VCI L209: the `scope` parameter MUST be used to communicate the
+/// Credential Type(s) to be issued, and the value MUST map to a specific Credential
+/// Type. A scope naming the type the offer is bound to succeeds.
+#[tokio::test]
+async fn authorize_accepts_a_scope_matching_the_offers_credential_type() {
+    let (state, _dir) = setup_test_app().await;
+
+    let offer_json = create_authz_code_offer(&state).await;
+    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
+        ["issuer_state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wallet_app = wallet_router(state.clone());
+    let code_challenge = code_challenge_for(CODE_VERIFIER);
+    let authorize_uri = format!(
+        "/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}\
+         &state=xyz-state&code_challenge={code_challenge}&code_challenge_method=S256\
+         &issuer_state={issuer_state}&scope=pid",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri(authorize_uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let authorize_res = wallet_app.oneshot(authorize_req).await.unwrap();
+    assert_eq!(authorize_res.status(), StatusCode::SEE_OTHER);
+    let location = authorize_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(location.starts_with(REDIRECT_URI));
+    let (code, _wallet_state) = parse_code_and_state(&location);
+    assert!(!code.is_empty());
+
+    let wallet_app = wallet_router(state.clone());
+    let token_form_body = format!(
+        "grant_type=authorization_code&code={code}&redirect_uri={}&client_id={CLIENT_ID}&code_verifier={CODE_VERIFIER}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(token_form_body))
+        .unwrap();
+
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+    assert_eq!(token_res.status(), StatusCode::OK);
+}
+
+/// HAIP OpenID4VCI L209: the scope value MUST map to a *specific* Credential Type.
+/// A scope naming a different type than `issuer_state` is bound to is a conflicting
+/// request and must be refused -- by redirect, since redirect_uri is already
+/// validated at that point (RFC 6749 4.1.2.1).
+#[tokio::test]
+async fn authorize_rejects_a_scope_naming_a_different_credential_type() {
+    let (state, _dir) = setup_test_app().await;
+
+    // The offer is bound to "pid"; the request below sends the OTHER configured
+    // type's resolved scope ("mdl"), which must not be honoured.
+    let offer_json = create_authz_code_offer(&state).await;
+    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
+        ["issuer_state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wallet_app = wallet_router(state.clone());
+    let code_challenge = code_challenge_for(CODE_VERIFIER);
+    let authorize_uri = format!(
+        "/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}\
+         &state=xyz-state&code_challenge={code_challenge}&code_challenge_method=S256\
+         &issuer_state={issuer_state}&scope=mdl",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri(authorize_uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let authorize_res = wallet_app.oneshot(authorize_req).await.unwrap();
+    assert_eq!(authorize_res.status(), StatusCode::SEE_OTHER);
+    let location = authorize_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(location.starts_with(REDIRECT_URI));
+    let error = parse_query_param(&location, "error");
+    assert_eq!(
+        error.as_deref(),
+        Some("invalid_scope"),
+        "expected error=invalid_scope in {location}"
+    );
+    let (code, _) = parse_code_and_state(&location);
+    assert!(code.is_empty(), "a rejected scope must not mint a code");
+}
+
+/// Absent `scope`, behaviour is unchanged: issuer_state remains the authoritative
+/// binding. The mandate is on the Issuer to publish and honour a scope, not to
+/// require one.
+#[tokio::test]
+async fn authorize_without_a_scope_still_succeeds() {
+    let (state, _dir) = setup_test_app().await;
+
+    let offer_json = create_authz_code_offer(&state).await;
+    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
+        ["issuer_state"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let wallet_app = wallet_router(state.clone());
+    let code_challenge = code_challenge_for(CODE_VERIFIER);
+    let authorize_uri = format!(
+        "/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={}\
+         &state=xyz-state&code_challenge={code_challenge}&code_challenge_method=S256\
+         &issuer_state={issuer_state}",
+        urlencoding_encode(REDIRECT_URI),
+    );
+    let authorize_req = Request::builder()
+        .method("GET")
+        .uri(authorize_uri)
+        .body(Body::empty())
+        .unwrap();
+
+    let authorize_res = wallet_app.oneshot(authorize_req).await.unwrap();
+    assert_eq!(authorize_res.status(), StatusCode::SEE_OTHER);
+    let location = authorize_res
+        .headers()
+        .get(header::LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let (code, _) = parse_code_and_state(&location);
+    assert!(!code.is_empty());
+}
+
 /// Minimal application/x-www-form-urlencoded-safe percent-encoding for the
 /// small set of characters that appear in the custom-scheme redirect_uri
 /// values used in these tests (`:`, `/`).
@@ -264,6 +428,21 @@ fn urlencoding_encode(s: &str) -> String {
 /// redirect Location header produced by `append_query` in server.rs, which
 /// percent-encodes every non-alphanumeric character (including `-`) via
 /// `NON_ALPHANUMERIC`.
+/// Percent-decoded value of a single named query parameter, or `None` if absent.
+fn parse_query_param(location: &str, name: &str) -> Option<String> {
+    let query = location.split_once('?').map(|(_, q)| q).unwrap_or("");
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key != name {
+            return None;
+        }
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8()
+            .ok()
+            .map(|s| s.to_string())
+    })
+}
+
 fn parse_code_and_state(location: &str) -> (String, Option<String>) {
     let query = location.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut code = String::new();

@@ -1,6 +1,7 @@
 use crate::dcql::{check_dcql_match, PresentedFormat};
 use crate::dcql_model::{CredentialFormat, DcqlQuery};
 use crate::error::VerificationError;
+use crate::request::verifier_x5c_leaf_pem;
 use crate::status::{check_status, StatusListResolver};
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
@@ -9,10 +10,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
-use foundry_core::url::dns_host_only;
 use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
 use josekit::jwk::Jwk;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 /// The single presentation selected from a `vp_token`, already destructured
 /// according to the credential format the DCQL query declared.
@@ -333,6 +334,156 @@ fn check_name_for(err: &VerificationError) -> &'static str {
     }
 }
 
+/// OpenID4VP 1.0 Response / VP Token Validation (L1523): Verifiers MUST check that
+/// the set of Presentations satisfies all requirements of the request. When the
+/// request carried `transaction_data`, the IETF SD-JWT VC profile binds it to the
+/// presentation through the KB-JWT's `transaction_data_hashes` claim (L3144).
+///
+/// Each hash is computed over the entry **as advertised** -- the base64url string
+/// itself, with no decoding first (L3144). The algorithm must be one the request
+/// advertised, defaulting to `sha-256` when it advertised none (L3142).
+///
+/// A missing or non-matching binding is a **policy** outcome, not a structural
+/// error: it records `passed: false`, which makes `verified` false by AGENTS.md
+/// §4.2, and the response stays HTTP 200 per §4.3. Never returns `Err`.
+fn check_transaction_data_binding(
+    requested_entries: &[String],
+    answered_query_id: &str,
+    kb_payload: &Value,
+) -> CheckResult {
+    const CHECK: &str = "transaction_data_binding";
+
+    // Step 1: keep only the entries scoped to the credential query this
+    // presentation answered. An entry produced by anything other than
+    // `encode_transaction_data` (request.rs) -- i.e. malformed -- should never
+    // reach this point, so failing loudly here rather than ignoring it is
+    // deliberate.
+    let mut applicable: Vec<(usize, String, Vec<String>)> = Vec::new();
+    for (i, encoded) in requested_entries.iter().enumerate() {
+        let decoded = match B64URL.decode(encoded) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return CheckResult {
+                    check: CHECK.to_string(),
+                    passed: false,
+                    detail: Some(format!("transaction_data[{i}] is not valid base64url: {e}")),
+                };
+            }
+        };
+        let entry: Value = match serde_json::from_slice(&decoded) {
+            Ok(v) => v,
+            Err(e) => {
+                return CheckResult {
+                    check: CHECK.to_string(),
+                    passed: false,
+                    detail: Some(format!("transaction_data[{i}] is not valid JSON: {e}")),
+                };
+            }
+        };
+        let credential_ids: Vec<&str> = entry
+            .get("credential_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        if !credential_ids.contains(&answered_query_id) {
+            // Scoped to a different credential query; imposes nothing here.
+            continue;
+        }
+        let advertised_algs: Vec<String> = entry
+            .get("transaction_data_hashes_alg")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        applicable.push((i, encoded.clone(), advertised_algs));
+    }
+
+    if applicable.is_empty() {
+        return CheckResult {
+            check: CHECK.to_string(),
+            passed: true,
+            detail: Some(
+                "no transaction_data entries scoped to the answered credential query".to_string(),
+            ),
+        };
+    }
+
+    // Step 2: the presentation must carry a non-empty transaction_data_hashes.
+    let claimed_hashes: Vec<&str> = match kb_payload
+        .get("transaction_data_hashes")
+        .and_then(|v| v.as_array())
+    {
+        Some(arr) if !arr.is_empty() => arr.iter().filter_map(|v| v.as_str()).collect(),
+        _ => {
+            return CheckResult {
+                check: CHECK.to_string(),
+                passed: false,
+                detail: Some("presentation carries no transaction_data_hashes".to_string()),
+            };
+        }
+    };
+
+    // Step 3: resolve the algorithm (L3142 default: sha-256). Only sha-256 is
+    // implemented, regardless of what the request advertised or permitted.
+    let claimed_alg = kb_payload
+        .get("transaction_data_hashes_alg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("sha-256");
+    if claimed_alg != "sha-256" {
+        return CheckResult {
+            check: CHECK.to_string(),
+            passed: false,
+            detail: Some(format!(
+                "transaction_data_hashes_alg '{claimed_alg}' is not supported; only sha-256 is \
+                 implemented"
+            )),
+        };
+    }
+    for (i, _, advertised_algs) in &applicable {
+        if !advertised_algs.is_empty() && !advertised_algs.iter().any(|a| a == claimed_alg) {
+            return CheckResult {
+                check: CHECK.to_string(),
+                passed: false,
+                detail: Some(format!(
+                    "transaction_data[{i}] does not advertise the algorithm the presentation used"
+                )),
+            };
+        }
+    }
+
+    // Step 4: every applicable entry must be hashed (as advertised, undecoded)
+    // into the claimed set.
+    let mut first_mismatch: Option<usize> = None;
+    for (i, encoded, _) in &applicable {
+        let hash = B64URL.encode(Sha256::digest(encoded.as_bytes()));
+        if !claimed_hashes.contains(&hash.as_str()) {
+            first_mismatch = Some(*i);
+            break;
+        }
+    }
+
+    match first_mismatch {
+        None => CheckResult {
+            check: CHECK.to_string(),
+            passed: true,
+            detail: Some(format!(
+                "{} applicable transaction_data entry(ies) bound",
+                applicable.len()
+            )),
+        },
+        Some(i) => CheckResult {
+            check: CHECK.to_string(),
+            passed: false,
+            detail: Some(format!(
+                "transaction_data[{i}] hash is not present in transaction_data_hashes"
+            )),
+        },
+    }
+}
+
 #[tracing::instrument(skip_all)]
 async fn do_verify_vp_response(
     config: &Config,
@@ -382,12 +533,19 @@ async fn do_verify_vp_response(
         .wallet_facing
         .public_base_url
         .trim_end_matches('/');
-    let host = dns_host_only(base_url);
-    let client_id = format!("x509_san_dns:{host}");
+
+    // HAIP OpenID4VP L256 / OpenID4VP L616: the Client Identifier is
+    // `x509_hash:<base64url(SHA-256(DER leaf))>`. A wallet binds its KB-JWT `aud`
+    // to the Client Identifier it received, so this MUST be computed by the same
+    // helper `build_signed_request_object` (request.rs) uses -- if the two ever
+    // diverge, every redirect-transport presentation fails as a policy verdict
+    // rather than a visible error.
+    let leaf_pem = verifier_x5c_leaf_pem(config)?;
+    let client_id = crate::request::x509_hash_client_id(&leaf_pem)?;
 
     // OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the
     // DC API transport the KB-JWT `aud` MUST be the Origin prefixed with
-    // `origin:`, not the `x509_san_dns:<host>` Client Identifier used by
+    // `origin:`, not the `x509_hash:<hash>` Client Identifier used by
     // every other transport. The Origin is a browsing-context property
     // (RFC 6454) this server cannot derive on its own, so it is read from
     // `verifier.dc_api_expected_origins` when configured; an unconfigured
@@ -426,6 +584,10 @@ async fn do_verify_vp_response(
     let (answered_query_id, selected) = select_presentation(vp_token, &tx.dcql_query)?;
     let presented_format = selected.format();
     let mut disclosed_claims = serde_json::Map::new();
+    // Populated only for SD-JWT VC presentations, whose Key Binding JWT carries
+    // `transaction_data_hashes` (L3144). An mdoc presentation has no KB-JWT, so
+    // this stays `None` for that format -- checked below.
+    let mut kb_jwt_payload: Option<Value> = None;
 
     let doc_type: Option<String> = match selected {
         SelectedPresentation::SdJwtVc(jwt_str) => {
@@ -444,6 +606,7 @@ async fn do_verify_vp_response(
                 detail: None,
             });
 
+            kb_jwt_payload = Some(verified.kb_jwt_payload);
             if let Value::Object(map) = verified.claims {
                 for (k, v) in map {
                     disclosed_claims.insert(k, v);
@@ -581,6 +744,29 @@ async fn do_verify_vp_response(
 
     let claims_value = Value::Object(disclosed_claims);
 
+    // 3b. Transaction Data binding (OpenID4VP L1523/L3144), only when the
+    // Verifier actually requested transaction_data for this transaction.
+    if let Some(ref entries) = tx.transaction_data {
+        match &kb_jwt_payload {
+            Some(kb_payload) => {
+                checks.push(check_transaction_data_binding(
+                    entries,
+                    &answered_query_id,
+                    kb_payload,
+                ));
+            }
+            // mdoc: no KB-JWT exists to carry the binding. The Verifier asked
+            // for one it cannot confirm, so this must not report success.
+            None => {
+                checks.push(CheckResult {
+                    check: "transaction_data_binding".to_string(),
+                    passed: false,
+                    detail: Some("mdoc transaction_data binding is not implemented".to_string()),
+                });
+            }
+        }
+    }
+
     // 4. DCQL query satisfaction (shared across credential formats).
     checks.push(check_dcql_match(
         &tx.dcql_query,
@@ -609,14 +795,17 @@ mod tests {
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
-        StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
+        WalletFacingConfig,
     };
     use foundry_core::crypto::jwe::encrypt_compact;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-    use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
+    use foundry_sd_jwt_vc::builder::{
+        attach_kb_jwt, build_sd_jwt_vc, IssuerClaims, TransactionDataBinding,
+    };
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
     use std::collections::BTreeMap;
@@ -657,10 +846,49 @@ mod tests {
             .join("")
     }
 
+    /// The Client Identifier a wallet would have received for this fixture.
+    /// Computed, never hardcoded: a literal would silently diverge if the fixture
+    /// certificate is regenerated.
+    fn expected_client_id(config: &Config) -> String {
+        let leaf_pem = crate::request::verifier_x5c_leaf_pem(config).unwrap();
+        crate::request::x509_hash_client_id(&leaf_pem).unwrap()
+    }
+
     fn test_config(ca_pem: &str) -> (Config, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("root.pem");
         std::fs::write(&cert_path, ca_pem).unwrap();
+
+        // The verifier's own x509_hash leaf certificate (HAIP OpenID4VP L256),
+        // independent of the trust_anchors CA above: do_verify_vp_response never
+        // cross-checks it against trust_anchors, only against the dNSName SAN vs.
+        // public_base_url's host (build_signed_request_object does the equivalent
+        // check when emitting a request). SAN "localhost" matches this fixture's
+        // public_base_url below.
+        let verifier_ca = new_ca("Foundry Test Verifier Root", 3650).unwrap();
+        let verifier_leaf = issue_leaf(
+            &verifier_ca.cert_pem,
+            &verifier_ca.key_pem,
+            "localhost",
+            &["localhost".to_string()],
+            365,
+        )
+        .unwrap();
+        let verifier_leaf_path = dir.path().join("verifier_leaf.pem");
+        std::fs::write(&verifier_leaf_path, verifier_leaf.cert_pem.as_bytes()).unwrap();
+
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "verifier_key".to_string(),
+            KeyEntry {
+                // Never read by do_verify_vp_response (which only reads x5c); a
+                // placeholder is sufficient here.
+                private_key: "/dev/null".to_string(),
+                x5c: Some(verifier_leaf_path.to_str().unwrap().to_string()),
+                alg: "ES256".to_string(),
+            },
+        );
+
         let config = Config {
             server: ServerConfig {
                 wallet_facing: WalletFacingConfig {
@@ -680,7 +908,7 @@ mod tests {
                 path: "test.db".to_string(),
                 transaction_ttl_secs: 600,
             },
-            keys: Default::default(),
+            keys,
             trust_anchors: vec![TrustAnchor {
                 name: "test_ca".to_string(),
                 certs: cert_path.to_str().unwrap().to_string(),
@@ -706,7 +934,6 @@ mod tests {
             },
             credential_types: vec![],
             verifier: VerifierConfig {
-                client_id_scheme: "x509_san_dns".to_string(),
                 signing_key: "verifier_key".to_string(),
                 response_encryption: None,
                 transaction_data_hashes_alg: vec![],
@@ -783,9 +1010,9 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost";
+        let client_id = expected_client_id(&config);
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, client_id, &tx.nonce).unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &tx.nonce, None).unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -853,8 +1080,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -897,7 +1125,6 @@ mod tests {
     /// A transaction is requested, but never verified to have been bound to
     /// the presentation at all.
     #[tokio::test]
-    #[ignore = "GAP-VP-04: OpenID4VP Response / VP Token Validation (L1523); Format / IETF SD-JWT VC / Transaction Data (L3144) — transaction_data_hashes is never read or validated anywhere, so a presentation is accepted as verified even though it does not bind to the transaction_data the Verifier requested"]
     async fn gap_vp_04_transaction_data_hashes_never_validated() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
         let ca_str = String::from_utf8(root_pem).unwrap();
@@ -946,8 +1173,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -969,6 +1197,314 @@ mod tests {
              when the Verifier requested transaction_data, but it did: checks={:?}",
             res.checks
         );
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && !c.passed),
+            "the missing binding must be recorded as a failed check: {:?}",
+            res.checks
+        );
+    }
+
+    /// The positive counterpart to `gap_vp_04_...`: a presentation that *does* bind
+    /// to the requested transaction_data must still verify. Without this, a blanket
+    /// "reject whenever transaction_data was requested" implementation would pass the
+    /// negative test and look correct.
+    #[tokio::test]
+    async fn a_correctly_bound_transaction_data_presentation_verifies() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let td_entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["c1"],
+            "amount": 5000
+        });
+        let td_encoded = B64URL.encode(serde_json::to_vec(&td_entry).unwrap());
+        tx.transaction_data = Some(vec![td_encoded.clone()]);
+
+        // OpenID4VP L3144: hash the *string* as advertised -- no base64url decode.
+        let hash = B64URL.encode(Sha256::digest(td_encoded.as_bytes()));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            Some(TransactionDataBinding {
+                hashes: &[hash],
+                alg: None,
+            }),
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(
+            res.verified,
+            "a correctly bound presentation must verify: checks={:?}",
+            res.checks
+        );
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && c.passed),
+            "the binding check must be recorded as passed: {:?}",
+            res.checks
+        );
+    }
+
+    /// A hash that corresponds to no requested entry is not a binding.
+    #[tokio::test]
+    async fn a_transaction_data_hash_that_matches_nothing_does_not_verify() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let td_entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["c1"],
+            "amount": 5000
+        });
+        let td_encoded = B64URL.encode(serde_json::to_vec(&td_entry).unwrap());
+        tx.transaction_data = Some(vec![td_encoded]);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            Some(TransactionDataBinding {
+                hashes: &["bm90LWEtcmVhbC1oYXNo".to_string()],
+                alg: None,
+            }),
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(!res.verified, "checks={:?}", res.checks);
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "transaction_data_binding" && !c.passed));
+    }
+
+    /// L3142: the algorithm MUST be one of the request's values. A wallet that used
+    /// something else has not produced a hash this Verifier can rely on.
+    #[tokio::test]
+    async fn an_unadvertised_transaction_data_hashes_alg_does_not_verify() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        let td_entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["c1"],
+            "amount": 5000,
+            "transaction_data_hashes_alg": ["sha-256"]
+        });
+        let td_encoded = B64URL.encode(serde_json::to_vec(&td_entry).unwrap());
+        tx.transaction_data = Some(vec![td_encoded.clone()]);
+
+        let hash = B64URL.encode(Sha256::digest(td_encoded.as_bytes()));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // The presentation declares an algorithm the request never advertised.
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            Some(TransactionDataBinding {
+                hashes: &[hash],
+                alg: Some("sha-512"),
+            }),
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(!res.verified, "checks={:?}", res.checks);
+        assert!(res
+            .checks
+            .iter()
+            .any(|c| c.check == "transaction_data_binding" && !c.passed));
+    }
+
+    /// No transaction_data requested -> no such check exists. The common path's
+    /// result shape is unchanged.
+    #[tokio::test]
+    async fn no_transaction_data_means_no_binding_check() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        assert!(tx.transaction_data.is_none());
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: "did:example:alice".to_string(),
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(res.verified, "checks={:?}", res.checks);
+        assert!(!res
+            .checks
+            .iter()
+            .any(|c| c.check == "transaction_data_binding"));
     }
 
     /// HAIP-0049, HAIP-0050, HAIP-0053 (HAIP OpenID4VP, L258-259): the JWE
@@ -1021,8 +1557,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -1228,10 +1765,10 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost";
+        let client_id = expected_client_id(&config);
         // Attach KB-JWT with wrong nonce
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, client_id, "wrong-nonce").unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, "wrong-nonce", None).unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -1292,8 +1829,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -1367,8 +1905,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx1.nonce,
+            None,
         )
         .unwrap();
 
@@ -1461,8 +2000,9 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
         let jwe_str = encrypt_compact(
@@ -1536,7 +2076,7 @@ mod tests {
         // Handover applies (L2829-L2873) and the encrypted-response thumbprint
         // is present rather than null (L2870).
         let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
-            client_id: "x509_san_dns:localhost".to_string(),
+            client_id: expected_client_id(&config),
             nonce: tx.nonce.clone(),
             jwk_thumbprint: Some(
                 foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
@@ -1744,8 +2284,10 @@ mod tests {
 
     /// GAP-VP-07 / VP-0265 (OpenID4VP mdoc-adjacent IETF SD-JWT VC Presentation
     /// Response, L3179): "Over the DC API the `aud` claim MUST instead be the
-    /// Origin prefixed with `origin:`." `do_verify_vp_response` always computes
-    /// `expected_audience` as `x509_san_dns:<host>` (the Client Identifier),
+    /// Origin prefixed with `origin:`." `do_verify_vp_response` always computed
+    /// `expected_audience` as the `x509_san_dns:<host>` Client Identifier (now
+    /// `x509_hash:<hash>` per GAP-HAIP-05, but the bug this test guards against
+    /// is the same regardless of prefix),
     /// regardless of `tx.transport` -- there is no branch anywhere that
     /// switches to an Origin-prefixed audience for `dc_api` transport. A
     /// spec-conformant wallet responding to an *unsigned* DC API request (the
@@ -1794,8 +2336,14 @@ mod tests {
         // prefixed with `origin:`, not the Client Identifier -- exactly what a
         // conformant wallet would send back for this unsigned dc_api request.
         let origin_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            origin_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -1860,8 +2408,14 @@ mod tests {
         // test_config()'s public_base_url is "https://localhost:8443" -- the
         // fallback audience the unconfigured branch derives.
         let fallback_audience = "origin:https://localhost:8443";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, fallback_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            fallback_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -1923,8 +2477,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let no_slash_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, no_slash_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            no_slash_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -1947,8 +2507,8 @@ mod tests {
 
     /// Guards against over-broadening the fix: only the `dc_api` transport
     /// gets the Origin-prefixed audience treatment. A `request_uri` (or any
-    /// other) transport must still require the `x509_san_dns:<host>` Client
-    /// Identifier and reject an Origin-prefixed audience.
+    /// other) transport must still require the `x509_hash:<hash>` Client
+    /// Identifier (HAIP OpenID4VP L256) and reject an Origin-prefixed audience.
     #[tokio::test]
     async fn request_uri_transport_rejects_origin_prefixed_audience() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
@@ -1982,8 +2542,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let origin_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            origin_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -2040,8 +2606,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let unrelated_audience = "origin:https://some-other-site.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, unrelated_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            unrelated_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -2201,7 +2773,7 @@ mod tests {
         tx.dcql_query = mdoc_dcql_query();
 
         let legacy = pre_fix_ad_hoc_transcript(
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &format!("https://localhost:8443/vp/response/{}", tx.id),
             &tx.nonce,
         );

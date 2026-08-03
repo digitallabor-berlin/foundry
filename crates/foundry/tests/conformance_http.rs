@@ -122,6 +122,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -131,7 +132,6 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -669,7 +669,6 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
         },
         credential_types: vec![],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -726,10 +725,19 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
     .unwrap();
     std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
 
-    let verifier_km =
-        foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
-            .unwrap();
-    std::fs::write(&verifier_key_path, &verifier_km.private_pem).unwrap();
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash, so the
+    // verifier signing key needs a leaf certificate now, not a bare key pair.
+    let verifier_leaf = foundry_core::pki::issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "localhost",
+        &["localhost".to_string()],
+        365,
+    )
+    .unwrap();
+    std::fs::write(&verifier_key_path, &verifier_leaf.key_pem).unwrap();
+    let verifier_cert_path = dir.path().join("verifier_leaf_cert.pem");
+    std::fs::write(&verifier_cert_path, &verifier_leaf.cert_pem).unwrap();
 
     let trust_root_path = dir.path().join("trust_root.pem");
     std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
@@ -751,7 +759,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
         "verifier_signing".to_string(),
         foundry_core::config::KeyEntry {
             private_key: verifier_key_path.to_str().unwrap().to_string(),
-            x5c: None,
+            x5c: Some(verifier_cert_path.to_str().unwrap().to_string()),
             alg: "ES256".to_string(),
         },
     );
@@ -804,6 +812,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://localhost:8443/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -813,7 +822,6 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -949,7 +957,7 @@ fn build_presentation(
     )
     .unwrap();
 
-    foundry_sd_jwt_vc::builder::attach_kb_jwt(issuer_pres, &holder_signer, client_id, nonce)
+    foundry_sd_jwt_vc::builder::attach_kb_jwt(issuer_pres, &holder_signer, client_id, nonce, None)
         .unwrap()
 }
 
@@ -1229,6 +1237,7 @@ async fn setup_pop_test_app_with_mode(
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -1238,7 +1247,6 @@ async fn setup_pop_test_app_with_mode(
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],

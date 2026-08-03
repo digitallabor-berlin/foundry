@@ -35,7 +35,6 @@ credential_types:
       - path: [birthdate]
         selectively_disclosable: true
 verifier:
-  client_id_scheme: x509_san_dns
   signing_key: nonexistent_key
   response_encryption: { alg: ECDH-ES, enc: A128GCM }
   transaction_data_hashes_alg: [sha-256]

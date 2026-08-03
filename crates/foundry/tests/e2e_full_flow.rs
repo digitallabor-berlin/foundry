@@ -431,6 +431,7 @@ async fn run_verification(
         &issued.holder_signer,
         &client_id,
         &nonce,
+        None,
     )
     .expect("attach_kb_jwt");
     let jwe_str = encrypt_compact(

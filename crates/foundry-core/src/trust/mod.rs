@@ -1,7 +1,9 @@
 //! X.509 parsing, inspection, and (DN-based) trust-path validation.
 
 use crate::error::TrustError;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL_NOPAD;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use sha2::{Digest, Sha256};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Decode, DecodePem, Encode};
 use x509_cert::ext::pkix::name::GeneralName;
@@ -12,6 +14,24 @@ pub use x509_cert::Certificate;
 /// Parse a single PEM-encoded certificate.
 pub fn parse_cert_pem(pem: &[u8]) -> Result<Certificate, TrustError> {
     Certificate::from_pem(pem).map_err(|e| TrustError::Parse(e.to_string()))
+}
+
+/// The `x509_hash` Client Identifier value for a leaf certificate.
+///
+/// OpenID4VP 1.0, Defined Client Identifier Prefixes / `x509_hash` (L616): "The
+/// value of `x509_hash` is the base64url-encoded value of the SHA-256 hash of the
+/// DER-encoded X.509 certificate."
+///
+/// Returns the value **without** the `x509_hash:` prefix, so callers compose the
+/// Client Identifier themselves. This is the only place the value is computed:
+/// the Request Object's `client_id` (request.rs) and the expected KB-JWT audience
+/// (verify.rs) must both call it, or the two sides drift apart silently.
+pub fn x509_hash_client_id_value(leaf_pem: &[u8]) -> Result<String, TrustError> {
+    let cert = parse_cert_pem(leaf_pem)?;
+    let der = cert
+        .to_der()
+        .map_err(|e| TrustError::Parse(e.to_string()))?;
+    Ok(B64URL_NOPAD.encode(Sha256::digest(&der)))
 }
 
 /// A certificate is self-signed when its subject DN equals its issuer DN.
@@ -389,5 +409,58 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         let pem = x5c_entry_to_pem(der_b64).unwrap();
         let reparsed = parse_cert_pem(&pem).unwrap();
         assert!(is_self_signed(&reparsed));
+    }
+
+    #[test]
+    fn x509_hash_client_id_value_is_base64url_sha256_of_the_der() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL_NOPAD;
+        use sha2::{Digest, Sha256};
+
+        let value = x509_hash_client_id_value(LEAF_CERT_PEM).unwrap();
+
+        // build_x5c already yields base64-STANDARD DER for the same cert, so it is
+        // an independent route to the bytes that must be hashed.
+        let der = B64
+            .decode(&build_x5c(&[LEAF_CERT_PEM.to_vec()]).unwrap()[0])
+            .unwrap();
+        assert_eq!(value, B64URL_NOPAD.encode(Sha256::digest(&der)));
+
+        // OpenID4VP L616: base64url; SHA-256 is 32 bytes -> 43 unpadded chars.
+        assert_eq!(value.len(), 43);
+        assert!(!value.contains('='), "must be unpadded: {value}");
+        assert!(
+            !value.contains('+') && !value.contains('/'),
+            "must be base64URL: {value}"
+        );
+    }
+
+    #[test]
+    fn x509_hash_client_id_value_differs_per_certificate() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let a = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "a.dev.local",
+            &["a.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
+        let b = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "b.dev.local",
+            &["b.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
+        assert_ne!(
+            x509_hash_client_id_value(a.cert_pem.as_bytes()).unwrap(),
+            x509_hash_client_id_value(b.cert_pem.as_bytes()).unwrap()
+        );
+    }
+
+    #[test]
+    fn x509_hash_client_id_value_rejects_garbage_pem() {
+        assert!(x509_hash_client_id_value(b"not a certificate").is_err());
     }
 }

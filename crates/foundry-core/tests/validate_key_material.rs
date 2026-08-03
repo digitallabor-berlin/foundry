@@ -43,7 +43,6 @@ issuer:
   status_list: { enabled: false }
 credential_types: []
 verifier:
-  client_id_scheme: x509_san_dns
   signing_key: issuer_sdjwt
   transaction_data_hashes_alg: [sha-256]
   named_queries: []

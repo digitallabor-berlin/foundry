@@ -285,6 +285,10 @@ credential_types:
   - id: pid
     format: dc+sd-jwt
     vct: https://localhost:8443/vct/pid
+    # HAIP OpenID4VCI L186/L209: the scope a Wallet uses to request this type.
+    # Defaults to the credential type's `id` when omitted; set it explicitly when an
+    # Ecosystem mandates a specific value.
+    # scope: eu.europa.ec.eudi.pid.1
     cryptographic_holder_binding: true
     display: [{ name: "Person ID", locale: en-US }]
     claims:
@@ -293,7 +297,9 @@ credential_types:
       - path: [birthdate]
         selectively_disclosable: true
 verifier:
-  client_id_scheme: x509_san_dns
+  # The Client Identifier Prefix is not configurable: HAIP OpenID4VP L256 mandates
+  # `x509_hash` for signed requests, so it is always derived from the `x5c` leaf of
+  # `verifier.signing_key`.
   signing_key: verifier_signing
   response_encryption: { alg: ECDH-ES, enc: A128GCM }
   transaction_data_hashes_alg: [sha-256]

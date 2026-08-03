@@ -27,8 +27,8 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 |---|---|
 | `lib.rs` | Module declarations and the `pub use` surface |
-| `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_san_dns:<host>` from `server.wallet_facing.public_base_url` |
-| `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
+| `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
+| `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → transaction_data_binding → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
 | `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Three spec non-empty constraints are enforced at deserialization (`credentials`, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
@@ -44,6 +44,9 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   `POST /admin/verification/requests` and `GET /vp/request/:id`.
 - **DCQL:** `check_dcql_match(dcql_query, format, disclosed_claims, doc_type) -> CheckResult`,
   `PresentedFormat`.
+- **Transaction Data:** `check_transaction_data_binding(requested_entries, answered_query_id, kb_payload) -> CheckResult`
+  (`verify.rs`) — pushed only when `tx.transaction_data` is `Some`; never errors
+  (fail-closed), matching `check_dcql_match`'s contract.
 - **Status:** `check_status(disclosed_claims, trust_store, resolver, now_unix) -> Result<CheckResult, VerificationError>`,
   `StatusListResolver`, `HttpStatusListResolver`.
 - **Transaction / results:** `VerificationTransaction` (fields include `id`,
@@ -76,12 +79,16 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **`verified` MUST equal `checks.iter().all(|c| c.passed)`** — never hardcode
   `verified: true`; it is computed once at the end of `do_verify_vp_response` —
   full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
-- **Every verification step must push a named `CheckResult`.** The five names in
+- **Every verification step must push a named `CheckResult`.** The six names in
   the vocabulary are `jwe_decryption`, `sd_jwt_vc_signature_and_kb_jwt`,
-  `mdoc_issuer_auth_and_device_signature`, `dcql_match`, `status_check`.
-  **A single result contains four of them**, because the SD-JWT VC and mdoc
-  checks are mutually exclusive (chosen by whether `vp_token` is a JSON string
-  or an object) — full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
+  `mdoc_issuer_auth_and_device_signature`, `dcql_match`, `status_check`,
+  `transaction_data_binding`. **A single result normally contains four of the
+  first five**, because the SD-JWT VC and mdoc checks are mutually exclusive
+  (chosen by whether `vp_token` is a JSON string or an object);
+  `transaction_data_binding` adds a fifth only when `tx.transaction_data` is
+  `Some` — an mdoc presentation with `transaction_data` requested still gets
+  the check pushed, recorded as a hard `passed: false` (no KB-JWT exists to
+  bind it) — full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
 - **The error path of `verify_vp_response` MUST populate `tx.result`.** Setting
   only `tx.state = Failed` leaves the reason inside the returned `Err`, which the
   HTTP layer sends to the *wallet* — so the admin console renders a bare red
@@ -163,13 +170,19 @@ cargo test -p foundry --test wallet_verification
 - **`jwe_decryption` is seeded as `passed: true`, never as a failure.** JWE
   failure is an early `Err(Decryption(..))` → 400, so a `verified: false` result
   will never carry a failed `jwe_decryption` record.
-- **`client_id` is derived, not configured:** `x509_san_dns:<dns-host-of-public_base_url>`.
-  Since GAP-VP-02's closure, `build_signed_request_object` **hard-fails** on a
-  mismatch between the derived host and the configured `x5c` leaf's dNSName SAN
-  entries (`foundry_core::trust::match_san_dns`) — what used to be a silent
+- **`client_id` is derived, not configured:** `x509_hash:<base64url(SHA-256(DER leaf))>`
+  (HAIP OpenID4VP L256 / OpenID4VP L616), computed by
+  `foundry_core::trust::x509_hash_client_id_value` and re-derived independently by
+  both `build_signed_request_object` and `do_verify_vp_response` so the two sides
+  cannot drift. GAP-VP-02's SAN cross-check is anchored on
+  `server.wallet_facing.public_base_url`'s host, not on the client_id (which no
+  longer carries a hostname): `build_signed_request_object` **hard-fails** on a
+  mismatch between that host and the configured `x5c` leaf's dNSName SAN entries
+  (`foundry_core::trust::match_san_dns`) — what used to be a silent
   audience-binding break for both formats is now a `VerificationError::Crypto`
-  raised before the Request Object is ever signed. No `x5c` configured means no
-  check is attempted.
+  raised before the Request Object is ever signed. `x5c` is mandatory for signed
+  requests (the identifier *is* the certificate hash), so this check is always
+  attempted.
 - **`vp_token` is an OpenID4VP 1.0 §8.1 object keyed by DCQL credential query id,
   with ARRAY values** — `{ "<query id>": [ <presentation> ] }` — and that is the
   same shape for **both** credential formats. The credential format comes from

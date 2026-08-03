@@ -28,6 +28,11 @@ pub struct AuthorizeParams {
     pub code_challenge: String,
     pub code_challenge_method: String,
     pub issuer_state: String,
+    /// HAIP OpenID4VCI L209: the `scope` parameter communicates the Credential Type
+    /// to be issued. Optional here -- the mandate is that the Issuer publish a scope
+    /// (L186) and honour it when sent, not that a Wallet must send one;
+    /// `issuer_state` remains the authoritative binding.
+    pub scope: Option<String>,
 }
 
 /// The result of processing an `/authorize` request. The HTTP layer
@@ -89,6 +94,9 @@ pub async fn handle_authorize_request(
     issuer_identifier: &str,
     tx_ttl_secs: u64,
     now_unix: i64,
+    // Resolved scope -> credential type id, per HAIP OpenID4VCI L209. Passed in
+    // rather than taking `&Config`: this function needs the mapping, nothing else.
+    scopes: &std::collections::BTreeMap<String, String>,
 ) -> AuthorizeOutcome {
     let iss = issuer_identifier.to_string();
 
@@ -124,6 +132,25 @@ pub async fn handle_authorize_request(
     // wallet via redirect, per RFC 6749 §4.1.2.1.
     let redirect_uri = expected_redirect_uri;
     let state = params.state.clone();
+
+    // HAIP OpenID4VCI L209: the `scope` parameter MUST be used to communicate the
+    // Credential Type(s) to be issued and the value MUST map to a specific
+    // Credential Type. When a Wallet sends one it must name the same type the
+    // transaction was bound to at create_offer time; a mismatch is a conflicting
+    // request, not a silently-ignored hint.
+    if let Some(scope) = params.scope.as_deref() {
+        let names_this_transaction = scopes
+            .get(scope)
+            .is_some_and(|credential_type_id| *credential_type_id == tx.credential_type_id);
+        if !names_this_transaction {
+            return AuthorizeOutcome::ErrorRedirect {
+                redirect_uri,
+                error: "invalid_scope".to_string(),
+                state,
+                iss,
+            };
+        }
+    }
 
     if params.response_type != "code"
         || params.client_id.trim().is_empty()
@@ -217,6 +244,7 @@ mod tests {
             code_challenge: VALID_CHALLENGE.to_string(),
             code_challenge_method: "S256".to_string(),
             issuer_state: ISSUER_STATE.to_string(),
+            scope: None,
         }
     }
 
@@ -229,9 +257,15 @@ mod tests {
             .unwrap();
 
         let params = valid_params();
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_010)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_010,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         match outcome {
             AuthorizeOutcome::Success {
@@ -267,9 +301,15 @@ mod tests {
             .unwrap();
 
         let params = valid_params();
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_010)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_010,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         match outcome {
             AuthorizeOutcome::Success { iss, .. } => assert_eq!(iss, ISSUER_IDENTIFIER),
@@ -291,9 +331,15 @@ mod tests {
         let mut params = valid_params();
         params.response_type = "token".to_string(); // forces ErrorRedirect
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         match outcome {
             AuthorizeOutcome::ErrorRedirect { iss, error, .. } => {
@@ -310,9 +356,15 @@ mod tests {
         let mut params = valid_params();
         params.issuer_state = "no-such-state".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         assert!(matches!(outcome, AuthorizeOutcome::DirectError(_)));
     }
 
@@ -327,9 +379,15 @@ mod tests {
         let mut params = valid_params();
         params.redirect_uri = "https://evil.example.com/callback".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         assert!(matches!(outcome, AuthorizeOutcome::DirectError(_)));
     }
 
@@ -344,9 +402,15 @@ mod tests {
         let mut params = valid_params();
         params.code_challenge_method = "plain".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         match outcome {
             AuthorizeOutcome::ErrorRedirect {
                 redirect_uri,
@@ -371,9 +435,15 @@ mod tests {
         let mut params = valid_params();
         params.code_challenge = "too-short".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -388,9 +458,15 @@ mod tests {
         let mut params = valid_params();
         params.response_type = "token".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -405,9 +481,15 @@ mod tests {
         let mut params = valid_params();
         params.client_id = "".to_string();
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         assert!(matches!(outcome, AuthorizeOutcome::ErrorRedirect { .. }));
     }
 
@@ -420,9 +502,15 @@ mod tests {
             .unwrap();
 
         let params = valid_params();
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         match outcome {
             AuthorizeOutcome::ErrorRedirect { error, .. } => {
                 assert_eq!(error, "access_denied");
@@ -442,9 +530,15 @@ mod tests {
         let mut params = valid_params();
         params.state = None;
 
-        let outcome =
-            handle_authorize_request(&storage, &params, ISSUER_IDENTIFIER, 600, 1_700_000_000)
-                .await;
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_000,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
         match outcome {
             AuthorizeOutcome::Success { state, .. } => assert_eq!(state, None),
             other => panic!("expected Success, got {other:?}"),

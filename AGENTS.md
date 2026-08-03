@@ -83,7 +83,8 @@ that point back here.
 - **Never hardcode `verified: true`.**
 - Every verification step pushes a named `CheckResult`: `jwe_decryption`,
   `sd_jwt_vc_signature_and_kb_jwt`, `mdoc_issuer_auth_and_device_signature`,
-  `dcql_match`, `status_check`.
+  `dcql_match`, `status_check`, `transaction_data_binding` (the last only when
+  the request carried `transaction_data`).
 
 ### 4.3 Policy Failures vs. Structural / Network Failures
 
