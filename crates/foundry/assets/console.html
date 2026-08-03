@@ -74,6 +74,14 @@
     border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; margin-left: 8px;
   }
   .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+  .open-btn {
+    display: inline-block;
+    background: var(--accent); color: #fff; text-decoration: none;
+    border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600;
+    margin-left: 8px; cursor: pointer;
+  }
+  .open-btn:hover { background: var(--accent-dark); }
+  .open-btn.hidden { display: none; }
   .result { margin-top: 18px; border-top: 1px solid var(--panel-border); padding-top: 16px; }
   .result.hidden { display: none; }
   .uri-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
@@ -143,6 +151,7 @@
       <div class="uri-row">
         <span class="uri-text" id="offer-uri"></span>
         <button class="copy-btn" data-copy-target="offer-uri">Copy</button>
+        <a class="open-btn hidden" id="offer-open" target="_self">Open in Wallet</a>
       </div>
       <div class="qr-wrap" id="offer-qr"></div>
       <pre class="json" id="offer-json"></pre>
@@ -174,6 +183,7 @@
       <div class="uri-row">
         <span class="uri-text" id="verification-uri"></span>
         <button class="copy-btn" data-copy-target="verification-uri">Copy</button>
+        <a class="open-btn hidden" id="verification-open" target="_self">Open in Wallet</a>
       </div>
       <div class="qr-wrap" id="verification-qr"></div>
       <p>Status: <span class="badge pending" id="verification-status">pending</span></p>
@@ -2622,6 +2632,9 @@ var qrcode = function() {
         document.getElementById('offer-uri').textContent = body.credential_offer_uri;
         document.getElementById('offer-json').textContent = JSON.stringify(body.credential_offer, null, 2);
         renderQr(document.getElementById('offer-qr'), body.credential_offer_uri);
+        const offerOpenEl = document.getElementById('offer-open');
+        offerOpenEl.href = body.credential_offer_uri;
+        offerOpenEl.classList.remove('hidden');
         resultEl.classList.remove('hidden');
       } catch (err) {
         showError(errorEl, err);
@@ -2765,14 +2778,20 @@ var qrcode = function() {
         const uri = body.openid4vp_uri || body.request_uri || '';
         const uriEl = document.getElementById('verification-uri');
         const qrEl = document.getElementById('verification-qr');
+        const verificationOpenEl = document.getElementById('verification-open');
         qrEl.innerHTML = '';
         if (uri) {
           uriEl.textContent = uri;
           renderQr(qrEl, uri);
-        } else if (body.dc_api_request) {
-          uriEl.textContent = '(dc_api transport has no scannable URI; use the Digital Credentials API request object returned by the admin endpoint directly)';
+          verificationOpenEl.href = uri;
+          verificationOpenEl.classList.remove('hidden');
         } else {
-          uriEl.textContent = '';
+          verificationOpenEl.classList.add('hidden');
+          if (body.dc_api_request) {
+            uriEl.textContent = '(dc_api transport has no scannable URI; use the Digital Credentials API request object returned by the admin endpoint directly)';
+          } else {
+            uriEl.textContent = '';
+          }
         }
 
         document.getElementById('verification-status').textContent = 'pending';

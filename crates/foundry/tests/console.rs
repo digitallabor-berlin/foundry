@@ -170,3 +170,38 @@ async fn console_qr_svg_css_sets_explicit_dimensions() {
          rule body was: {rule_body:?}"
     );
 }
+
+#[tokio::test]
+async fn console_has_open_in_wallet_links_for_same_device_flow() {
+    // Same-device flow support: alongside the existing QR + Copy button, the
+    // console must offer a tappable deep link so that opening the console on
+    // the phone that has the wallet installed can launch it directly,
+    // without needing a second device to scan the QR.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"id="offer-open"#),
+        "console page should have an offer-open link for the same-device issuance flow"
+    );
+    assert!(
+        html.contains(r#"id="verification-open"#),
+        "console page should have a verification-open link for the same-device verification flow"
+    );
+}
