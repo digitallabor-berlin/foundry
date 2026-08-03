@@ -6,7 +6,7 @@ use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
+    AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, KeyEntry, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::crypto::jwe::encrypt_compact;
@@ -168,6 +168,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![],
         verifier: VerifierConfig {

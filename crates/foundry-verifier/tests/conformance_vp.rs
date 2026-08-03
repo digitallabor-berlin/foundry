@@ -71,6 +71,7 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![],
         verifier: VerifierConfig {

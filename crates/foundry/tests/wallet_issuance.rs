@@ -3,8 +3,8 @@ use axum::http::{header, Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry,
-    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
+    KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
     WalletFacingConfig,
 };
 use foundry_core::crypto::SignatureAlgorithm;
@@ -78,6 +78,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

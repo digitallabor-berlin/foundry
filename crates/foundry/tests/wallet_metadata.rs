@@ -2,8 +2,9 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use foundry::server::{wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
-    Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
+    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+    WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use std::collections::BTreeMap;
@@ -50,6 +51,7 @@ fn test_config() -> Config {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

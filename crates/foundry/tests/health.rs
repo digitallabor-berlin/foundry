@@ -3,8 +3,8 @@ use axum::http::{Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
-    StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
+    AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, LoggingConfig, Mode,
+    ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use std::collections::BTreeMap;
@@ -51,6 +51,7 @@ fn test_config() -> Config {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: Vec::new(),
         verifier: VerifierConfig {

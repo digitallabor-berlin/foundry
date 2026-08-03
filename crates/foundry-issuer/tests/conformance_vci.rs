@@ -9,8 +9,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, KeyEntry,
-    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
+    KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
     WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
@@ -80,6 +80,7 @@ fn test_config() -> Config {
                 list_size: Some(1024),
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

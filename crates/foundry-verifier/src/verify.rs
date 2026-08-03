@@ -795,8 +795,8 @@ mod tests {
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
-        ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
+        AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, KeyEntry, LoggingConfig,
+        Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
         WalletFacingConfig,
     };
     use foundry_core::crypto::jwe::encrypt_compact;
@@ -931,6 +931,7 @@ mod tests {
                     list_size: Some(131072),
                     public_base_url: None,
                 },
+                dpop: DpopConfig::default(),
             },
             credential_types: vec![],
             verifier: VerifierConfig {

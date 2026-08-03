@@ -132,6 +132,10 @@ pub struct IssuerConfig {
     #[serde(default)]
     pub key_attestation: AttestationMode,
     pub status_list: StatusListConfig,
+    /// RFC 9449 (DPoP) — sender-constrained access tokens. Absent means
+    /// `Optional`, which reproduces foundry's pre-DPoP behaviour exactly.
+    #[serde(default)]
+    pub dpop: DpopConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -152,6 +156,44 @@ pub struct AttestationMode {
 
 fn default_pop_max_age_secs() -> u64 {
     300
+}
+
+/// RFC 9449 DPoP policy for the Token and Credential Endpoints.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct DpopConfig {
+    /// RFC 9449 §5 / §5.2.
+    ///
+    /// - `Optional` (default) — a valid `DPoP` proof yields a key-bound token
+    ///   and `token_type: "DPoP"`; its absence yields `Bearer`, exactly as
+    ///   before DPoP existed.
+    /// - `Required` — equivalent to §5.2's `dpop_bound_access_tokens: true`:
+    ///   a token request with no `DPoP` header is rejected.
+    /// - `Disabled` — the header is **ignored** and `Bearer` is always issued.
+    ///   Deliberately *not* "reject": §10.1 encourages clients that blindly
+    ///   attach `DPoP` to every AS call, and §5 states an AS "MAY elect to
+    ///   issue access tokens that are not DPoP bound, which is signaled to the
+    ///   client with a value of `Bearer`". Rejecting would hard-fail a wallet
+    ///   doing exactly what the RFC recommends.
+    #[serde(default)]
+    pub mode: Mode,
+    /// RFC 9449 §4.3 check 11 / §11.1: how far from `now` a proof's `iat` may
+    /// sit, in **either** direction — §11.1 explicitly permits accepting an
+    /// `iat` "in the reasonably near future" to absorb clock skew.
+    #[serde(default = "default_dpop_max_age_secs")]
+    pub max_age_secs: u64,
+}
+
+fn default_dpop_max_age_secs() -> u64 {
+    300
+}
+
+impl Default for DpopConfig {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            max_age_secs: default_dpop_max_age_secs(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -371,6 +413,35 @@ verifier:
     fn key_attestation_pop_max_age_secs_parses_but_has_no_consumer() {
         let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  key_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n");
         assert_eq!(cfg.issuer.key_attestation.pop_max_age_secs, 60);
+    }
+
+    #[test]
+    fn dpop_defaults_to_optional_mode_and_a_300_second_window() {
+        // RFC 9449 §5 permits Bearer when no proof is presented, so the default
+        // must be the mode that preserves foundry's pre-DPoP behaviour.
+        let cfg: DpopConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.mode, Mode::Optional);
+        assert_eq!(cfg.max_age_secs, 300);
+    }
+
+    #[test]
+    fn issuer_config_without_a_dpop_block_still_deserializes() {
+        // Every config file in the wild predates this field.
+        let json = serde_json::json!({
+            "credential_issuer": "https://issuer.example.com",
+            "status_list": { "enabled": false }
+        });
+        let issuer: IssuerConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(issuer.dpop.mode, Mode::Optional);
+        assert_eq!(issuer.dpop.max_age_secs, 300);
+    }
+
+    #[test]
+    fn dpop_mode_deserializes_from_lowercase() {
+        let cfg: DpopConfig =
+            serde_json::from_str(r#"{"mode":"required","max_age_secs":60}"#).unwrap();
+        assert_eq!(cfg.mode, Mode::Required);
+        assert_eq!(cfg.max_age_secs, 60);
     }
 }
 

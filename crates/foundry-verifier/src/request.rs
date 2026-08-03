@@ -591,6 +591,7 @@ mod tests {
                     list_size: None,
                     public_base_url: None,
                 },
+                dpop: DpopConfig::default(),
             },
             credential_types: vec![],
             verifier: VerifierConfig {

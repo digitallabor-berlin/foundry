@@ -265,7 +265,7 @@ mod tests {
         load_transaction, save_transaction_with_indices, IssuanceTransaction,
     };
     use foundry_core::config::{
-        AdminConfig, AttestationMode, ClaimDef, CredentialType, IssuerConfig, KeyEntry,
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, DpopConfig, IssuerConfig, KeyEntry,
         LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
         WalletFacingConfig,
     };
@@ -334,6 +334,7 @@ mod tests {
                     list_size: None,
                     public_base_url: None,
                 },
+                dpop: DpopConfig::default(),
             },
             credential_types: vec![CredentialType {
                 id: "pid".to_string(),

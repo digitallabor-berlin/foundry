@@ -111,6 +111,15 @@ impl Config {
             )));
         }
 
+        // RFC 9449 §4.3 check 11: a zero acceptance window makes every proof stale
+        // the instant it is minted, so every DPoP request would fail with a blanket
+        // invalid_dpop_proof. Caught at startup rather than at request time.
+        if self.issuer.dpop.max_age_secs == 0 {
+            return Err(ConfigError::Validation(
+                "issuer.dpop.max_age_secs must be greater than 0".to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -226,9 +235,9 @@ fn validate_trust_anchor_list(
 #[cfg(test)]
 mod tests {
     use crate::config::model::{
-        AdminConfig, AttestationMode, Config, CredentialType, IssuerConfig, LoggingConfig, Mode,
-        ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
-        WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, CredentialType, DpopConfig, IssuerConfig,
+        LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
+        VerifierConfig, WalletFacingConfig,
     };
     use std::collections::BTreeMap;
 
@@ -272,6 +281,7 @@ mod tests {
                     list_size: None,
                     public_base_url: None,
                 },
+                dpop: DpopConfig::default(),
             },
             credential_types: Vec::new(),
             verifier: VerifierConfig {
@@ -529,5 +539,23 @@ mod tests {
             ..ct
         };
         assert_eq!(with_scope.resolved_scope(), "s");
+    }
+
+    #[test]
+    fn a_zero_dpop_max_age_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.dpop.max_age_secs = 0;
+        let err = cfg.validate().expect_err("max_age_secs 0 must be rejected");
+        assert!(
+            err.to_string().contains("issuer.dpop.max_age_secs"),
+            "error must name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_nonzero_dpop_max_age_validates() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.dpop.max_age_secs = 1;
+        assert!(cfg.validate().is_ok());
     }
 }

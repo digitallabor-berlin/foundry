@@ -4,7 +4,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
 use foundry::server::{wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
+    AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, KeyEntry, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::crypto::SignatureAlgorithm;
@@ -74,6 +74,7 @@ async fn setup(status_list_enabled: bool) -> (AppState, tempfile::TempDir) {
                 list_size: Some(128),
                 public_base_url: Some("https://issuer.example.com/statuslists".to_string()),
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![],
         verifier: VerifierConfig {

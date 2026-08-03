@@ -26,9 +26,9 @@ use base64::Engine;
 use foundry::admin_auth::AdminApiKey;
 use foundry::server::{admin_router, wallet_router, AppState};
 use foundry_core::config::{
-    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, IssuerConfig, LoggingConfig,
-    Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
-    WalletFacingConfig,
+    AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
+    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
+    VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
 use josekit::jwk::alg::ec::EcKeyPair;
@@ -116,6 +116,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -666,6 +667,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![],
         verifier: VerifierConfig {
@@ -806,6 +808,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1231,6 +1234,7 @@ async fn setup_pop_test_app_with_mode(
                 list_size: None,
                 public_base_url: None,
             },
+            dpop: DpopConfig::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
