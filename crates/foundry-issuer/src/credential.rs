@@ -340,6 +340,7 @@ mod tests {
                 format: "dc+sd-jwt".to_string(),
                 vct: Some("https://issuer.example.com/vct/pid".to_string()),
                 doctype: None,
+                scope: None,
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![ClaimDef {

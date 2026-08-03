@@ -50,6 +50,30 @@ impl Config {
             }
         }
 
+        // HAIP OpenID4VCI L209: the scope value MUST map to a *specific* Credential
+        // Type, so two types may not resolve to the same scope.
+        let mut seen_scopes: std::collections::BTreeMap<&str, &str> =
+            std::collections::BTreeMap::new();
+        for ct in &self.credential_types {
+            if let Some(explicit) = &ct.scope {
+                if explicit.trim().is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "credential_type '{}' has an empty 'scope'",
+                        ct.id
+                    )));
+                }
+            }
+            if let Some(previous) = seen_scopes.insert(ct.resolved_scope(), &ct.id) {
+                return Err(ConfigError::Validation(format!(
+                    "credential_types '{}' and '{}' both resolve to scope '{}'; each \
+                     scope must map to exactly one Credential Type",
+                    previous,
+                    ct.id,
+                    ct.resolved_scope()
+                )));
+            }
+        }
+
         // OpenID4VCI 1.0 Credential Issuer Metadata (L1368, L1369): `credential_endpoint`
         // and `nonce_endpoint`, both derived unconditionally from `issuer.credential_issuer`
         // (see `build_issuer_metadata`), MUST use the `https` scheme.
@@ -202,8 +226,9 @@ fn validate_trust_anchor_list(
 #[cfg(test)]
 mod tests {
     use crate::config::model::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
-        StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, CredentialType, IssuerConfig, LoggingConfig, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
+        WalletFacingConfig,
     };
     use std::collections::BTreeMap;
 
@@ -404,5 +429,105 @@ mod tests {
             err.to_string().contains("public_base_url"),
             "expected an identity-mismatch error, got: {err}"
         );
+    }
+
+    #[test]
+    fn duplicate_resolved_scopes_are_rejected() {
+        // HAIP OpenID4VCI L209: "The scope value MUST map to a specific Credential
+        // Type." Two types resolving to one scope makes that unsatisfiable.
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types = vec![
+            CredentialType {
+                id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://example.test/vct/pid".to_string()),
+                doctype: None,
+                scope: None,
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![],
+            },
+            CredentialType {
+                id: "other".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://example.test/vct/other".to_string()),
+                doctype: None,
+                // Collides with the first type's defaulted scope ("pid").
+                scope: Some("pid".to_string()),
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![],
+            },
+        ];
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            format!("{err}").contains("scope"),
+            "the error must name the scope collision: {err}"
+        );
+    }
+
+    #[test]
+    fn distinct_resolved_scopes_are_accepted() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types = vec![
+            CredentialType {
+                id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://example.test/vct/pid".to_string()),
+                doctype: None,
+                scope: None,
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![],
+            },
+            CredentialType {
+                id: "mdl".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://example.test/vct/mdl".to_string()),
+                doctype: None,
+                scope: Some("eu.europa.ec.eudi.pid.1".to_string()),
+                cryptographic_holder_binding: true,
+                display: vec![],
+                claims: vec![],
+            },
+        ];
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn an_explicitly_blank_scope_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types = vec![CredentialType {
+            id: "pid".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://example.test/vct/pid".to_string()),
+            doctype: None,
+            scope: Some("   ".to_string()),
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![],
+        }];
+        let err = cfg.validate().unwrap_err();
+        assert!(format!("{err}").contains("scope"), "{err}");
+    }
+
+    #[test]
+    fn resolved_scope_defaults_to_the_id() {
+        let ct = CredentialType {
+            id: "pid".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://example.test/vct/pid".to_string()),
+            doctype: None,
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![],
+        };
+        assert_eq!(ct.resolved_scope(), "pid");
+        let with_scope = CredentialType {
+            scope: Some("s".to_string()),
+            ..ct
+        };
+        assert_eq!(with_scope.resolved_scope(), "s");
     }
 }

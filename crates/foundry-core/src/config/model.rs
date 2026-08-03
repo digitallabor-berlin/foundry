@@ -182,12 +182,29 @@ pub struct CredentialType {
     pub vct: Option<String>,
     #[serde(default)]
     pub doctype: Option<String>,
+    /// The OAuth `scope` value that identifies this Credential Type.
+    ///
+    /// HAIP OpenID4VCI L186 requires the Credential Issuer metadata to carry a
+    /// scope for every Credential Configuration, and L199/L209 require the value to
+    /// map to a specific Credential Type. When unset, the credential type's `id` is
+    /// used, so an unconfigured deployment is conformant without change; set it
+    /// explicitly when an Ecosystem mandates a particular scope string.
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default)]
     pub cryptographic_holder_binding: bool,
     #[serde(default)]
     pub display: Vec<serde_json::Value>,
     #[serde(default)]
     pub claims: Vec<ClaimDef>,
+}
+
+impl CredentialType {
+    /// The scope this Credential Type is published and requested under.
+    /// HAIP OpenID4VCI L186/L199/L209 — see the `scope` field.
+    pub fn resolved_scope(&self) -> &str {
+        self.scope.as_deref().unwrap_or(&self.id)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

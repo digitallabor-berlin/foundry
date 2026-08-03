@@ -56,6 +56,7 @@ fn test_config() -> Config {
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://localhost:8443/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {

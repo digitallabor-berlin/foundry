@@ -86,6 +86,7 @@ fn test_config() -> Config {
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -450,6 +451,7 @@ fn credential_test_config(key_path: &str) -> Config {
         format: "mso_mdoc".to_string(),
         vct: None,
         doctype: Some("org.iso.18013.5.1.mDL".to_string()),
+        scope: None,
         cryptographic_holder_binding: true,
         display: vec![],
         claims: vec![ClaimDef {

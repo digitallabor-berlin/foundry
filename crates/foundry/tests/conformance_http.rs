@@ -122,6 +122,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -811,6 +812,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://localhost:8443/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -1235,6 +1237,7 @@ async fn setup_pop_test_app_with_mode(
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {

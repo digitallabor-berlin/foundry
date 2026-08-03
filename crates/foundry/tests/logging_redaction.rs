@@ -151,6 +151,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             format: "dc+sd-jwt".to_string(),
             vct: Some(format!("{ISSUER}/vct/pid")),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
@@ -622,6 +623,7 @@ async fn setup_with_required_attestation() -> (
             format: "dc+sd-jwt".to_string(),
             vct: Some(format!("{ISSUER}/vct/pid")),
             doctype: None,
+            scope: None,
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![ClaimDef {
