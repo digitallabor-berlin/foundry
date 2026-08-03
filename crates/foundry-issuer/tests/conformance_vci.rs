@@ -60,6 +60,18 @@ fn no_dpop<'a>() -> DpopPresentation<'a> {
     }
 }
 
+/// A Bearer-scheme /credential presentation -- the pre-DPoP path, for the many
+/// call sites here that are not about DPoP at all.
+fn bearer_presentation<'a>() -> DpopPresentation<'a> {
+    DpopPresentation {
+        scheme_is_dpop: false,
+        proof_jwt: None,
+        htm: "POST",
+        htu: "https://issuer.example.com/credential",
+        ath: None,
+    }
+}
+
 fn test_config() -> Config {
     Config {
         server: ServerConfig {
@@ -592,9 +604,16 @@ async fn vci_0058_proofs_are_required_when_proof_types_supported() {
         proofs: None,
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -646,9 +665,16 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         matches!(result, Err(IssuanceError::UnknownCredentialConfiguration(_))),
@@ -680,9 +706,16 @@ async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invali
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         matches!(result, Err(IssuanceError::InvalidCredentialRequest(_))),
@@ -711,9 +744,16 @@ async fn gap_vci_02_absent_credential_configuration_id_is_invalid_credential_req
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         matches!(result, Err(IssuanceError::InvalidCredentialRequest(_))),
@@ -742,9 +782,16 @@ async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verifica
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         matches!(
@@ -775,10 +822,17 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
         }),
     };
 
-    let res =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await
-            .expect("mdoc issuance must succeed");
+    let res = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await
+    .expect("mdoc issuance must succeed");
     let credential = &res.credentials[0].credential;
 
     assert!(
@@ -855,10 +909,17 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
             jwt: vec![proof_jwt],
         }),
     };
-    let res =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await
-            .expect("mdoc issuance must succeed");
+    let res = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await
+    .expect("mdoc issuance must succeed");
     let credential = &res.credentials[0].credential;
     let cbor_bytes = base64::engine::general_purpose::STANDARD
         .decode(credential)
@@ -1673,9 +1734,16 @@ async fn vci_0196_proofs_jwt_array_must_be_non_empty() {
         proofs: Some(ProofsRequest { jwt: vec![] }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -1860,9 +1928,16 @@ async fn vci_0207_proof_iss_must_be_omitted_after_anonymous_pre_auth_access() {
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -1984,9 +2059,16 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
         }),
     };
 
-    let result =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await;
+    let result = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -2246,12 +2328,17 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
         }),
     };
 
-    let res =
-        handle_credential_request(&cfg, &storage, &access_token, &req, &secret, 1_700_000_020)
-            .await
-            .expect(
-                "two independently valid proofs for the same Credential Dataset must be accepted",
-            );
+    let res = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+    )
+    .await
+    .expect("two independently valid proofs for the same Credential Dataset must be accepted");
 
     assert_eq!(
         res.credentials.len(),

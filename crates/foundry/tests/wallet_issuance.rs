@@ -724,3 +724,281 @@ async fn full_issuance_flow_with_kid_key_attestation_proof() {
     let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
     assert!(!credential_str.is_empty());
 }
+
+/// Mint a DPoP proof JWT for `method $htu`, optionally binding it to an access
+/// token via `ath` (RFC 9449 §4.2, §7). Reuses `kp` so a caller can prove
+/// possession of the same key at `/token` and then at `/credential`.
+fn create_dpop_proof(
+    kp: &EcKeyPair,
+    method: &str,
+    htu: &str,
+    jti: &str,
+    access_token: Option<&str>,
+) -> String {
+    let mut header = JwsHeader::new();
+    header.set_token_type("dpop+jwt");
+    let public = kp.to_jwk_public_key();
+    header.set_jwk(public);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let mut payload = JwtPayload::new();
+    payload.set_claim("htm", Some(method.into())).unwrap();
+    payload.set_claim("htu", Some(htu.into())).unwrap();
+    payload.set_claim("iat", Some(now.into())).unwrap();
+    payload.set_claim("jti", Some(jti.into())).unwrap();
+    if let Some(at) = access_token {
+        // §7: "The DPoP proof MUST include the ath claim with a valid hash of
+        // the associated access token."
+        let ath = foundry_issuer::access_token_hash(at);
+        payload.set_claim("ath", Some(ath.into())).unwrap();
+    }
+
+    let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Like `issue_offer_and_get_access_token`, but presents a DPoP proof at
+/// `/token` so the returned token is key-bound. Returns the token and the
+/// keypair it is bound to, and asserts §5's `token_type: DPoP`.
+async fn issue_offer_and_get_dpop_bound_access_token(state: &AppState) -> (String, EcKeyPair) {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": { "given_name": "Alice" },
+        "tx_code_required": false
+    });
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri("/admin/issuance/offers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(offer_req_body.to_string()))
+        .unwrap();
+    let offer_res = admin_app.oneshot(offer_req).await.unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .unwrap();
+
+    let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/token",
+        "dpop-token-1",
+        None,
+    );
+
+    let token_form_body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+    );
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("DPoP", proof)
+        .body(Body::from(token_form_body))
+        .unwrap();
+
+    let token_res = wallet_router(state.clone())
+        .oneshot(token_req)
+        .await
+        .unwrap();
+    assert_eq!(token_res.status(), StatusCode::OK);
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    assert_eq!(
+        token_json["token_type"], "DPoP",
+        "RFC 9449 §5: a key-bound token MUST be signalled with token_type DPoP"
+    );
+
+    (token_json["access_token"].as_str().unwrap().to_string(), kp)
+}
+
+/// RFC 9449 §7.2: "such a protected resource MUST reject a DPoP-bound access
+/// token received as a bearer token." §7.1 makes that rejection a 401 with a
+/// `WWW-Authenticate: DPoP` challenge whose `algs` tells the wallet what to
+/// sign with -- not the 400 the Bearer paths use.
+#[tokio::test]
+async fn credential_endpoint_rejects_a_downgraded_dpop_token_with_a_401_challenge() {
+    let (state, _dir) = setup_test_app().await;
+    let (access_token, _kp) = issue_offer_and_get_dpop_bound_access_token(&state).await;
+    let c_nonce = mint_c_nonce(&state).await;
+    let (proof_jwt, _) = create_proof(&c_nonce, "https://issuer.example.com");
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [proof_jwt] },
+    });
+
+    // Deliberately downgraded: a bound token presented with the Bearer scheme.
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_router(state.clone())
+        .oneshot(cred_req)
+        .await
+        .unwrap();
+    assert_eq!(
+        cred_res.status(),
+        StatusCode::UNAUTHORIZED,
+        "§7.1: a DPoP binding failure is a 401, not a 400"
+    );
+    let challenge = cred_res
+        .headers()
+        .get(header::WWW_AUTHENTICATE)
+        .expect("§7.1 requires a WWW-Authenticate challenge")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        challenge.starts_with("DPoP"),
+        "§7.1: the scheme name is DPoP, got: {challenge}"
+    );
+    assert!(
+        challenge.contains(r#"error="invalid_token""#),
+        "got: {challenge}"
+    );
+    assert!(challenge.contains(r#"algs="ES256""#), "got: {challenge}");
+}
+
+/// The full RFC 9449 flow over HTTP: a DPoP proof at `/token` yields a bound
+/// token with `token_type: DPoP` (§5), and `/credential` then accepts it when
+/// presented with the `DPoP` scheme plus a second proof carrying `ath` (§7).
+#[tokio::test]
+async fn full_dpop_issuance_flow_over_http() {
+    let (state, _dir) = setup_test_app().await;
+
+    // 1. Offer -> /token with a DPoP proof -> a key-bound access token.
+    //    (the token_type == "DPoP" assertion lives in the helper)
+    let (access_token, kp) = issue_offer_and_get_dpop_bound_access_token(&state).await;
+
+    // 2. c_nonce for the holder proof (unrelated to DPoP -- OpenID4VCI §7).
+    let c_nonce = mint_c_nonce(&state).await;
+    let (holder_proof, _holder_kp) = create_proof(&c_nonce, "https://issuer.example.com");
+
+    // 3. A *fresh* DPoP proof for this endpoint, bound to the access token via
+    //    ath. A distinct jti from the /token one, since §11.1 makes each
+    //    single-use, and a distinct htu, which §4.3 check 9 requires.
+    let cred_dpop = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/credential",
+        "dpop-credential-1",
+        Some(&access_token),
+    );
+
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [holder_proof] },
+    });
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        // §7.1: a bound token is presented with the DPoP scheme, not Bearer.
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("DPoP {access_token}"))
+        .header("DPoP", cred_dpop)
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+
+    let cred_res = wallet_router(state.clone())
+        .oneshot(cred_req)
+        .await
+        .unwrap();
+    assert_eq!(cred_res.status(), StatusCode::OK);
+
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
+    assert!(!credential_str.is_empty());
+    // SD-JWT VC concatenates disclosures with `~`.
+    assert!(credential_str.contains('~'));
+}
+
+/// RFC 9449 §4.3 check 1: "There is not more than one DPoP HTTP request header
+/// field." Unreachable from the engine's unit tests, which take a single &str --
+/// this is the only test that covers it.
+#[tokio::test]
+async fn two_dpop_headers_at_the_token_endpoint_are_rejected() {
+    let (state, _dir) = setup_test_app().await;
+
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("DPoP", "first")
+        .header("DPoP", "second")
+        .body(Body::from(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code",
+        ))
+        .unwrap();
+
+    let res = wallet_router(state.clone())
+        .oneshot(token_req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Rejected on the duplicate header alone, before the grant is even looked
+    // at -- so it must not surface as invalid_grant.
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_ne!(json["error"], "invalid_grant", "got: {json}");
+}
+
+/// RFC 9449 §4.3 check 1 again, at the protected resource.
+#[tokio::test]
+async fn two_dpop_headers_at_the_credential_endpoint_are_rejected() {
+    let (state, _dir) = setup_test_app().await;
+    let (access_token, _kp) = issue_offer_and_get_dpop_bound_access_token(&state).await;
+
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("DPoP {access_token}"))
+        .header("DPoP", "first")
+        .header("DPoP", "second")
+        .body(Body::from(
+            serde_json::json!({
+                "credential_configuration_id": "pid",
+                "format": "dc+sd-jwt",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let res = wallet_router(state.clone())
+        .oneshot(cred_req)
+        .await
+        .unwrap();
+    // exactly_one_header's duplicate-header rejection is InvalidClient (the
+    // same structural-request-error family ABCA's identical guard uses), not
+    // InvalidDpopProof -- the 401 + WWW-Authenticate: DPoP challenge is
+    // reserved for an actual binding failure, so this is a 400 like every
+    // other malformed-header case at this endpoint.
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}

@@ -644,36 +644,133 @@ async fn nonce_handler(
     Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
 }
 
+/// Split an `Authorization` header into its scheme and credentials.
+///
+/// RFC 9449 §7.1 uses the same `token68` credentials syntax as Bearer
+/// (RFC 6750 §2.1), so one splitter serves both. Any scheme other than `DPoP`
+/// or `Bearer` -- and a header with no scheme at all -- is rejected before the
+/// transaction is even looked up, preserving today's behaviour for malformed
+/// `Authorization` headers.
+fn parse_authorization(header: &str) -> Result<(bool, &str), foundry_issuer::IssuanceError> {
+    let (scheme, credentials) = header.split_once(' ').ok_or_else(|| {
+        foundry_issuer::IssuanceError::InvalidGrant("malformed authorization header".into())
+    })?;
+    let credentials = credentials.trim();
+    if credentials.is_empty() {
+        return Err(foundry_issuer::IssuanceError::InvalidGrant(
+            "empty authorization credentials".into(),
+        ));
+    }
+    // RFC 9110 §11.1: the scheme is case-insensitive.
+    if scheme.eq_ignore_ascii_case("DPoP") {
+        Ok((true, credentials))
+    } else if scheme.eq_ignore_ascii_case("Bearer") {
+        Ok((false, credentials))
+    } else {
+        Err(foundry_issuer::IssuanceError::InvalidGrant(
+            "unsupported authorization scheme".into(),
+        ))
+    }
+}
+
+/// Error mapper for the Credential Endpoint, which is a **protected resource**
+/// and therefore answers DPoP failures per RFC 9449 §7.1 rather than §5.
+///
+/// Every non-DPoP error keeps its existing `wallet_error_response` mapping --
+/// `/credential` returning 400 for a missing `Authorization` header is a
+/// pre-existing question RFC 9449 does not reach, and widening it here would
+/// break unrelated tests for no conformance gain.
+///
+/// Emits exactly one log record per error either way (root `AGENTS.md` §4.5).
+fn credential_error_response(
+    e: &foundry_issuer::IssuanceError,
+) -> (StatusCode, HeaderMap, Json<serde_json::Value>) {
+    if matches!(e, foundry_issuer::IssuanceError::InvalidDpopProof(_)) {
+        log_typed_error("wallet", e.kind(), e, StatusCode::UNAUTHORIZED);
+        let mut headers = HeaderMap::new();
+        // §7.1: scheme name DPoP, an `error` parameter, and an `algs` parameter
+        // "to signal to the client the JWS algorithms that are acceptable for
+        // the DPoP proof JWT".
+        if let Ok(v) = axum::http::HeaderValue::from_str(
+            r#"DPoP error="invalid_token", error_description="DPoP binding check failed", algs="ES256""#,
+        ) {
+            headers.insert(axum::http::header::WWW_AUTHENTICATE, v);
+        }
+        return (
+            StatusCode::UNAUTHORIZED,
+            headers,
+            Json(serde_json::json!({
+                "error": "invalid_token",
+                "error_description": e.to_string(),
+            })),
+        );
+    }
+    let (status, body) = wallet_error_response(e);
+    (status, HeaderMap::new(), body)
+}
+
 #[utoipa::path(
     post,
     path = "/credential",
     request_body = CredentialRequest,
-    responses((status = 200, body = CredentialResponse))
+    params(
+        ("Authorization" = String, Header,
+         description = "`Bearer <access_token>` for an unbound token, or \
+                        `DPoP <access_token>` (RFC 9449 §7.1) when the token is \
+                        DPoP-bound. A bound token presented as Bearer is rejected \
+                        (§7.2)."),
+        ("DPoP" = Option<String>, Header,
+         description = "RFC 9449 §4.1 DPoP proof JWT, carrying an `ath` claim \
+                        (§7) bound to the presented access token. Required \
+                        alongside `Authorization: DPoP ...`. MUST appear at most \
+                        once (§4.3 check 1)."),
+    ),
+    responses(
+        (status = 200, body = CredentialResponse),
+        (status = 401, description = "RFC 9449 §7.1: WWW-Authenticate: DPoP \
+                                     error=\"invalid_token\", algs=\"ES256\" -- the \
+                                     access token's DPoP binding check failed \
+                                     (missing/invalid proof, key mismatch, or a \
+                                     bound token presented as Bearer)."),
+    )
 )]
 async fn credential_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<CredentialRequest>,
-) -> Result<Json<CredentialResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<CredentialResponse>, (StatusCode, HeaderMap, Json<serde_json::Value>)> {
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
+            credential_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
                 "missing authorization header".into(),
             ))
         })?;
 
-    let access_token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
-        wallet_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
-            "invalid bearer authorization header".into(),
-        ))
-    })?;
+    let (scheme_is_dpop, access_token) =
+        parse_authorization(auth_header).map_err(|e| credential_error_response(&e))?;
+
+    // RFC 9449 §4.3 check 1.
+    let dpop_hdr =
+        exactly_one_header(&headers, "DPoP").map_err(|e| credential_error_response(&e))?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+
+    // §7: ath is always computed here, so the engine never has to.
+    let ath = foundry_issuer::access_token_hash(access_token);
+    let credential_issuer = state.config.issuer.credential_issuer.trim_end_matches('/');
+    let htu = format!("{credential_issuer}/credential");
+    let dpop = foundry_issuer::DpopPresentation {
+        scheme_is_dpop,
+        proof_jwt: dpop_hdr,
+        htm: "POST",
+        htu: &htu,
+        ath: Some(&ath),
+    };
 
     foundry_issuer::handle_credential_request(
         &state.config,
@@ -681,11 +778,12 @@ async fn credential_handler(
         access_token,
         &req,
         state.nonce_secret.as_ref(),
+        &dpop,
         now,
     )
     .await
     .map(Json)
-    .map_err(|e| wallet_error_response(&e))
+    .map_err(|e| credential_error_response(&e))
 }
 
 fn verifier_admin_error_response(

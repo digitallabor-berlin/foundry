@@ -1,5 +1,6 @@
 //! OpenID4VCI credential endpoint business logic.
 
+use crate::dpop::{claim_dpop_jti, verify_dpop_proof, DpopPresentation};
 use crate::error::IssuanceError;
 use crate::nonce::NonceSecret;
 use crate::proof::{verify_holder_proof, ProofsRequest};
@@ -53,6 +54,7 @@ pub async fn handle_credential_request(
     access_token: &str,
     req: &CredentialRequest,
     nonce_secret: &NonceSecret,
+    dpop: &DpopPresentation<'_>,
     now_unix: i64,
 ) -> Result<CredentialResponse, IssuanceError> {
     tracing::info!("credential request received");
@@ -68,6 +70,88 @@ pub async fn handle_credential_request(
         return Err(IssuanceError::InvalidGrant(
             "credential offer has already been claimed".into(),
         ));
+    }
+
+    // RFC 9449 §6/§7: enforce the access token's key binding before doing any
+    // issuance work. `tx.dpop_jkt` is how this resource server "reliably
+    // identif[ies] whether an access token is DPoP-bound" (§6) — the AS and the
+    // resource server are this same process sharing one `Storage`, which is the
+    // "agreement by the authorization server and the protected resource" §6
+    // permits as an alternative to a JWT `cnf.jkt` or introspection.
+    match (&tx.dpop_jkt, dpop.scheme_is_dpop) {
+        // Unbound token, Bearer scheme: the pre-DPoP path, unchanged.
+        (None, false) => {}
+
+        // §7.2: "such a protected resource MUST reject a DPoP-bound access
+        // token received as a bearer token." Without this, an attacker holding
+        // a stolen bound token simply downgrades to Bearer.
+        (Some(_), false) => {
+            return Err(IssuanceError::InvalidDpopProof(
+                "this access token is DPoP-bound and MUST be presented with the DPoP scheme".into(),
+            ));
+        }
+
+        // Deliberate deviation, stricter than RFC 9449, which leaves this case
+        // undefined: accepting it would let a wallet conclude it has
+        // sender-constraining when the token has no bound key at all — the
+        // false assurance §5's "the client MUST discard the response" language
+        // exists to prevent. Fail-closed.
+        (None, true) => {
+            return Err(IssuanceError::InvalidDpopProof(
+                "this access token is not DPoP-bound and MUST be presented with the Bearer scheme"
+                    .into(),
+            ));
+        }
+
+        (Some(bound_jkt), true) => {
+            // §7: "Requests to DPoP-protected resources MUST include both a
+            // DPoP proof as per Section 4 and the access token."
+            let proof_jwt = dpop.proof_jwt.ok_or_else(|| {
+                IssuanceError::InvalidDpopProof(
+                    "a DPoP proof is required when presenting a DPoP-bound access token".into(),
+                )
+            })?;
+            // §7: "The DPoP proof MUST include the ath claim with a valid hash
+            // of the associated access token." Absent `ath` here would be a
+            // caller bug, not a client one — the HTTP layer always computes it.
+            let expected_ath = dpop.ath.ok_or_else(|| {
+                IssuanceError::Internal("dpop presentation is missing the computed ath".into())
+            })?;
+
+            let verified = verify_dpop_proof(
+                proof_jwt,
+                dpop.htm,
+                dpop.htu,
+                Some(expected_ath),
+                now_unix,
+                config.issuer.dpop.max_age_secs,
+            )
+            .inspect_err(|e| {
+                tracing::warn!(error.kind = e.kind(), "dpop proof rejected at /credential");
+            })?;
+
+            // §4.3 check 12, second half / §7.1: "confirm that the public key
+            // to which the access token is bound matches the public key from
+            // the DPoP proof." This is the check that makes a stolen access
+            // token useless without the private key.
+            if &verified.jkt != bound_jkt {
+                return Err(IssuanceError::InvalidDpopProof(
+                    "the DPoP proof key does not match the key this access token is bound to"
+                        .into(),
+                ));
+            }
+
+            // §11.1 single-use, scoped to this endpoint's htu.
+            claim_dpop_jti(
+                storage,
+                &verified,
+                config.issuer.dpop.max_age_secs,
+                now_unix,
+            )
+            .await?;
+            // A thumbprint, so loggable per root AGENTS.md §4.5.
+            tracing::info!(jkt = %verified.jkt, "dpop-bound access token accepted");
+        }
     }
 
     // OpenID4VCI 1.0 Credential Request (L851): credential_configuration_id is
@@ -449,6 +533,7 @@ mod tests {
             "at_secret_123",
             &req,
             &secret,
+            &bearer_presentation(),
             1_700_000_010,
         )
         .await
@@ -589,11 +674,364 @@ mod tests {
             }),
         };
 
-        let res =
-            handle_credential_request(&config, &storage, "at_secret_456", &req, &secret, now + 10)
-                .await
-                .unwrap();
+        let res = handle_credential_request(
+            &config,
+            &storage,
+            "at_secret_456",
+            &req,
+            &secret,
+            &bearer_presentation(),
+            now + 10,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(res.credentials.len(), 1);
+    }
+
+    // --- RFC 9449 §6/§7/§7.1/§7.2 -- the design's §5.3 decision table ---
+
+    const CRED_HTU: &str = "https://issuer.example.com/credential";
+
+    /// A fresh signing key plus a `Config` pointed at it -- the setup every
+    /// test in this module needs, consolidated so the DPoP tests below don't
+    /// duplicate it a third time.
+    fn setup_config() -> (Config, tempfile::TempDir) {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+        let config = test_config(key_path.to_str().unwrap());
+        (config, key_dir)
+    }
+
+    fn sample_offered_tx(
+        id: &str,
+        access_token: &str,
+        dpop_jkt: Option<String>,
+    ) -> IssuanceTransaction {
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+        IssuanceTransaction {
+            transaction_id: id.to_string(),
+            credential_type_id: "pid".to_string(),
+            claims,
+            pre_authorized_code: None,
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some(access_token.to_string()),
+            state: IssuanceState::Offered,
+            created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            dpop_jkt,
+        }
+    }
+
+    /// Seed a caller-chosen access token, so the test can compute a matching
+    /// `ath`/proof against it before the transaction even exists.
+    async fn seed_offered_tx_with_exact_token(
+        storage: &SqliteStorage,
+        id: &str,
+        token: &str,
+        dpop_jkt: Option<String>,
+    ) {
+        let tx = sample_offered_tx(id, token, dpop_jkt);
+        save_transaction_with_indices(storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+    }
+
+    /// Seed a generated access token and return it.
+    async fn seed_offered_tx_with_token(
+        storage: &SqliteStorage,
+        id: &str,
+        dpop_jkt: Option<String>,
+    ) -> String {
+        let token = format!("at_{id}");
+        seed_offered_tx_with_exact_token(storage, id, &token, dpop_jkt).await;
+        token
+    }
+
+    /// A full, valid `CredentialRequest` -- fresh nonce, fresh holder proof --
+    /// so the DPoP "accepted" test rows exercise the whole endpoint, not just
+    /// the binding check.
+    fn sample_request(config: &Config, secret: &NonceSecret, now: i64) -> CredentialRequest {
+        let nonce = minted_nonce(secret, now);
+        let (proof_jwt, _keypair) = generate_proof(&nonce, &config.issuer.credential_issuer);
+        CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proofs: Some(ProofsRequest {
+                jwt: vec![proof_jwt],
+            }),
+        }
+    }
+
+    fn bearer_presentation<'a>() -> DpopPresentation<'a> {
+        DpopPresentation {
+            scheme_is_dpop: false,
+            proof_jwt: None,
+            htm: "POST",
+            htu: CRED_HTU,
+            ath: None,
+        }
+    }
+
+    /// A `DPoP`-scheme presentation carrying `proof` and the `ath` for `token`.
+    fn dpop_presentation<'a>(proof: Option<&'a str>, ath: &'a str) -> DpopPresentation<'a> {
+        DpopPresentation {
+            scheme_is_dpop: true,
+            proof_jwt: proof,
+            htm: "POST",
+            htu: CRED_HTU,
+            ath: Some(ath),
+        }
+    }
+
+    /// A DPoP proof for `POST /credential` bound to `access_token`.
+    /// Returns `(proof_jwt, jkt)`.
+    fn credential_proof(access_token: &str, jti: &str, now: i64) -> (String, String) {
+        let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let public = kp.to_jwk_public_key();
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("dpop+jwt");
+        header.set_jwk(public);
+
+        let ath = crate::dpop::access_token_hash(access_token);
+        let mut payload = JwtPayload::new();
+        payload.set_claim("htm", Some("POST".into())).unwrap();
+        payload.set_claim("htu", Some(CRED_HTU.into())).unwrap();
+        payload.set_claim("iat", Some(now.into())).unwrap();
+        payload.set_claim("jti", Some(jti.into())).unwrap();
+        payload.set_claim("ath", Some(ath.clone().into())).unwrap();
+
+        let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+        let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", CRED_HTU, Some(&ath), now, 300)
+            .unwrap()
+            .jkt;
+        (proof, jkt)
+    }
+
+    #[tokio::test]
+    async fn an_unbound_token_with_the_bearer_scheme_is_accepted() {
+        // Row 1: today's path. This is the regression that proves DPoP is
+        // additive and does not break existing wallets.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token = seed_offered_tx_with_token(&storage, "tx-cred-bearer", None).await;
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+
+        let res = handle_credential_request(
+            &config,
+            &storage,
+            &token,
+            &req,
+            &secret,
+            &bearer_presentation(),
+            1_700_000_000,
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "an unbound token must still work with Bearer: {res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_presented_as_bearer_is_rejected() {
+        // Row 2 / §7.2: "such a protected resource MUST reject a DPoP-bound
+        // access token received as a bearer token." Without this, an attacker
+        // holding a stolen bound token downgrades to Bearer and the binding
+        // buys nothing.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token =
+            seed_offered_tx_with_token(&storage, "tx-cred-downgrade", Some("some-jkt".to_string()))
+                .await;
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+
+        let e = handle_credential_request(
+            &config,
+            &storage,
+            &token,
+            &req,
+            &secret,
+            &bearer_presentation(),
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_with_a_matching_proof_is_accepted() {
+        // Row 3 / §7.1 + §4.3 check 12.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token = "at_cred_dpop_ok";
+        let (proof, jkt) = credential_proof(token, "j-cred-ok", 1_700_000_000);
+        seed_offered_tx_with_exact_token(&storage, "tx-cred-ok", token, Some(jkt)).await;
+
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+        let ath = crate::dpop::access_token_hash(token);
+        let res = handle_credential_request(
+            &config,
+            &storage,
+            token,
+            &req,
+            &secret,
+            &dpop_presentation(Some(&proof), &ath),
+            1_700_000_000,
+        )
+        .await;
+        assert!(res.is_ok(), "a matching proof must be accepted: {res:?}");
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_with_another_keys_proof_is_rejected() {
+        // Row 3 negative / §7.1: "check that the public key of the DPoP proof
+        // matches the public key to which the access token is bound". This is
+        // the check that makes a stolen token useless.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token = "at_cred_dpop_wrongkey";
+        let (proof, _wrong_jkt) = credential_proof(token, "j-cred-wrong", 1_700_000_000);
+        seed_offered_tx_with_exact_token(
+            &storage,
+            "tx-cred-wrongkey",
+            token,
+            Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string()),
+        )
+        .await;
+
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+        let ath = crate::dpop::access_token_hash(token);
+        let e = handle_credential_request(
+            &config,
+            &storage,
+            token,
+            &req,
+            &secret,
+            &dpop_presentation(Some(&proof), &ath),
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_with_no_proof_at_all_is_rejected() {
+        // Row 4 / §7: "Requests to DPoP-protected resources MUST include both
+        // a DPoP proof as per Section 4 and the access token."
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token =
+            seed_offered_tx_with_token(&storage, "tx-cred-noproof", Some("some-jkt".to_string()))
+                .await;
+
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+        let ath = crate::dpop::access_token_hash(&token);
+        let e = handle_credential_request(
+            &config,
+            &storage,
+            &token,
+            &req,
+            &secret,
+            &dpop_presentation(None, &ath),
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+    }
+
+    #[tokio::test]
+    async fn an_unbound_token_with_the_dpop_scheme_is_rejected() {
+        // Row 5 — a DELIBERATE DEVIATION, stricter than RFC 9449, which leaves
+        // this case undefined. Accepting it would let a wallet conclude it has
+        // sender-constraining when the token has no bound key at all: the same
+        // false assurance §5's "the client MUST discard the response" language
+        // exists to prevent. Fail-closed.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token = "at_cred_unbound_dpop";
+        let (proof, _) = credential_proof(token, "j-cred-unbound", 1_700_000_000);
+        seed_offered_tx_with_exact_token(&storage, "tx-cred-unbound", token, None).await;
+
+        let secret = test_secret();
+        let req = sample_request(&config, &secret, 1_700_000_000);
+        let ath = crate::dpop::access_token_hash(token);
+        let e = handle_credential_request(
+            &config,
+            &storage,
+            token,
+            &req,
+            &secret,
+            &dpop_presentation(Some(&proof), &ath),
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+    }
+
+    #[tokio::test]
+    async fn a_credential_proof_replayed_at_the_credential_endpoint_is_rejected() {
+        // §11.1 again, this time at the protected resource. Note the offer is
+        // single-use anyway, so this asserts the *proof* is rejected on its own
+        // terms rather than incidentally by the state check -- hence a fresh
+        // transaction bound to the same key for the second attempt.
+        let (config, _key_dir) = setup_config();
+        let storage = test_storage().await;
+        let token = "at_cred_replay";
+        let (proof, jkt) = credential_proof(token, "j-cred-replay", 1_700_000_000);
+        let ath = crate::dpop::access_token_hash(token);
+
+        seed_offered_tx_with_exact_token(&storage, "tx-cred-replay-1", token, Some(jkt.clone()))
+            .await;
+        let secret = test_secret();
+        let req1 = sample_request(&config, &secret, 1_700_000_000);
+        handle_credential_request(
+            &config,
+            &storage,
+            token,
+            &req1,
+            &secret,
+            &dpop_presentation(Some(&proof), &ath),
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        // A different transaction, same token value and same bound key, so the
+        // only thing that can reject the second call is the jti claim.
+        seed_offered_tx_with_exact_token(&storage, "tx-cred-replay-2", token, Some(jkt)).await;
+        let req2 = sample_request(&config, &secret, 1_700_000_000);
+        let e = handle_credential_request(
+            &config,
+            &storage,
+            token,
+            &req2,
+            &secret,
+            &dpop_presentation(Some(&proof), &ath),
+            1_700_000_000,
+        )
+        .await
+        .unwrap_err();
+        assert!(e.to_string().contains("jti"), "got: {e}");
     }
 }
