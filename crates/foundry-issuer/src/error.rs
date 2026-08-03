@@ -41,6 +41,17 @@ pub enum IssuanceError {
     /// failed client-auth mechanism -- GAP-VCI-14.
     #[error("invalid client: {0}")]
     InvalidClient(String),
+    /// RFC 9449 §5: any DPoP proof failure — malformed JWT, wrong `typ`/`alg`,
+    /// bad signature, `htm`/`htu`/`iat`/`ath` mismatch, replayed `jti`, a
+    /// §10 `dpop_jkt` mismatch, or a §7.2 scheme/binding mismatch.
+    ///
+    /// Deliberately one variant, not one per check: §5 defines a single error
+    /// code (`invalid_dpop_proof`, registered in §12.2), so the discriminating
+    /// detail belongs in this string. That string reaches the wire as
+    /// `error_description`, so it MUST name only the structural defect and
+    /// MUST NOT echo the proof, the access token, or key material.
+    #[error("invalid dpop proof: {0}")]
+    InvalidDpopProof(String),
     #[error("status list exhausted while allocating an index for credential_type '{0}'")]
     StatusListExhausted(String),
     #[error(transparent)]
@@ -78,6 +89,7 @@ impl IssuanceError {
             IssuanceError::UnknownCredentialConfiguration(_) => "unknown_credential_configuration",
             IssuanceError::ClaimValidation(_) => "claim_validation",
             IssuanceError::InvalidClient(_) => "invalid_client",
+            IssuanceError::InvalidDpopProof(_) => "invalid_dpop_proof",
             IssuanceError::StatusListExhausted(_) => "status_list_exhausted",
             IssuanceError::Storage(_) => "storage",
             IssuanceError::Crypto(_) => "crypto",
@@ -130,6 +142,7 @@ mod tests {
             ),
             (IssuanceError::ClaimValidation(s()), "claim_validation"),
             (IssuanceError::InvalidClient(s()), "invalid_client"),
+            (IssuanceError::InvalidDpopProof(s()), "invalid_dpop_proof"),
             (
                 IssuanceError::StatusListExhausted(s()),
                 "status_list_exhausted",
@@ -180,6 +193,17 @@ mod tests {
         let err = IssuanceError::InvalidNonce("c_nonce has expired".to_string());
         assert_eq!(err.kind(), "invalid_nonce");
         assert_eq!(err.to_string(), "invalid nonce: c_nonce has expired");
+    }
+
+    #[test]
+    fn invalid_dpop_proof_has_a_stable_kind_and_message() {
+        let e = IssuanceError::InvalidDpopProof("htu claim does not match".into());
+        // RFC 9449 §5 / §12.2 register `invalid_dpop_proof` as the error code.
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+        assert_eq!(
+            e.to_string(),
+            "invalid dpop proof: htu claim does not match"
+        );
     }
 
     /// GAP-VCI-02: a wallet must be able to distinguish "your

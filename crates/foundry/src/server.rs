@@ -292,6 +292,14 @@ fn wallet_error_response(
         // malformed, or unverifiable Wallet Attestation / Client Attestation
         // PoP JWT, GAP-VCI-14) is `invalid_client`, not `invalid_request`.
         InvalidClient(_) => (StatusCode::BAD_REQUEST, "invalid_client"),
+        // RFC 9449 §5: "If the DPoP proof is invalid, the authorization server
+        // issues an error response per Section 5.2 of [RFC6749] with
+        // invalid_dpop_proof as the value of the error parameter."
+        //
+        // This is the Token Endpoint mapping. The Credential Endpoint is a
+        // *protected resource*, where §7.1 requires 401 + WWW-Authenticate
+        // instead -- see `credential_error_response` (Task 9).
+        InvalidDpopProof(_) => (StatusCode::BAD_REQUEST, "invalid_dpop_proof"),
         StatusListExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
