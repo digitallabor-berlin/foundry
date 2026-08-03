@@ -17,7 +17,7 @@ is computed from named `CheckResult` records.
 - **Depends on:** `foundry-core`, `foundry-sd-jwt-vc`, `foundry-mdoc`. The DCQL
   wire model is foundry-owned (`dcql_model.rs`) — there is no protocol-library
   dependency.
-- **Consumed by:** `crates/foundry` (HTTP handlers), `crates/foundry-wallet`.
+- **Consumed by:** `crates/foundry` (HTTP handlers).
 - **Must never depend on:** `foundry-issuer` or `crates/foundry`.
 
 Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.

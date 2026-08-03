@@ -15,7 +15,6 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 | `foundry-issuer` | `crates/foundry-issuer` | Framework-agnostic OpenID4VCI business logic: metadata builders, transaction lifecycle, CSPRNG status-list index allocation, and offer creation. |
 | `foundry-sd-jwt-vc` | `crates/foundry-sd-jwt-vc` | SD-JWT VC issuing, disclosure calculation, holder binding (KB-JWT), and verification. |
 | `foundry-mdoc` | `crates/foundry-mdoc` | ISO/IEC 18013-5 mdoc / CBOR / COSE IssuerAuth builder and DeviceAuth verifier. |
-| `foundry-wallet` | `crates/foundry-wallet` | Debug EUDI wallet CLI/TUI for exercising and inspecting `foundry`'s OpenID4VCI issuance and OpenID4VP verification flows end-to-end. See [Debug Wallet CLI/TUI](#debug-wallet-clitui-foundry-wallet) below. |
 
 ---
 
@@ -259,8 +258,7 @@ It lets you trigger the two admin flows from a browser instead of hand-rolling
 
 - **Issuance**: enter a `credential_type_id` and `claims` JSON, click
   "Create Offer" — get back the `credential_offer_uri` as copyable text and
-  as a QR code. Scan it with a real wallet (or feed it to `foundry-wallet
-  issue --offer-uri <uri>`) to complete the flow.
+  as a QR code. Scan it with a real wallet to complete the flow.
 - **Verification**: pick a named query (`named_query_ref`) or paste raw
   `dcql_query` JSON, click "Create Verification Request" — get back the
   `openid4vp_uri`/`request_uri` as copyable text and as a QR code. The page
@@ -273,6 +271,18 @@ page; it is remembered in the browser's `localStorage` for convenience,
 since the Admin listener is loopback-only by default. Disable it entirely
 with `server.admin.console_enabled: false` if you don't want it exposed;
 like Swagger UI, this only affects the Admin listener.
+
+The console plus a real wallet app is the supported way to drive an issuance
+or presentation by hand — foundry ships no wallet client of its own. For a
+scripted equivalent that needs no wallet at all, the end-to-end test boots the
+real binary and drives both flows over HTTP:
+
+```bash
+cargo test -p foundry --test e2e_full_flow -- --ignored
+```
+
+See [End-to-End Test](#end-to-end-test-real-subprocess-issue--verify--revoke--re-verify)
+below for what it covers.
 
 ### 4. Key & Certificate Management CLI
 
@@ -464,100 +474,7 @@ thumbprints. This is enforced by tests
 
 ---
 
-## Debug Wallet CLI/TUI (`foundry-wallet`)
-
-`foundry-wallet` is a debug EUDI wallet used to drive and inspect `foundry`'s
-OpenID4VCI issuance and OpenID4VP verification flows end-to-end, either
-interactively (a `ratatui` terminal UI) or headlessly (JSON-in/JSON-out CLI
-subcommands, suitable for scripts and AI agents). v1 scope is SD-JWT VC only
-(mdoc support is future work), with coarse accept/decline consent (no
-fine-grained claim selection yet).
-
-All credentials, keys, certificates, and an append-only event log are stored
-as plain files under a configurable `wallet-data/` directory so they can be
-inspected directly while debugging:
-
-```
-wallet-data/
-├── keys/                          # unbound/global keys
-├── credentials/
-│   └── <credential_id>/
-│       ├── credential.sdjwt       # compact SD-JWT VC
-│       ├── payload.json           # decoded header/payload/disclosed claims
-│       ├── holder_key.pem         # key bound to this credential
-│       └── metadata.json          # vct, issuer, trust_valid, ...
-├── trust/                         # trust anchor certs
-└── log/
-    └── events.jsonl                # append-only log of every step taken
-```
-
-### Configuration
-
-`foundry-wallet` is configured entirely via a YAML file; `--config` is
-required on every invocation (there is no default path):
-
-```bash
-cargo run -p foundry-wallet -- --config wallet.yaml <subcommand>
-```
-
-The config declares the issuer/verifier admin & wallet-facing base URLs,
-named issuance/verification presets (for one-command "create and offer" /
-"create and request" flows against the admin API), and trust validation
-settings — including a toggle to disable X.509 trust validation entirely
-(useful when deliberately debugging an untrusted issuer/verifier; when
-disabled, a warning is logged and the flow proceeds anyway).
-
-Trust validation, when enabled, is deliberately **asymmetric**: a failed
-check on an *issuer's* credential never blocks storage (the credential is
-still saved with `trust_valid: false` recorded, so a broken issuer's output
-can still be inspected), but a failed check on a *verifier's* signed request
-object **does** block the whole flow (there's no artifact worth keeping if
-the request itself can't be trusted).
-
-All HTTP requests and responses — including bearer tokens and full bodies —
-are logged verbatim to `log/events.jsonl` with **no redaction**; this is a
-deliberate debugging feature, not an oversight.
-
-### Interactive TUI
-
-```bash
-cargo run -p foundry-wallet -- --config wallet.yaml tui
-# or simply omit the subcommand:
-cargo run -p foundry-wallet -- --config wallet.yaml
-```
-
-Navigate the main menu (Trigger Issuance / Trigger Verification / Browse
-Credentials / Event Log / Quit) with the arrow keys and Enter; on the
-verification preset screen, `a` accepts and `d` declines the request.
-
-### Headless CLI
-
-Every subcommand prints machine-readable JSON to stdout and exits `0` on
-success, or `{"error": ..., "kind": ...}` to stderr and exits `1` on
-failure:
-
-```bash
-# Issue a credential from a named preset (or --offer-uri <deep-link>)
-cargo run -p foundry-wallet -- --config wallet.yaml issue --preset pid
-
-# Respond to a verification request from a named preset (or --request-uri)
-cargo run -p foundry-wallet -- --config wallet.yaml verify --preset dcql1 --consent accept
-
-# Inspect stored credentials
-cargo run -p foundry-wallet -- --config wallet.yaml credentials list
-cargo run -p foundry-wallet -- --config wallet.yaml credentials show --id <credential_id>
-
-# Tail the event log
-cargo run -p foundry-wallet -- --config wallet.yaml events tail --n 20
-```
-
-See `docs/superpowers/specs/2026-07-24-foundry-wallet-cli-design.md` for the
-full design rationale and `docs/superpowers/plans/2026-07-24-foundry-wallet-cli.md`
-for the implementation plan.
-
----
-
-### End-to-End Test (real subprocess, issue → verify → revoke → re-verify)
+## End-to-End Test (real subprocess, issue → verify → revoke → re-verify)
 
 A full end-to-end test spawns the real `foundry` binary (`quickstart` then
 `serve`, on dynamically-selected free ports) and drives it purely over HTTP:

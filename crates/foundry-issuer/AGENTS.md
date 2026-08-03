@@ -15,9 +15,8 @@ primitives (`foundry-core`).
 ## Position in the Dependency Graph
 
 - **Depends on:** `foundry-core`, `foundry-sd-jwt-vc`, `foundry-mdoc`.
-- **Consumed by:** `crates/foundry` (HTTP handlers), `crates/foundry-wallet`.
-- **Must never depend on:** `foundry-verifier`, `crates/foundry`, or
-  `crates/foundry-wallet`.
+- **Consumed by:** `crates/foundry` (HTTP handlers).
+- **Must never depend on:** `foundry-verifier` or `crates/foundry`.
 
 Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 
@@ -203,7 +202,7 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   `UnknownCredentialConfiguration` -- a Wallet needs to tell "fix your
   request" apart from "re-read metadata". `req.format` is deliberately never
   read: it is not a Credential Request parameter in OpenID4VCI 1.0 §7.2, and
-  every existing caller (including `foundry-wallet`) sends it regardless.
+  every existing caller sends it regardless.
 - **`handle_authorize_request` takes an explicit `issuer_identifier: &str`
   parameter** (inserted after `params`), and both `AuthorizeOutcome::Success`
   and `AuthorizeOutcome::ErrorRedirect` carry the resulting `iss` field --

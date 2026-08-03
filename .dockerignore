@@ -4,7 +4,6 @@ target/
 .superpowers/
 .pi/
 docs/
-wallet-data/
 *.db
 *.db-journal
 *.db-wal
@@ -13,4 +12,3 @@ foundry.db
 keys/
 trust/
 config.yaml
-wallet.yaml

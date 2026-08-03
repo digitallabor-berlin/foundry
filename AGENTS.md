@@ -7,7 +7,7 @@ Guidelines for AI agents working in the `foundry` repository.
 ## 1. What Foundry Is
 
 `foundry` is a Rust Cargo workspace implementing an **EUDI Wallet OpenID4VCI
-Issuer and OpenID4VP Verifier** service, plus a debug wallet client.
+Issuer and OpenID4VP Verifier** service.
 
 For building, running, configuration, CLI usage, Docker, and endpoint examples,
 see **[`README.md`](README.md)** — this file does not restate it.
@@ -31,7 +31,6 @@ see **[`README.md`](README.md)** — this file does not restate it.
 | `crates/foundry-verifier` | OpenID4VP verification engine (request objects, JWE decryption, credential verification, DCQL, status checks) | [`crates/foundry-verifier/AGENTS.md`](crates/foundry-verifier/AGENTS.md) |
 | `crates/foundry` | Binary: CLI, Axum dual-listener HTTP server, OpenAPI, admin auth | [`crates/foundry/AGENTS.md`](crates/foundry/AGENTS.md) |
 | `crates/foundry/tests` | Workspace-level integration tests (which file covers what) | [`crates/foundry/tests/AGENTS.md`](crates/foundry/tests/AGENTS.md) |
-| `crates/foundry-wallet` | Debug EUDI wallet CLI/TUI for exercising issuance + verification end-to-end | [`crates/foundry-wallet/AGENTS.md`](crates/foundry-wallet/AGENTS.md) |
 
 ---
 
@@ -47,8 +46,6 @@ foundry-sd-jwt-vc, foundry-mdoc          (credential formats)
 foundry-issuer, foundry-verifier          (protocol engines)
    ↓
 foundry                                   (binary: CLI + HTTP server)
-   ↓
-foundry-wallet                            (debug client; depends on foundry for E2E subprocess tests)
 ```
 
 **Never introduce an upward or sideways dependency.** In particular
@@ -76,8 +73,6 @@ that point back here.
   `foundry::server` MUST NOT use `.unwrap()`, `.expect()`, `panic!()`, or
   `unreachable!()`. Always return typed `Result`s (`IssuanceError`,
   `VerificationError`, or Axum error responses).
-- Likewise, `foundry-wallet`'s `actions/`, `storage/`, `http/`, and `tui/`
-  modules MUST return `WalletResult`/`WalletError`.
 - Unwraps are permitted **strictly** inside `#[cfg(test)]` code and integration
   test files under `tests/`.
 
@@ -203,9 +198,8 @@ and the crates **below** it in that diagram.
 
 | You touched | Also test |
 |---|---|
-| `foundry-wallet` | — (nothing depends on it) |
-| `foundry` | `foundry-wallet` |
-| `foundry-issuer` / `foundry-verifier` | `foundry` (integration suite); `foundry-wallet` if the flow is exercised E2E |
+| `foundry` | — (nothing depends on it) |
+| `foundry-issuer` / `foundry-verifier` | `foundry` (integration suite) |
 | `foundry-sd-jwt-vc` / `foundry-mdoc` | whichever engine consumes the changed format (`foundry-issuer` and/or `foundry-verifier`), then `foundry` |
 | `foundry-core` | the direct consumers of the changed module only — e.g. `crypto/` → both engines; `storage/` → `foundry`; `status_list` → `foundry-verifier` + `foundry` |
 | `crates/foundry/tests/` | `cargo test -p foundry` (narrow further with `--test <file>` while iterating) |

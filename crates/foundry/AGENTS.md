@@ -18,7 +18,7 @@ restated here.
 
 - **Depends on:** `foundry-core`, `foundry-issuer`, `foundry-verifier`,
   `foundry-sd-jwt-vc`, `foundry-mdoc`, plus `axum`, `tokio`, `clap`, `utoipa`.
-- **Consumed by:** `foundry-wallet` — for real-subprocess E2E tests only.
+- **Consumed by:** nothing — this is the top of the dependency graph.
 - **Must never be depended on** by any engine or format crate.
 
 Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
@@ -104,8 +104,7 @@ No admin route is mounted on the wallet router, and vice versa.
   `authenticated` group's `route_layer` without intending auth.
 - **Every endpoint change must be reflected in the OpenAPI specs** via `utoipa`
   annotations in `openapi.rs` — full rule: root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates are scoped by default:** per task, run `cargo test -p foundry`
-  (add `-p foundry-wallet` when a route or CLI shape it consumes changed), plus
+- **Gates are scoped by default:** per task, run `cargo test -p foundry`, plus
   `cargo clippy -p foundry --all-targets -- -D warnings` and
   `cargo fmt --check`. Save `cargo test --workspace` for the end of a
   development cycle or when unsure of the blast radius — **not** between tasks.

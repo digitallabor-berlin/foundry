@@ -16,7 +16,7 @@ format encoding (`foundry-sd-jwt-vc`, `foundry-mdoc`), and HTTP/Axum code
 `foundry-core` is the **bottom layer** and **MUST NOT depend on any other
 `foundry-*` crate**. It is consumed by every other workspace crate:
 `foundry-sd-jwt-vc`, `foundry-mdoc`, `foundry-issuer`, `foundry-verifier`,
-`crates/foundry`, `foundry-wallet`.
+`crates/foundry`.
 
 If two same-layer crates need shared behaviour, it belongs here. Full layering
 rule: root [AGENTS.md](../../AGENTS.md) §3.
@@ -79,8 +79,8 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Binding Invariants
 
 - **No upward dependencies** — never depend on `foundry-sd-jwt-vc`,
-  `foundry-mdoc`, `foundry-issuer`, `foundry-verifier`, `crates/foundry`, or
-  `foundry-wallet` — full rule: root [AGENTS.md](../../AGENTS.md) §3.
+  `foundry-mdoc`, `foundry-issuer`, `foundry-verifier`, or `crates/foundry`
+  — full rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **Every fallible helper returns a typed `Result`.** Code here runs inside the
   engines' request paths, so a `panic!`/`unwrap` here becomes a 500 there;
   returning `Result` is what lets those crates honour their no-panic rule —

@@ -46,7 +46,6 @@ pass:
 
 | Area | Reason |
 |---|---|
-| `foundry-wallet` | Debug client, not part of the issuer/verifier surface |
 | SD-JWT VC format internals (disclosure encoding, KB-JWT structure) | Defining spec (IETF SD-JWT VC) not vendored under §4.4 |
 | mdoc format internals (CBOR structure, MSO layout) | Defining spec (ISO/IEC 18013-5) not vendored and not vendorable — paid standard |
 | Token Status List bitstring encoding | Defining spec not vendored |
