@@ -76,7 +76,7 @@ fn verifies_selective_claims() {
     let now = now_secs();
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
-    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
+    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce", None).unwrap();
     let res = verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap();
     assert_eq!(res.claims["name"], "Bob");
 }
@@ -92,7 +92,7 @@ fn rejects_expired_sd_jwt() {
     // Credential expired 1800s ago; the issuer cert itself is still valid at `now`.
     let claims = make_claims(h_pub, (now - 3600) as i64, (now - 1800) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
-    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
+    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce", None).unwrap();
     let err =
         verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::Expired));
@@ -110,7 +110,7 @@ fn rejects_untrusted_anchor() {
     let now = now_secs();
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
-    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
+    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce", None).unwrap();
     let err =
         verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::SignatureVerification(_)));
@@ -127,7 +127,7 @@ fn rejects_kb_audience_mismatch() {
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
     // KB-JWT bound to the wrong audience.
-    let pres = attach_kb_jwt(issuer_pres, &h_signer, "WRONG_AUD", "nonce").unwrap();
+    let pres = attach_kb_jwt(issuer_pres, &h_signer, "WRONG_AUD", "nonce", None).unwrap();
     let err =
         verify_sd_jwt_vc(&pres, &trust_store, &["aud".to_string()], "nonce", now).unwrap_err();
     assert!(matches!(err, FormatError::KeyBinding(_)));
@@ -143,7 +143,7 @@ fn rejects_tampered_disclosure() {
     let now = now_secs();
     let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
     let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
-    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce").unwrap();
+    let pres = attach_kb_jwt(issuer_pres, &h_signer, "aud", "nonce", None).unwrap();
 
     // Flip a character in the first disclosure segment. The KB-JWT's sd_hash was
     // computed over the original presentation, so tampering yields a KeyBinding failure.

@@ -957,7 +957,7 @@ fn build_presentation(
     )
     .unwrap();
 
-    foundry_sd_jwt_vc::builder::attach_kb_jwt(issuer_pres, &holder_signer, client_id, nonce)
+    foundry_sd_jwt_vc::builder::attach_kb_jwt(issuer_pres, &holder_signer, client_id, nonce, None)
         .unwrap()
 }
 

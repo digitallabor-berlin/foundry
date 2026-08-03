@@ -289,7 +289,7 @@ async fn full_verification_flow_end_to_end() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
@@ -439,7 +439,7 @@ async fn resubmitting_a_verification_response_is_rejected() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     // 5. Encrypt presentation into JWE
     let jwe_str = encrypt_compact(
@@ -663,7 +663,7 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
     .unwrap();
 
     let sd_jwt_vc_presentation =
-        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
@@ -785,7 +785,8 @@ async fn dcql_vct_mismatch_is_rejected() {
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
@@ -907,7 +908,8 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
         &ephem_public_jwk,
@@ -1224,7 +1226,8 @@ async fn pending_verification_with_vp_token(
         Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
     )
     .unwrap();
-    let presentation = attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce).unwrap();
+    let presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
 
     let jwe_str = encrypt_compact(
         &serde_json::json!({ "vp_token": make_vp_token(presentation) }),

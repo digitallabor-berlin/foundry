@@ -831,7 +831,7 @@ mod tests {
 
         let client_id = expected_client_id(&config);
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &tx.nonce).unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &tx.nonce, None).unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -901,6 +901,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -994,6 +995,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -1069,6 +1071,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -1277,7 +1280,7 @@ mod tests {
         let client_id = expected_client_id(&config);
         // Attach KB-JWT with wrong nonce
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, "wrong-nonce").unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, "wrong-nonce", None).unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -1340,6 +1343,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
 
@@ -1415,6 +1419,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx1.nonce,
+            None,
         )
         .unwrap();
 
@@ -1509,6 +1514,7 @@ mod tests {
             &holder_signer,
             &expected_client_id(&config),
             &tx.nonce,
+            None,
         )
         .unwrap();
         let jwe_str = encrypt_compact(
@@ -1842,8 +1848,14 @@ mod tests {
         // prefixed with `origin:`, not the Client Identifier -- exactly what a
         // conformant wallet would send back for this unsigned dc_api request.
         let origin_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            origin_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -1908,8 +1920,14 @@ mod tests {
         // test_config()'s public_base_url is "https://localhost:8443" -- the
         // fallback audience the unconfigured branch derives.
         let fallback_audience = "origin:https://localhost:8443";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, fallback_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            fallback_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -1971,8 +1989,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let no_slash_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, no_slash_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            no_slash_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -2030,8 +2054,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let origin_audience = "origin:https://verifier-website.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, origin_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            origin_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,
@@ -2088,8 +2118,14 @@ mod tests {
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
         let unrelated_audience = "origin:https://some-other-site.example";
-        let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, unrelated_audience, &tx.nonce).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            unrelated_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
             &tx.ephem_public_jwk,

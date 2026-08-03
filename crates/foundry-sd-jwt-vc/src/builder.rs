@@ -102,17 +102,37 @@ pub fn build_sd_jwt_vc(
     Ok(output)
 }
 
+/// The `transaction_data_hashes` binding a Wallet places in its KB-JWT.
+///
+/// OpenID4VP 1.0, Format / IETF SD-JWT VC / Transaction Data (L3144): each element
+/// is a base64url-encoded hash computed over the string received in the
+/// `transaction_data` request parameter. L3145: `transaction_data_hashes_alg` is
+/// REQUIRED in the response when the request carried it.
+pub struct TransactionDataBinding<'a> {
+    pub hashes: &'a [String],
+    pub alg: Option<&'a str>,
+}
+
 /// Build a holder Key-Binding JWT (typ `kb+jwt`) over the presentation's `sd_hash`.
 pub fn build_kb_jwt(
     holder_signer: &dyn Signer,
     audience: &str,
     nonce: &str,
     sd_hash: &str,
+    transaction_data_hashes: Option<TransactionDataBinding<'_>>,
 ) -> Result<String, FormatError> {
     let alg = holder_signer.algorithm().as_str();
     let header = json!({ "alg": alg, "typ": "kb+jwt" });
     let iat = time::OffsetDateTime::now_utc().unix_timestamp();
-    let payload = json!({ "aud": audience, "nonce": nonce, "iat": iat, "sd_hash": sd_hash });
+    let mut payload = json!({ "aud": audience, "nonce": nonce, "iat": iat, "sd_hash": sd_hash });
+
+    // OpenID4VP L3144/L3145.
+    if let Some(binding) = transaction_data_hashes {
+        payload["transaction_data_hashes"] = json!(binding.hashes);
+        if let Some(alg) = binding.alg {
+            payload["transaction_data_hashes_alg"] = json!(alg);
+        }
+    }
 
     let header_b64 = b64url_json(&header)?;
     let payload_b64 = b64url_json(&payload)?;
@@ -129,11 +149,18 @@ pub fn attach_kb_jwt(
     holder_signer: &dyn Signer,
     audience: &str,
     nonce: &str,
+    transaction_data_hashes: Option<TransactionDataBinding<'_>>,
 ) -> Result<String, FormatError> {
     let mut hasher = Sha256::new();
     hasher.update(issuer_presentation.as_bytes());
     let sd_hash = B64URL.encode(hasher.finalize());
-    let kb = build_kb_jwt(holder_signer, audience, nonce, &sd_hash)?;
+    let kb = build_kb_jwt(
+        holder_signer,
+        audience,
+        nonce,
+        &sd_hash,
+        transaction_data_hashes,
+    )?;
     Ok(format!("{issuer_presentation}{kb}"))
 }
 
@@ -184,5 +211,82 @@ mod tests {
         let b = generate_salt();
         assert_ne!(a, b);
         assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn attach_kb_jwt_emits_transaction_data_hashes_when_asked() {
+        // OpenID4VP L3144: a non-empty array of base64url-encoded hashes.
+        // L3145: transaction_data_hashes_alg is REQUIRED in the response when the
+        // request carried it.
+        let signer = test_signer();
+        let issuer_pres = "eyJhbGciOiJFUzI1NiJ9.e30.sig~".to_string();
+        let hashes = vec!["aGFzaDE".to_string(), "aGFzaDI".to_string()];
+
+        let out = attach_kb_jwt(
+            issuer_pres.clone(),
+            &signer,
+            "x509_hash:abc",
+            "nonce-1",
+            Some(TransactionDataBinding {
+                hashes: &hashes,
+                alg: Some("sha-256"),
+            }),
+        )
+        .unwrap();
+
+        let kb = out.strip_prefix(&issuer_pres).expect("KB-JWT is appended");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(kb.split('.').nth(1).unwrap()).unwrap()).unwrap();
+
+        assert_eq!(
+            payload["transaction_data_hashes"],
+            serde_json::json!(hashes)
+        );
+        assert_eq!(payload["transaction_data_hashes_alg"], "sha-256");
+    }
+
+    #[test]
+    fn attach_kb_jwt_omits_the_claims_when_not_asked() {
+        let signer = test_signer();
+        let issuer_pres = "eyJhbGciOiJFUzI1NiJ9.e30.sig~".to_string();
+
+        let out = attach_kb_jwt(issuer_pres.clone(), &signer, "aud", "nonce", None).unwrap();
+
+        let kb = out.strip_prefix(&issuer_pres).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(kb.split('.').nth(1).unwrap()).unwrap()).unwrap();
+
+        assert!(payload.get("transaction_data_hashes").is_none());
+        assert!(payload.get("transaction_data_hashes_alg").is_none());
+    }
+
+    #[test]
+    fn attach_kb_jwt_omits_the_alg_when_the_request_did_not_carry_one() {
+        // L3145 makes the response field REQUIRED only when the request had it.
+        let signer = test_signer();
+        let issuer_pres = "eyJhbGciOiJFUzI1NiJ9.e30.sig~".to_string();
+        let hashes = vec!["aGFzaDE".to_string()];
+
+        let out = attach_kb_jwt(
+            issuer_pres.clone(),
+            &signer,
+            "aud",
+            "nonce",
+            Some(TransactionDataBinding {
+                hashes: &hashes,
+                alg: None,
+            }),
+        )
+        .unwrap();
+
+        let kb = out.strip_prefix(&issuer_pres).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(kb.split('.').nth(1).unwrap()).unwrap()).unwrap();
+
+        assert_eq!(
+            payload["transaction_data_hashes"],
+            serde_json::json!(hashes)
+        );
+        assert!(payload.get("transaction_data_hashes_alg").is_none());
     }
 }

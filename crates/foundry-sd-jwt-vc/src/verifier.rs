@@ -415,7 +415,8 @@ mod tests {
 
         let issuer_pres =
             build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
-        let presentation = attach_kb_jwt(issuer_pres, &holder_signer, "audience", "nonce").unwrap();
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, "audience", "nonce", None).unwrap();
 
         // Cert validity is stamped from the system clock by pki::issue_leaf, so
         // verify against the current time (the issuer iat/exp window spans it).
@@ -453,7 +454,8 @@ mod tests {
         };
         let issuer_pres =
             build_sd_jwt_vc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
-        let presentation = attach_kb_jwt(issuer_pres, &holder_signer, "audience", "WRONG").unwrap();
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, "audience", "WRONG", None).unwrap();
 
         let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
         let err = verify_sd_jwt_vc(
