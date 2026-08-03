@@ -185,9 +185,36 @@ hash of the DER-encoded X.509 certificate".
    `request_uri`) uses the same prefix, so both transports agree.
 4. Absent `x5c` → `VerificationError::Crypto` (Decision 3).
 
+**The response side must change with it — this is the load-bearing coupling in
+this fix.** `do_verify_vp_response` (`crates/foundry-verifier/src/verify.rs`)
+**independently recomputes** `client_id = format!("x509_san_dns:{host}")` and
+uses it as the expected KB-JWT audience for every transport other than `dc_api`
+(the `dc_api` branch uses `origin:`-prefixed values and is unaffected). A wallet
+binds its KB-JWT `aud` to the Client Identifier it *received*, so changing only
+`request.rs` would break **every** redirect-transport verification: the wallet
+would present `aud: "x509_hash:<hash>"` against an expectation of
+`x509_san_dns:<host>`, failing with "KB-JWT audience mismatch"
+(`foundry-sd-jwt-vc/src/verifier.rs`).
+
+Both sites MUST derive the identifier from the **same** helper. Neither may
+rebuild the string inline — that duplication is what allowed the two sides to be
+changed independently in the first place. The mdoc `SessionTranscript` path is
+also affected wherever it consumes the Client Identifier; check it rather than
+assuming.
+
+**Test-fixture consequence.** Roughly nine call sites in `verify.rs`'s inline
+test module pass the literal `"x509_san_dns:localhost"` as the `attach_kb_jwt`
+audience, and `crates/foundry-verifier/tests/conformance_vp.rs` does the same.
+These must compute the expected value from the test leaf certificate via the new
+helper — **not** hardcode a base64url literal, which would silently diverge if
+the fixture certificate is ever regenerated.
+
 **Changes in `crates/foundry-core/src/config/`:** delete
 `VerifierConfig.client_id_scheme` (Decision 2), and remove it from `config.yaml`,
 from the `commands.rs` init template, and from every test fixture that sets it.
+`x509_san_dns` appears in 24 files across the workspace; the deletion is
+mechanical but wide, and every `VerifierConfig { .. }` literal must be updated or
+the crate will not compile.
 
 **Tests.**
 
@@ -395,6 +422,13 @@ down for the rows that move out of it.
 - **The prefix swap is wire-visible.** Any wallet or test fixture outside this
   repository pinned to `x509_san_dns` will stop matching. This is intended (HAIP
   mandates it) but is the one change here an integrator would notice.
+- **The prefix swap is a two-sided change and the sides are in different
+  functions.** `build_signed_request_object` emits the identifier and
+  `do_verify_vp_response` recomputes it as the expected KB-JWT audience. Changing
+  one without the other produces a build that issues requests no wallet can
+  satisfy — and the failure surfaces as a *policy* verdict (`verified: false`,
+  HTTP 200), not a compile error or a 400, so it is easy to miss. Both sides land
+  in the same task for exactly this reason.
 - **Deleting `client_id_scheme` is a documented-key removal.** Safe at load time
   (no `deny_unknown_fields`), but an operator reading a diff of `config.yaml`
   should find it in the change record.
