@@ -60,6 +60,51 @@ fn no_dpop<'a>() -> DpopPresentation<'a> {
     }
 }
 
+/// A `DPoP` header present at `/token`, carrying `proof` when given.
+fn token_dpop_presentation(proof: Option<&str>) -> DpopPresentation<'_> {
+    DpopPresentation {
+        scheme_is_dpop: false,
+        proof_jwt: proof,
+        htm: "POST",
+        htu: "https://issuer.example.com/token",
+        ath: None,
+    }
+}
+
+/// A wallet's DPoP keypair plus a valid proof for `POST /token`.
+/// Returns `(proof_jwt, jkt)`.
+fn dpop_proof_for_token_endpoint(jti: &str, now: i64) -> (String, String) {
+    let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let public = kp.to_jwk_public_key();
+
+    let mut header = JwsHeader::new();
+    header.set_token_type("dpop+jwt");
+    header.set_jwk(public);
+
+    let mut payload = JwtPayload::new();
+    payload.set_claim("htm", Some("POST".into())).unwrap();
+    payload
+        .set_claim("htu", Some("https://issuer.example.com/token".into()))
+        .unwrap();
+    payload.set_claim("iat", Some(now.into())).unwrap();
+    payload.set_claim("jti", Some(jti.into())).unwrap();
+
+    let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+    let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+    let jkt = foundry_issuer::verify_dpop_proof(
+        &proof,
+        "POST",
+        "https://issuer.example.com/token",
+        None,
+        now,
+        300,
+    )
+    .unwrap()
+    .jkt;
+    (proof, jkt)
+}
+
 /// A Bearer-scheme /credential presentation -- the pre-DPoP path, for the many
 /// call sites here that are not about DPoP at all.
 fn bearer_presentation<'a>() -> DpopPresentation<'a> {
@@ -990,11 +1035,16 @@ async fn haip_0025_credential_offer_uri_format_is_transport_agnostic() {
 // HAIP-0009 — HAIP OpenID4VCI (L163): MUST support DPoP per RFC9449 for
 // sender-constrained access tokens.
 // ---------------------------------------------------------------------------
+// The assertion is "a DPoP proof yields a DPoP-bound token", not "every token
+// is DPoP" -- RFC 9449 §5 explicitly permits `Bearer` when no proof is
+// presented, and an AS "MAY elect to issue access tokens that are not DPoP
+// bound". This test therefore exercises both halves.
 #[tokio::test]
-#[ignore = "GAP-HAIP-03: HAIP OpenID4VCI (L163) — MUST support DPoP per RFC9449 for sender-constrained access tokens"]
 async fn haip_0009_token_response_uses_dpop_token_type() {
     let cfg = test_config();
     let storage = test_storage().await;
+
+    // Half 1: a request with a valid DPoP proof gets a bound token.
     let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
         .await
         .unwrap();
@@ -1014,9 +1064,49 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         client_id: None,
         code_verifier: None,
     };
+
+    let (proof, jkt) = dpop_proof_for_token_endpoint("haip-0009", 1_700_000_010);
     let token = handle_token_request(
         &storage,
         &token_req,
+        &disabled_attestation(),
+        None,
+        None,
+        &dpop_optional(),
+        &token_dpop_presentation(Some(&proof)),
+        "https://issuer.example.com",
+        1_700_000_010,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        token.token_type, "DPoP",
+        "RFC 9449 §5: a token bound to a DPoP key MUST carry token_type DPoP"
+    );
+
+    // Half 2: without a proof, Bearer remains correct (§5).
+    let resp2 = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+        .await
+        .unwrap();
+    let code2 = resp2
+        .credential_offer
+        .grants
+        .pre_authorized_code
+        .unwrap()
+        .pre_authorized_code;
+    let token_req2 = TokenRequest {
+        grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+        pre_authorized_code: Some(code2),
+        tx_code: None,
+        code: None,
+        redirect_uri: None,
+        client_id: None,
+        code_verifier: None,
+    };
+    let bearer = handle_token_request(
+        &storage,
+        &token_req2,
         &disabled_attestation(),
         None,
         None,
@@ -1027,11 +1117,17 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
     )
     .await
     .unwrap();
-
     assert_eq!(
-        token.token_type, "DPoP",
-        "sender-constrained access tokens use token_type=DPoP, not Bearer"
+        bearer.token_type, "Bearer",
+        "RFC 9449 §5: an AS MAY issue non-bound tokens, signalled as Bearer"
     );
+
+    // The bound token records its key (§6) -- the property /credential checks.
+    let tx = foundry_issuer::load_transaction_by_access_token(&storage, &token.access_token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tx.dpop_jkt, Some(jkt));
 }
 
 // ---------------------------------------------------------------------------

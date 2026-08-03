@@ -28,6 +28,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()` |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
 | `token.rs` | `POST /token` logic (pre-authorized-code and authorization-code grants → access token) |
+| `dpop.rs` | RFC 9449 DPoP: proof JWT validation (§4.3 checks 2-9, 11-12), `htu` normalisation, RFC 7638 `jkt` computation, and `jti` replay claiming (§11.1) under KV namespace `dpop_jti` |
 | `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceSecret` / `NonceResponse` |
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
 | `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
@@ -45,9 +46,9 @@ Entry point → the endpoint that drives it (routes defined in
 | Entry point | Endpoint | Listener |
 |---|---|---|
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
-| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
+| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
-| `handle_credential_request(CredentialRequest) -> CredentialResponse` | `POST /credential` | wallet-facing |
+| `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix) -> CredentialResponse` | `POST /credential` | wallet-facing |
 | `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
 | `build_authorization_server_metadata(&Config) -> AuthorizationServerMetadata` | `GET /.well-known/oauth-authorization-server` | wallet-facing |
 
@@ -62,10 +63,12 @@ Other public surface:
 - **Proof:** `verify_holder_proof`, `ProofObject`, `VerifiedProof`.
 - **Metadata:** `CredentialConfigurationSupported`, `ProofTypeSupported`.
 - **Status:** `allocate_status_index(&dyn Storage, credential_type_id, list_size) -> Result<u64, IssuanceError>`.
+- **DPoP (RFC 9449):** `verify_dpop_proof`, `VerifiedDpopProof`, `DpopPresentation`,
+  `access_token_hash`.
 - **Errors:** `IssuanceError` — `InvalidRequest`, `InvalidGrant`, `InvalidProof`,
-  `UnknownCredentialType`, `ClaimValidation`, `StatusListExhausted`, plus
-  transparent wraps of `StorageError` / `CryptoError` / `TrustError`, and
-  `Serialization` / `Deserialization`.
+  `UnknownCredentialType`, `ClaimValidation`, `StatusListExhausted`,
+  `InvalidDpopProof`, plus transparent wraps of `StorageError` / `CryptoError` /
+  `TrustError`, and `Serialization` / `Deserialization`.
 
 ## Binding Invariants
 
@@ -211,3 +214,24 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   renders as a JSON error body, not a redirect, so RFC 9207 §2 never reaches
   it. `AuthorizationServerMetadata.authorization_response_iss_parameter_supported`
   is hardcoded `true` per RFC 9207 §2.3.
+- **`issuer.dpop.mode: Disabled` ignores the `DPoP` header; it does not reject
+  it.** RFC 9449 §10.1 encourages clients that attach `DPoP` to every AS call,
+  and §5 provides `token_type: Bearer` precisely to signal non-binding.
+  Rejecting would hard-fail a conformant wallet.
+- **`IssuanceTransaction.dpop_jkt` is written at two stages and means the same
+  thing at both** — "the key this flow is pinned to". `/authorize` writes the
+  §10 request parameter; `/token` overwrites it with the verified proof's
+  thumbprint (having first proved them equal). Not two overloaded uses of one
+  field.
+- **`/credential` never consults `issuer.dpop.mode`.** The binding is a
+  property of the already-issued token, so flipping config to `Disabled` must
+  not retroactively let bound tokens be presented as Bearer. `tx.dpop_jkt` is
+  the only authority.
+- **An unbound token presented with the `DPoP` scheme is rejected — a
+  deliberate deviation.** RFC 9449 leaves the case undefined; accepting it
+  would let a wallet believe it has sender-constraining when the token has no
+  bound key. Fail-closed, approved in the design doc's §5.3.
+- **Two of §4.3's checks are not in `dpop.rs` and that is correct.** Check 1
+  (single `DPoP` header) needs the header map and lives in `server.rs`'s
+  `exactly_one_header`; check 10 (`nonce`) is vacuous because no §8/§9 nonce
+  is ever supplied, which also satisfies §11.3 by construction.

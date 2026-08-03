@@ -107,6 +107,7 @@ transitions — MUST align with them.
 | [`openid-4-verifiable-presentations-1_0.md`](docs/specs/openid-4-verifiable-presentations-1_0.md) | OpenID4VP — `foundry-verifier` and the verifier HTTP routes (authorization/request objects, `vp_token`, response modes, JARM/JWE, DCQL, client ID schemes) |
 | [`openid4vc-high-assurance-interoperability-profile-1_0.md`](docs/specs/openid4vc-high-assurance-interoperability-profile-1_0.md) | HAIP — the profile that narrows both of the above (mandated SD-JWT VC / mdoc formats, required algorithms, key binding, trust mechanisms). Where HAIP is stricter, **HAIP wins.** |
 | [`draft-ietf-oauth-attestation-based-client-auth-07.txt`](docs/specs/draft-ietf-oauth-attestation-based-client-auth-07.txt) | ABCA — the Client Attestation JWT and Client Attestation PoP JWT formats OpenID4VCI's Wallet Attestation section (Appendix E, L2564/L2600) incorporates by reference; `foundry-issuer`'s `attestation.rs` and the `/token` route. Where OpenID4VCI defers to ABCA, ABCA governs. Kept as `.txt`, not `.md` — verbatim fidelity to the IETF text is the point of a pinned draft. |
+| [`rfc9449-dpop.txt`](docs/specs/rfc9449-dpop.txt) | DPoP — the sender-constrained access token mechanism HAIP OpenID4VCI L163 mandates by reference (`MUST support DPoP as defined in [@!RFC9449]`); `foundry-issuer`'s `dpop.rs`, the `/token` route and the `/credential` route. Where HAIP defers to RFC 9449, RFC 9449 governs. Kept as `.txt`, not `.md` — verbatim fidelity to the RFC text is the point of a pinned spec. |
 
 Rules:
 
