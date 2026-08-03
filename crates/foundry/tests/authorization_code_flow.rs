@@ -1,6 +1,6 @@
 //! End-to-end HTTP coverage for the OAuth 2.0 Authorization Code + PKCE
 //! grant bound to admin-precreated offers (Task 6 of
-//! docs/superlight/plans/2026-07-28-authz-code-flow-plan.md).
+//! docs/superpowers/plans/2026-07-28-authz-code-flow-plan.md).
 //!
 //! Exercises the full round trip through the real axum routers (same
 //! test-harness pattern as wallet_issuance.rs/wallet_metadata.rs):

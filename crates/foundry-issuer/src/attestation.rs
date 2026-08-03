@@ -263,7 +263,7 @@ const POP_CLOCK_SKEW_SECS: i64 = 60;
 /// Wallet Attestation it accompanies (GAP-VCI-14).
 ///
 /// Every check below cites its ABCA clause; see
-/// docs/superlight/specs/2026-08-01-gap-vci-14-client-attestation-pop-spec.md
+/// docs/superpowers/specs/2026-08-01-gap-vci-14-client-attestation-pop-spec.md
 /// for the full table this mirrors. `skip_all` is mandatory: the argument is
 /// the PoP JWT itself.
 ///
