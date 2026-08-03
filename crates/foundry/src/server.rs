@@ -801,8 +801,17 @@ fn verifier_admin_error_response(
     )
 }
 
+/// Maps a `VerificationError` to the OpenID4VP-response HTTP status/error-code
+/// classification (root AGENTS.md §4.3). This classification is a property of
+/// the response itself, not of which route received it, so it is identical
+/// whether the encrypted JWE arrived from a real wallet
+/// (`POST /vp/response/:id`) or was relayed by the admin console after a
+/// browser-side Digital Credentials API call
+/// (`POST /admin/verification/requests/:id/dc-api-response`). Only the
+/// `surface` log label differs between the two callers (root AGENTS.md §4.5).
 fn verifier_wallet_error_response(
     e: &foundry_verifier::VerificationError,
+    surface: &'static str,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use foundry_verifier::VerificationError::*;
     let (status, code) = match e {
@@ -812,7 +821,7 @@ fn verifier_wallet_error_response(
         StatusUnavailable(_) => (StatusCode::BAD_GATEWAY, "status_unavailable"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
-    log_typed_error("wallet", e.kind(), e, status);
+    log_typed_error(surface, e.kind(), e, status);
     (
         status,
         Json(serde_json::json!({
@@ -890,6 +899,85 @@ async fn get_request_object_handler(
     ))
 }
 
+/// Shared core of "submit a wallet's encrypted VP Token response for
+/// verification": load the transaction, reject if not `Pending`, call
+/// `verify_vp_response`, persist the outcome, and map any error through the
+/// same classification `post_response_handler` has always used. Used by both
+/// the real wallet-facing route (`surface = "wallet"`) and the admin-facing
+/// Digital Credentials API route (`surface = "admin"`) — see
+/// `verifier_wallet_error_response` for why the status/code mapping itself
+/// must not vary between the two callers.
+async fn submit_vp_response(
+    state: &AppState,
+    id: &str,
+    encrypted_jwe_str: &str,
+    surface: &'static str,
+) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let tx_opt = foundry_verifier::load_verification_transaction(state.storage.as_ref(), id)
+        .await
+        .map_err(|e| verifier_wallet_error_response(&e, surface))?;
+    let mut tx = match tx_opt {
+        Some(tx) => tx,
+        None => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "not_found",
+                    "error_description": format!("verification transaction '{id}' not found")
+                })),
+            ))
+        }
+    };
+
+    if tx.state != foundry_verifier::VerificationState::Pending {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_request",
+                "error_description": "verification response already submitted"
+            })),
+        ));
+    }
+
+    let resolver = match foundry_verifier::HttpStatusListResolver::new() {
+        Ok(r) => r,
+        Err(e) => return Err(verifier_wallet_error_response(&e, surface)),
+    };
+    let verify_res =
+        foundry_verifier::verify_vp_response(&state.config, &mut tx, encrypted_jwe_str, &resolver)
+            .await;
+
+    // Losing this write is its own defect: it makes the admin API and the console
+    // disagree with what actually happened. It must not change the response the
+    // caller receives, so it is logged rather than propagated.
+    if let Err(e) = foundry_verifier::save_verification_transaction(
+        state.storage.as_ref(),
+        &tx,
+        state.config.storage.transaction_ttl_secs,
+        now,
+    )
+    .await
+    {
+        tracing::error!(
+            op = "save_verification_transaction",
+            tx_id = %tx.id,
+            error.kind = e.kind(),
+            error.detail = %foundry_core::obs::truncate(&e.to_string(), DETAIL_MAX),
+            "failed to persist the verification verdict; the admin API will not \
+             reflect this transaction's outcome"
+        );
+    }
+
+    match verify_res {
+        Ok(result) => Ok(Json(result)),
+        Err(e) => Err(verifier_wallet_error_response(&e, surface)),
+    }
+}
+
 /// The OpenID4VP `direct_post.jwt` authorization response body.
 ///
 /// The verifier advertises `response_mode: direct_post.jwt`, so per OpenID4VP
@@ -940,71 +1028,8 @@ async fn post_response_handler(
             })),
         )
     })?;
-    let encrypted_jwe_str = form.response;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let tx_opt = foundry_verifier::load_verification_transaction(state.storage.as_ref(), &id)
-        .await
-        .map_err(|e| verifier_wallet_error_response(&e))?;
-    let mut tx = match tx_opt {
-        Some(tx) => tx,
-        None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "error": "not_found",
-                    "error_description": format!("verification transaction '{id}' not found")
-                })),
-            ))
-        }
-    };
-
-    if tx.state != foundry_verifier::VerificationState::Pending {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_request",
-                "error_description": "verification response already submitted"
-            })),
-        ));
-    }
-
-    let resolver = match foundry_verifier::HttpStatusListResolver::new() {
-        Ok(r) => r,
-        Err(e) => return Err(verifier_wallet_error_response(&e)),
-    };
-    let verify_res =
-        foundry_verifier::verify_vp_response(&state.config, &mut tx, &encrypted_jwe_str, &resolver)
-            .await;
-
-    // Losing this write is its own defect: it makes the admin API and the console
-    // disagree with what actually happened. It must not change the response the
-    // wallet receives, so it is logged rather than propagated.
-    if let Err(e) = foundry_verifier::save_verification_transaction(
-        state.storage.as_ref(),
-        &tx,
-        state.config.storage.transaction_ttl_secs,
-        now,
-    )
-    .await
-    {
-        tracing::error!(
-            op = "save_verification_transaction",
-            tx_id = %tx.id,
-            error.kind = e.kind(),
-            error.detail = %foundry_core::obs::truncate(&e.to_string(), DETAIL_MAX),
-            "failed to persist the verification verdict; the admin API will not \
-             reflect this transaction's outcome"
-        );
-    }
-
-    match verify_res {
-        Ok(result) => Ok(Json(result)),
-        Err(e) => Err(verifier_wallet_error_response(&e)),
-    }
+    submit_vp_response(&state, &id, &form.response, "wallet").await
 }
 
 #[utoipa::path(
@@ -1198,7 +1223,10 @@ mod tests {
         assert_eq!(events.len(), 1, "admin verification mapper: {events:?}");
 
         let events = captured(|| {
-            let _ = verifier_wallet_error_response(&VerificationError::Decryption("nope".into()));
+            let _ = verifier_wallet_error_response(
+                &VerificationError::Decryption("nope".into()),
+                "wallet",
+            );
         });
         assert_eq!(events.len(), 1, "wallet verification mapper: {events:?}");
     }
@@ -1206,9 +1234,10 @@ mod tests {
     #[test]
     fn mapper_records_kind_detail_and_status() {
         let events = captured(|| {
-            let _ = verifier_wallet_error_response(&VerificationError::Decryption(
-                "cek unwrap failed".into(),
-            ));
+            let _ = verifier_wallet_error_response(
+                &VerificationError::Decryption("cek unwrap failed".into()),
+                "wallet",
+            );
         });
         let e = &events[0];
         assert_eq!(
@@ -1230,7 +1259,10 @@ mod tests {
     fn level_follows_status_class() {
         // 400 -> WARN
         let events = captured(|| {
-            let _ = verifier_wallet_error_response(&VerificationError::Decryption("x".into()));
+            let _ = verifier_wallet_error_response(
+                &VerificationError::Decryption("x".into()),
+                "wallet",
+            );
         });
         assert_eq!(events[0].level, Level::WARN);
 
@@ -1242,8 +1274,10 @@ mod tests {
 
         // 502 -> ERROR: an unreachable status list needs operator attention.
         let events = captured(|| {
-            let _ =
-                verifier_wallet_error_response(&VerificationError::StatusUnavailable("dns".into()));
+            let _ = verifier_wallet_error_response(
+                &VerificationError::StatusUnavailable("dns".into()),
+                "wallet",
+            );
         });
         assert_eq!(events[0].level, Level::ERROR);
         assert_eq!(
@@ -1287,7 +1321,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
-            verifier_wallet_error_response(&VerificationError::Decryption("x".into())).0,
+            verifier_wallet_error_response(&VerificationError::Decryption("x".into()), "wallet").0,
             StatusCode::BAD_REQUEST
         );
         // GAP-VCI-14 / RFC 6749 sect-5.2: a failed client-authentication mechanism
@@ -1297,7 +1331,11 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            verifier_wallet_error_response(&VerificationError::StatusUnavailable("x".into())).0,
+            verifier_wallet_error_response(
+                &VerificationError::StatusUnavailable("x".into()),
+                "wallet"
+            )
+            .0,
             StatusCode::BAD_GATEWAY
         );
     }
@@ -1306,7 +1344,8 @@ mod tests {
     fn detail_is_length_capped() {
         let long = "z".repeat(DETAIL_MAX * 3);
         let events = captured(|| {
-            let _ = verifier_wallet_error_response(&VerificationError::Failed(long.clone()));
+            let _ =
+                verifier_wallet_error_response(&VerificationError::Failed(long.clone()), "wallet");
         });
         let detail = events[0]
             .fields
