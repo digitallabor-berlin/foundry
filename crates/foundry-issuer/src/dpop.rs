@@ -18,6 +18,7 @@ use crate::error::IssuanceError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::obs::thumbprint_bytes;
+use foundry_core::storage::Storage;
 use josekit::jwk::Jwk;
 use josekit::jws::ES256;
 use sha2::{Digest, Sha256};
@@ -299,6 +300,75 @@ pub fn verify_dpop_proof(
 /// value a proof presented alongside `access_token` must carry.
 pub fn access_token_hash(access_token: &str) -> String {
     B64URL.encode(Sha256::digest(access_token.as_bytes()))
+}
+
+/// KV namespace for RFC 9449 §11.1 DPoP proof `jti` replay claims.
+// TODO(Task 7/9): remove this allow once /token and /credential call
+// claim_dpop_jti -- this constant and the function below are exercised only
+// by this module's own tests until those call sites land.
+#[allow(dead_code)]
+pub(crate) const DPOP_JTI_NAMESPACE: &str = "dpop_jti";
+
+/// RFC 9449 §11.1: claim a proof's `jti` for its acceptance window, rejecting
+/// a replay.
+///
+/// The key is `base64url(SHA-256(jkt ‖ 0x00 ‖ htu ‖ 0x00 ‖ jti))`. Three
+/// deliberate properties:
+///
+/// - **Scoped per target URI**, because §11.1 scopes single-use "in the context
+///   of the target URI" — a proof for `/token` and one for `/credential` are
+///   distinct claims. The `htu` used is the *normalised* one from
+///   `VerifiedDpopProof`, which is why this function takes the whole struct
+///   rather than loose strings: a caller cannot key the store on a URI other
+///   than the one `verify_dpop_proof` actually compared.
+/// - **Scoped per `jkt`**, so one wallet cannot pre-claim `jti` values and deny
+///   service to another. Same reasoning as `attestation.rs`'s `claim_pop_jti`.
+/// - **Hashed**, because §11.1 says to "store only a hash thereof" to bound
+///   memory against exhaustion attacks, and because it keeps the raw,
+///   attacker-controlled `jti` out of the SQL key and out of anything derived
+///   from it.
+///
+/// Uses `insert_kv_if_absent`, not get-then-put: the atomicity is the entire
+/// mechanism. A get-then-put has a TOCTOU window in which two concurrent
+/// replays both observe "absent" and both succeed.
+///
+/// `skip_all` is mandatory: `proof` carries the raw `jti` (root `AGENTS.md`
+/// §4.5).
+#[tracing::instrument(skip_all)]
+#[allow(dead_code)]
+pub(crate) async fn claim_dpop_jti(
+    storage: &dyn Storage,
+    proof: &VerifiedDpopProof,
+    max_age_secs: u64,
+    now_unix: i64,
+) -> Result<(), IssuanceError> {
+    let mut hasher = Sha256::new();
+    hasher.update(proof.jkt.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(proof.htu.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(proof.jti.as_bytes());
+    let key = B64URL.encode(hasher.finalize());
+
+    // Saturating and via try_from for the same reasons as the `iat` bounds
+    // check above: `max_age_secs as i64` would be lossy for a u64 config value.
+    // The row need only outlive the window in which the proof itself would
+    // still be accepted, so the TTL mirrors that window plus the skew
+    // tolerance.
+    let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+    let expires_at = now_unix
+        .saturating_add(max_age)
+        .saturating_add(DPOP_CLOCK_SKEW_SECS);
+
+    let claimed = storage
+        .insert_kv_if_absent(DPOP_JTI_NAMESPACE, &key, "1", Some(expires_at))
+        .await?;
+    if !claimed {
+        return Err(IssuanceError::InvalidDpopProof(
+            "jti has already been used".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -794,5 +864,95 @@ mod tests {
             access_token_hash("Kz~8mXK1EalYznwH-LC-1fBAo.4Ljp~zsPE_NeO.gxU"),
             "fUHyO2r2Z3DZ53EsNrWBb0xWXoaNy59IiKCAqksmQEo"
         );
+    }
+
+    async fn test_storage() -> foundry_core::storage::SqliteStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        std::mem::forget(dir);
+        foundry_core::storage::SqliteStorage::connect(db.to_str().unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn proof_for(jkt: &str, htu: &str, jti: &str) -> VerifiedDpopProof {
+        VerifiedDpopProof {
+            jkt: jkt.to_string(),
+            htu: htu.to_string(),
+            jti: jti.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_first_sighting_is_claimed_and_a_replay_is_rejected() {
+        // §11.1: "servers can store the jti value of each DPoP proof for the
+        // time window in which the respective DPoP proof JWT would be
+        // accepted to prevent multiple uses of the same DPoP proof."
+        let storage = test_storage().await;
+        let p = proof_for("jkt-a", HTU, "jti-1");
+
+        claim_dpop_jti(&storage, &p, MAX_AGE, NOW).await.unwrap();
+        let e = claim_dpop_jti(&storage, &p, MAX_AGE, NOW)
+            .await
+            .expect_err("a replayed jti must be rejected");
+        assert_eq!(e.kind(), "invalid_dpop_proof");
+    }
+
+    #[tokio::test]
+    async fn the_same_jti_at_a_different_htu_is_accepted() {
+        // §11.1 scopes single-use "in the context of the target URI", so the
+        // same jti at /token and at /credential are distinct claims.
+        let storage = test_storage().await;
+        claim_dpop_jti(&storage, &proof_for("jkt-a", HTU, "jti-1"), MAX_AGE, NOW)
+            .await
+            .unwrap();
+        claim_dpop_jti(
+            &storage,
+            &proof_for("jkt-a", "https://issuer.example.com/credential", "jti-1"),
+            MAX_AGE,
+            NOW,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_wallets_may_use_the_same_jti() {
+        // Keyed per jkt so one wallet cannot pre-claim jti values and deny
+        // service to another -- the same reasoning as claim_pop_jti.
+        let storage = test_storage().await;
+        claim_dpop_jti(&storage, &proof_for("jkt-a", HTU, "shared"), MAX_AGE, NOW)
+            .await
+            .unwrap();
+        claim_dpop_jti(&storage, &proof_for("jkt-b", HTU, "shared"), MAX_AGE, NOW)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_raw_jti_never_appears_in_the_storage_key() {
+        // §11.1: "a server that is tracking jti values should reject DPoP
+        // proof JWTs with unnecessarily large jti values or store only a hash
+        // thereof." Also keeps attacker-controlled bytes out of the SQL key.
+        let storage = test_storage().await;
+        let p = proof_for("jkt-a", HTU, "recognisable-raw-jti");
+        claim_dpop_jti(&storage, &p, MAX_AGE, NOW).await.unwrap();
+        assert!(
+            storage
+                .get_kv(DPOP_JTI_NAMESPACE, "recognisable-raw-jti")
+                .await
+                .unwrap()
+                .is_none(),
+            "the raw jti must not be the storage key"
+        );
+    }
+
+    #[tokio::test]
+    async fn claiming_does_not_overflow_on_an_absurd_max_age() {
+        // u64::MAX as i64 would be -1; try_from + saturating keeps the TTL sane.
+        let storage = test_storage().await;
+        claim_dpop_jti(&storage, &proof_for("jkt-a", HTU, "j"), u64::MAX, NOW)
+            .await
+            .unwrap();
     }
 }
