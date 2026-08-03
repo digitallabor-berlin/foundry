@@ -20,7 +20,7 @@ use foundry_issuer::{
     allocate_status_index, build_authorization_server_metadata, build_issuer_metadata,
     create_offer, handle_authorize_request, handle_credential_request, handle_token_request,
     issue_nonce, verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest,
-    CredentialRequest, IssuanceError, NonceSecret, ProofsRequest, TokenRequest,
+    CredentialRequest, DpopPresentation, IssuanceError, NonceSecret, ProofsRequest, TokenRequest,
 };
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
@@ -37,6 +37,26 @@ fn disabled_attestation() -> AttestationMode {
         mode: Mode::Disabled,
         trusted_anchors: Vec::new(),
         pop_max_age_secs: 300,
+    }
+}
+
+/// `DpopConfig` in `Optional` mode -- preserves this file's pre-DPoP behaviour
+/// exactly for the many call sites here that are not about DPoP at all.
+fn dpop_optional() -> DpopConfig {
+    DpopConfig {
+        mode: Mode::Optional,
+        max_age_secs: 300,
+    }
+}
+
+/// No `DPoP` header presented -- the pre-DPoP path.
+fn no_dpop<'a>() -> DpopPresentation<'a> {
+    DpopPresentation {
+        scheme_is_dpop: false,
+        proof_jwt: None,
+        htm: "POST",
+        htu: "https://issuer.example.com/token",
+        ath: None,
     }
 }
 
@@ -278,6 +298,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -290,6 +312,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_020,
     )
@@ -403,6 +427,8 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -529,6 +555,8 @@ async fn setup_credential_flow(
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -807,6 +835,8 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -929,6 +959,8 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -984,6 +1016,8 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         &required,
         Some("not-a-jwt-at-all"),
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1018,6 +1052,8 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_000,
     )
@@ -1069,6 +1105,8 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1151,6 +1189,8 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         &disabled_attestation(),
         None,
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1363,6 +1403,8 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
         &required,
         Some(&attestation_jwt),
         None,
+        &dpop_optional(),
+        &no_dpop(),
         "https://issuer.example.com",
         now,
     )

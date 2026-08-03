@@ -302,11 +302,31 @@ pub fn access_token_hash(access_token: &str) -> String {
     B64URL.encode(Sha256::digest(access_token.as_bytes()))
 }
 
+/// What the HTTP layer observed about one request's DPoP presentation.
+///
+/// A struct rather than five more positional parameters on two already-long
+/// functions. Every field is supplied by `crates/foundry`, never inferred here:
+/// `htu` in particular MUST come from configuration rather than a
+/// client-controlled `Host` header, or an attacker could replay a proof minted
+/// for a different origin.
+#[derive(Debug, Clone, Copy)]
+pub struct DpopPresentation<'a> {
+    /// `true` when the `Authorization` scheme was `DPoP` rather than `Bearer`.
+    /// Only meaningful at a protected resource; the Token Endpoint carries no
+    /// access token, so `/token` ignores it.
+    pub scheme_is_dpop: bool,
+    /// The raw `DPoP` header value, `None` when the header was absent.
+    pub proof_jwt: Option<&'a str>,
+    /// The real HTTP method — §4.3 check 8.
+    pub htm: &'a str,
+    /// The real target URI, from configuration — §4.3 check 9.
+    pub htu: &'a str,
+    /// `base64url(SHA-256(access_token))` — `None` at `/token`, where no access
+    /// token is presented and §4.3 check 12 does not apply.
+    pub ath: Option<&'a str>,
+}
+
 /// KV namespace for RFC 9449 §11.1 DPoP proof `jti` replay claims.
-// TODO(Task 7/9): remove this allow once /token and /credential call
-// claim_dpop_jti -- this constant and the function below are exercised only
-// by this module's own tests until those call sites land.
-#[allow(dead_code)]
 pub(crate) const DPOP_JTI_NAMESPACE: &str = "dpop_jti";
 
 /// RFC 9449 §11.1: claim a proof's `jti` for its acceptance window, rejecting
@@ -335,7 +355,6 @@ pub(crate) const DPOP_JTI_NAMESPACE: &str = "dpop_jti";
 /// `skip_all` is mandatory: `proof` carries the raw `jti` (root `AGENTS.md`
 /// §4.5).
 #[tracing::instrument(skip_all)]
-#[allow(dead_code)]
 pub(crate) async fn claim_dpop_jti(
     storage: &dyn Storage,
     proof: &VerifiedDpopProof,

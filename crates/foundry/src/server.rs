@@ -505,6 +505,12 @@ fn exactly_one_header<'h>(
                         `cnf.jwk`. Required whenever OAuth-Client-Attestation is \
                         present, under both `required` and `optional` mode \
                         (ABCA §6.2 rule 2). MUST appear at most once."),
+        ("DPoP" = Option<String>, Header,
+         description = "RFC 9449 §4.1 DPoP proof JWT. Required when \
+                        issuer.dpop.mode is `required`. When present and valid, \
+                        the issued access token is bound to the proof's key and \
+                        the response carries `token_type: DPoP`. MUST appear at \
+                        most once (§4.3 check 1)."),
     ),
     responses(
         (status = 200, body = TokenResponse),
@@ -512,7 +518,8 @@ fn exactly_one_header<'h>(
                                      for any Wallet Attestation / Client \
                                      Attestation PoP failure, `invalid_grant` for \
                                      an unusable code, `invalid_request` \
-                                     otherwise."),
+                                     otherwise, `invalid_dpop_proof` (RFC 9449 §5) \
+                                     for any DPoP proof failure."),
     )
 )]
 async fn token_handler(
@@ -556,6 +563,12 @@ async fn token_handler(
     let pop_hdr = exactly_one_header(&headers, "OAuth-Client-Attestation-PoP")
         .map_err(|e| wallet_error_response(&e))?;
 
+    // RFC 9449 §4.3 check 1: "There is not more than one DPoP HTTP request
+    // header field." `exactly_one_header` is the same guard ABCA §6.2 needs,
+    // and for the same reason: `HeaderMap::get` silently returns only the
+    // first of several.
+    let dpop_hdr = exactly_one_header(&headers, "DPoP").map_err(|e| wallet_error_response(&e))?;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -568,12 +581,25 @@ async fn token_handler(
     let issuer_identifier =
         foundry_issuer::build_authorization_server_metadata(&state.config).issuer;
 
+    // From configuration, never from the Host header: a client-controlled
+    // Host would let an attacker replay a proof minted for another origin.
+    let htu = format!("{}/token", issuer_identifier.trim_end_matches('/'));
+    let dpop_presentation = foundry_issuer::DpopPresentation {
+        scheme_is_dpop: false,
+        proof_jwt: dpop_hdr,
+        htm: "POST",
+        htu: &htu,
+        ath: None,
+    };
+
     foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
         &state.config.issuer.wallet_attestation,
         attestation_hdr,
         pop_hdr,
+        &state.config.issuer.dpop,
+        &dpop_presentation,
         &issuer_identifier,
         now,
     )
