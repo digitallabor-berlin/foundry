@@ -343,6 +343,275 @@ async fn full_verification_flow_end_to_end() {
 }
 
 #[tokio::test]
+async fn dc_api_response_via_admin_endpoint_succeeds() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+
+    // 1. Admin POST /admin/verification/requests with transport: "dc_api"
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "dc_api"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+    let dc_api_request = create_resp
+        .dc_api_request
+        .expect("dc_api transport must return dc_api_request");
+
+    let nonce = dc_api_request["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = dc_api_request["client_metadata"]["jwks"]["keys"][0].clone();
+
+    // 2. Issue SD-JWT VC to holder key pair and create KB-JWT. For dc_api the
+    //    KB-JWT audience is "origin:<public_base_url>" (OpenID4VP L2543 / IETF
+    //    SD-JWT VC Presentation Response L3179), not the x509_hash client_id
+    //    used by redirect transports — see foundry-verifier/src/verify.rs's
+    //    dc_api audience fallback (no dc_api_expected_origins configured here).
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    let sd_jwt_vc_presentation = attach_kb_jwt(
+        issuer_pres,
+        &holder_signer,
+        "origin:https://localhost:8443",
+        &nonce,
+        None,
+    )
+    .unwrap();
+
+    // 3. Encrypt presentation into JWE, as the browser's DigitalCredential
+    //    response would contain in credentialResponse.data.response.
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    // 4. Console relays the response to the new admin endpoint.
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/admin/verification/requests/{verification_id}/dc-api-response"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(
+            serde_json::json!({ "response": jwe_str }).to_string(),
+        ))
+        .unwrap();
+
+    let post_resp_res = admin_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
+
+    assert!(verify_result.verified);
+    assert_eq!(verify_result.claims["given_name"], "Alice");
+
+    // 5. Admin GET /admin/verification/requests/{id} reflects Verified.
+    let get_tx_req = Request::builder()
+        .method("GET")
+        .uri(format!("/admin/verification/requests/{verification_id}"))
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let get_tx_res = admin_app.clone().oneshot(get_tx_req).await.unwrap();
+    assert_eq!(get_tx_res.status(), StatusCode::OK);
+
+    let tx_bytes = axum::body::to_bytes(get_tx_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tx: VerificationTransaction = serde_json::from_slice(&tx_bytes).unwrap();
+
+    assert_eq!(tx.state, VerificationState::Verified);
+}
+
+#[tokio::test]
+async fn dc_api_response_admin_endpoint_returns_404_for_unknown_id() {
+    let (state, _dir, _issuer_cert_pem, _issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests/unknown-id/dc-api-response")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(
+            serde_json::json!({ "response": "not-a-real-jwe" }).to_string(),
+        ))
+        .unwrap();
+
+    let res = admin_app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn dc_api_response_admin_endpoint_rejects_resubmission() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "dc_api"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+    let dc_api_request = create_resp.dc_api_request.unwrap();
+
+    let nonce = dc_api_request["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = dc_api_request["client_metadata"]["jwks"]["keys"][0].clone();
+
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: "did:example:holder".to_string(),
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    let sd_jwt_vc_presentation = attach_kb_jwt(
+        issuer_pres,
+        &holder_signer,
+        "origin:https://localhost:8443",
+        &nonce,
+        None,
+    )
+    .unwrap();
+
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    let make_req = || {
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/admin/verification/requests/{verification_id}/dc-api-response"
+            ))
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, "Bearer test-admin-key")
+            .body(Body::from(
+                serde_json::json!({ "response": jwe_str }).to_string(),
+            ))
+            .unwrap()
+    };
+
+    let first = admin_app.clone().oneshot(make_req()).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = admin_app.oneshot(make_req()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn resubmitting_a_verification_response_is_rejected() {
     let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
 
