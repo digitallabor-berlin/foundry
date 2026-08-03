@@ -193,6 +193,13 @@ This — and only this — is the gate for finishing a task, marking a `TaskUpda
 as `completed`, or handing work to a per-task reviewer. **Do not run
 `cargo test --workspace` at the end of, or between, individual tasks.**
 
+**Don't re-run a gate that already ran.** If the task immediately before this
+one already ran the scoped gate for the crates you're about to touch and it
+came back clean, carry that result forward — do not re-run it again at the
+start of the next task as a reflexive sanity check. Only run it again when the
+new task touches crates the prior gate didn't cover, or when you've made
+further edits since it last ran.
+
 ### 5.2 Which Crates Count as "Affected"
 
 Derive the set from the layering in §3: a change can only break the crate itself
@@ -212,25 +219,37 @@ private module — need only the owning crate.
 ### 5.3 Full Gate — reserved for these cases
 
 ```bash
+cargo fmt                                                    # apply formatting first
+cargo fmt --check                                            # verify (no-op after the line above)
 cargo test --workspace
+cargo test -p foundry --test e2e_full_flow -- --ignored      # E2E: only here, never in the scoped gate
 cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --check
 ```
 
-Run all three, **once**, when any of the following holds:
+Run this, **once**, when either of the following holds:
 
-- The **development cycle is finished** — every task of a plan or feature is
-  done and you are about to open a PR, request the final whole-branch review, or
-  merge.
-- You are **not confident** the scoped set covered the blast radius: a
-  cross-cutting refactor, a `foundry-core` type or trait signature change, a
-  dependency bump, a workspace `Cargo.toml` edit, or a change touching the
-  observability / instrumentation-hygiene tests.
-- A **scoped run failed in a way that hints at wider breakage** — a shared
-  trait, a serde shape, a public re-export.
+- **The user explicitly asks for it.**
+- **You are finishing a development branch** — every task of a plan or feature
+  is done and you are about to open a PR, request the final whole-branch
+  review, or merge.
 
-Outside those cases, prefer widening the scoped set (one more `-p <crate>`) over
-escalating to `--workspace`.
+These are the **only** two triggers. A scoped run passing is not, by itself,
+a reason to escalate — "not confident" or "just to be safe" is not an
+exception. If a scoped result feels insufficient (a cross-cutting refactor, a
+`foundry-core` signature change, a shared trait or serde shape, a scoped run
+that failed in a way that hints at wider breakage), the answer is to **widen
+the scoped set** — one more `-p <crate>`, or the layer above per §5.2 — not to
+escalate to `--workspace`. If widening repeatedly still leaves you unsure,
+say so to the user rather than defaulting to a full run.
+
+The E2E suite (`e2e_full_flow`, `#[ignore]`d by default — see
+[`crates/foundry/tests/AGENTS.md`](crates/foundry/tests/AGENTS.md)) follows
+the same rule: it runs **only** as part of this Full Gate, never inside a
+scoped, per-task gate.
+
+Always run `cargo fmt` (applying, not just checking) before the rest of this
+gate, so the full suite runs against an already-formatted tree instead of
+failing — or silently drifting — on style alone.
 
 ### 5.4 Never Re-Run the Full Suite After Merging
 
