@@ -77,6 +77,7 @@
   .open-btn {
     display: inline-block;
     background: var(--accent); color: #fff; text-decoration: none;
+    border: none; font: inherit;
     border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600;
     margin-left: 8px; cursor: pointer;
   }
@@ -175,7 +176,10 @@
     </div>
     <div class="field">
       <label for="transport">transport</label>
-      <input type="text" id="transport" value="request_uri">
+      <select id="transport">
+        <option value="request_uri" selected>request_uri (deep link / QR)</option>
+        <option value="dc_api">dc_api (Digital Credentials API)</option>
+      </select>
     </div>
     <button class="primary" id="create-verification-btn">Create Verification Request</button>
     <div class="error-banner hidden" id="verification-error"></div>
@@ -184,6 +188,7 @@
         <span class="uri-text" id="verification-uri"></span>
         <button class="copy-btn" data-copy-target="verification-uri">Copy</button>
         <a class="open-btn hidden" id="verification-open" target="_self">Open in Wallet</a>
+        <button class="open-btn hidden" id="verification-dc-api-btn">Trigger via Digital Credentials API</button>
       </div>
       <div class="qr-wrap" id="verification-qr"></div>
       <p>Status: <span class="badge pending" id="verification-status">pending</span></p>
@@ -2719,6 +2724,92 @@ var qrcode = function() {
     tick();
   }
 
+  // --- Digital Credentials API (dc_api transport) ---
+  // Function names and the transient-activation constraint documented on
+  // invokeDc are aligned with the proven implementation in
+  // eudipay-frontend/src/dcApi.js. Unlike that implementation, there is no
+  // fetch-a-signed-request-uri step here: foundry's /admin/verification/requests
+  // already returns the full inline, unsigned dc_api_request object, so
+  // prepareDcApiRequest is a synchronous wrap, not an async fetch.
+  let lastDcApiRequest = null;
+  let lastVerificationId = null;
+
+  function hasDigitalCredentialSupport(protocol) {
+    if (typeof window === 'undefined' || !window.isSecureContext) return false;
+    const dc = window.DigitalCredential;
+    if (!dc) return false;
+    if (typeof dc.userAgentAllowsProtocol === 'function') {
+      try {
+        return Boolean(dc.userAgentAllowsProtocol(protocol));
+      } catch (e) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function supportsDcApi(method, protocol) {
+    if (typeof navigator === 'undefined' || !('credentials' in navigator)) return false;
+    if (typeof navigator.credentials[method] !== 'function') return false;
+    return hasDigitalCredentialSupport(protocol);
+  }
+
+  function isDcApiNotSupportedError(error) {
+    const name = error && error.name ? String(error.name) : '';
+    const message = error && error.message ? String(error.message) : '';
+    return name === 'NotSupportedError'
+      || (name === 'TypeError' && /not supported/i.test(message))
+      || /CredentialContainer/i.test(message);
+  }
+
+  function prepareDcApiRequest(dcApiRequestData) {
+    return {
+      digital: {
+        requests: [{ protocol: 'openid4vp-v1-unsigned', data: dcApiRequestData }]
+      }
+    };
+  }
+
+  // Must be invoked with no preceding await once the click handler starts --
+  // Chrome consumes the click's transient activation if any await lands
+  // between the click and navigator.credentials.get().
+  async function invokeDc(req) {
+    const credentialResponse = await navigator.credentials.get(req);
+    if (!credentialResponse || credentialResponse.constructor?.name !== 'DigitalCredential') {
+      throw new Error('No DigitalCredential returned from navigator.credentials.get');
+    }
+    return credentialResponse.data;
+  }
+
+  function initDcApiTrigger() {
+    const dcApiBtn = document.getElementById('verification-dc-api-btn');
+    const errorEl = document.getElementById('verification-error');
+
+    dcApiBtn.addEventListener('click', async function () {
+      if (!supportsDcApi('get', 'openid4vp-v1-unsigned')) {
+        showError(errorEl, new Error('This browser does not support the Digital Credentials API.'));
+        return;
+      }
+      dcApiBtn.disabled = true;
+      try {
+        const data = await invokeDc(lastDcApiRequest);
+        await adminFetch('/admin/verification/requests/' + encodeURIComponent(lastVerificationId) + '/dc-api-response', {
+          method: 'POST',
+          body: JSON.stringify({ response: data.response })
+        });
+        // The pollVerification loop already running since "Create Verification
+        // Request" was clicked will pick up the Verified/Failed state on its
+        // next tick -- no separate render path is introduced here.
+      } catch (err) {
+        showError(errorEl, isDcApiNotSupportedError(err)
+          ? new Error('This browser does not support the Digital Credentials API.')
+          : err);
+      } finally {
+        dcApiBtn.disabled = false;
+      }
+    });
+  }
+
   function initVerificationModeToggle() {
     const radios = document.querySelectorAll('input[name="dcql-mode"]');
     const namedField = document.getElementById('named-query-field');
@@ -2738,6 +2829,7 @@ var qrcode = function() {
 
   function initVerification() {
     initVerificationModeToggle();
+    initDcApiTrigger();
     const btn = document.getElementById('create-verification-btn');
     const errorEl = document.getElementById('verification-error');
     const resultEl = document.getElementById('verification-result');
@@ -2779,7 +2871,11 @@ var qrcode = function() {
         const uriEl = document.getElementById('verification-uri');
         const qrEl = document.getElementById('verification-qr');
         const verificationOpenEl = document.getElementById('verification-open');
+        const dcApiBtn = document.getElementById('verification-dc-api-btn');
         qrEl.innerHTML = '';
+        dcApiBtn.classList.add('hidden');
+        lastDcApiRequest = null;
+        lastVerificationId = null;
         if (uri) {
           uriEl.textContent = uri;
           renderQr(qrEl, uri);
@@ -2788,7 +2884,10 @@ var qrcode = function() {
         } else {
           verificationOpenEl.classList.add('hidden');
           if (body.dc_api_request) {
-            uriEl.textContent = '(dc_api transport has no scannable URI; use the Digital Credentials API request object returned by the admin endpoint directly)';
+            uriEl.textContent = '(dc_api transport: click "Trigger via Digital Credentials API" below)';
+            lastDcApiRequest = prepareDcApiRequest(body.dc_api_request);
+            lastVerificationId = body.verification_id;
+            dcApiBtn.classList.remove('hidden');
           } else {
             uriEl.textContent = '';
           }
