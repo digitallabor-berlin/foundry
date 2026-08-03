@@ -304,6 +304,23 @@ minutes it should not have.
 - Maintain `.superpowers/sdd/progress.md` as the durable, compaction-proof
   source of truth for execution history.
 
+### Workflow Artifacts
+
+This project used to run a second, lighter-weight workflow called
+`superlight` alongside `superpowers`. **As of 2026-08-03, `superpowers` is the
+only development workflow in use in this repository.** Specs, plans, and
+change records — regardless of which skill or subagent produces them — live
+under:
+
+- `docs/superpowers/specs/YYYY-MM-DD-<slug>-spec.md` (or `-design.md`)
+- `docs/superpowers/plans/YYYY-MM-DD-<slug>-plan.md`
+- `docs/superpowers/changes/YYYY-MM-DD-<slug>.md`
+
+`docs/superlight/` is retired and its historical contents were migrated into
+the paths above (see
+`docs/superpowers/changes/2026-08-03-retire-superlight-workflow.md`). Do not
+recreate a `docs/superlight/` directory.
+
 ---
 
 ## 8. Maintaining These Files
