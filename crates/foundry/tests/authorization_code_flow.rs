@@ -93,7 +93,6 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],

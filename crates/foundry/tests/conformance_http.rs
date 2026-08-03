@@ -131,7 +131,6 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -669,7 +668,6 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
         },
         credential_types: vec![],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -822,7 +820,6 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -1247,7 +1244,6 @@ async fn setup_pop_test_app_with_mode(
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],

@@ -160,7 +160,6 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "issuer_key".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],
@@ -632,7 +631,6 @@ async fn setup_with_required_attestation() -> (
             }],
         }],
         verifier: VerifierConfig {
-            client_id_scheme: "x509_san_dns".to_string(),
             signing_key: "issuer_key".to_string(),
             response_encryption: None,
             transaction_data_hashes_alg: vec![],

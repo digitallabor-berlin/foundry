@@ -219,7 +219,6 @@ issuer:
   status_list:
     enabled: false
 verifier:
-  client_id_scheme: x509_san_dns
   signing_key: verifier-key
 "#;
 
@@ -235,6 +234,23 @@ verifier:
         assert_eq!(cfg.logging.level, "info");
         assert_eq!(cfg.logging.format, LogFormat::Human);
         assert!(!cfg.logging.sensitive_payloads);
+    }
+
+    /// GAP-HAIP-05 fixed the Client Identifier Prefix to `x509_hash` (HAIP
+    /// OpenID4VP L256), leaving `verifier.client_id_scheme` with exactly one
+    /// legal value -- not configuration -- so the field was deleted from
+    /// `VerifierConfig`. No config struct sets `deny_unknown_fields`, so an
+    /// existing deployment's `config.yaml` that still lists the now-removed
+    /// key must keep loading rather than fail to parse.
+    #[test]
+    fn a_config_still_listing_the_removed_client_id_scheme_key_loads() {
+        let yaml = MINIMAL.replacen(
+            "verifier:\n",
+            "verifier:\n  client_id_scheme: x509_san_dns\n",
+            1,
+        );
+        let cfg = parse(&yaml);
+        assert_eq!(cfg.verifier.signing_key, "verifier-key");
     }
 
     #[test]
@@ -296,7 +312,7 @@ verifier:
     /// duplicating the `issuer:` key `MINIMAL` already declares.
     fn parse_with_issuer(issuer_block: &str) -> Config {
         let yaml = format!(
-            "server:\n  wallet_facing:\n    public_base_url: https://example.test\n    bind: 127.0.0.1:8080\n  admin:\n    bind: 127.0.0.1:8081\nstorage:\n  path: ./test.db\n{issuer_block}\nverifier:\n  client_id_scheme: x509_san_dns\n  signing_key: verifier-key\n"
+            "server:\n  wallet_facing:\n    public_base_url: https://example.test\n    bind: 127.0.0.1:8080\n  admin:\n    bind: 127.0.0.1:8081\nstorage:\n  path: ./test.db\n{issuer_block}\nverifier:\n  signing_key: verifier-key\n"
         );
         parse(&yaml)
     }
@@ -343,7 +359,6 @@ verifier:
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VerifierConfig {
-    pub client_id_scheme: String,
     pub signing_key: String,
     #[serde(default)]
     pub response_encryption: Option<serde_json::Value>,
