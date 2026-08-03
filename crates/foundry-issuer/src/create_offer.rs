@@ -129,6 +129,7 @@ pub async fn create_offer(
             authorization_code: None,
             code_challenge: None,
             code_challenge_method: None,
+            dpop_jkt: None,
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: None,
@@ -159,6 +160,7 @@ pub async fn create_offer(
             authorization_code: None,
             code_challenge: None,
             code_challenge_method: None,
+            dpop_jkt: None,
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: Some(PreAuthorizedCodeGrant {

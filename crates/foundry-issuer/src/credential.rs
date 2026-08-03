@@ -425,6 +425,7 @@ mod tests {
             authorization_code: None,
             code_challenge: None,
             code_challenge_method: None,
+            dpop_jkt: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -518,6 +519,7 @@ mod tests {
             authorization_code: None,
             code_challenge: None,
             code_challenge_method: None,
+            dpop_jkt: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, now)
             .await

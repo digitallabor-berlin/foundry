@@ -27,6 +27,24 @@ pub struct IssuanceTransaction {
     pub authorization_code: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// RFC 9449 §6: the RFC 7638 JWK thumbprint of the DPoP key this flow is
+    /// pinned to.
+    ///
+    /// Written at two different points for two different clauses, but it is
+    /// one concept — "the key this flow is pinned to" — at both:
+    /// - `/authorize` writes it from the §10 `dpop_jkt` request parameter, and
+    ///   `/token` then requires the presented proof to match it.
+    /// - `/token` writes it from the verified proof, and `/credential` then
+    ///   requires the presented proof to match it.
+    ///
+    /// `Some` ⇒ the access token is DPoP-bound and MUST be presented with the
+    /// `DPoP` scheme plus a matching proof (§7.1); `None` ⇒ plain Bearer.
+    ///
+    /// `#[serde(default)]` is load-bearing: transactions are persisted as JSON
+    /// in the KV store, so a row written before this field existed must still
+    /// deserialize after a rolling restart.
+    #[serde(default)]
+    pub dpop_jkt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +244,7 @@ mod tests {
             authorization_code: None,
             code_challenge: None,
             code_challenge_method: None,
+            dpop_jkt: None,
         }
     }
 
@@ -395,5 +414,50 @@ mod tests {
             by_code.is_none(),
             "the short-lived auth-code index must be purged"
         );
+    }
+
+    #[tokio::test]
+    async fn dpop_jkt_round_trips_through_storage() {
+        let storage = test_storage().await;
+        let mut tx = sample_tx("tx-dpop-rt");
+        tx.dpop_jkt = Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string());
+        save_transaction(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let loaded = load_transaction(&storage, "tx-dpop-rt")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.dpop_jkt,
+            Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string())
+        );
+    }
+
+    #[test]
+    fn a_transaction_persisted_before_dpop_existed_still_deserializes() {
+        // Transactions live as JSON in the KV store, so a row written by a
+        // pre-DPoP binary must survive a rolling restart onto this one. This is
+        // what #[serde(default)] on dpop_jkt buys, and it is the only test that
+        // would catch its removal.
+        let legacy = r#"{
+            "transaction_id": "tx-legacy",
+            "credential_type_id": "pid",
+            "claims": {},
+            "pre_authorized_code": null,
+            "tx_code": null,
+            "status_list_index": null,
+            "access_token": null,
+            "state": "offered",
+            "created_at": 1700000000,
+            "redirect_uri": null,
+            "issuer_state": null,
+            "authorization_code": null,
+            "code_challenge": null,
+            "code_challenge_method": null
+        }"#;
+        let tx: IssuanceTransaction = serde_json::from_str(legacy).unwrap();
+        assert_eq!(tx.dpop_jkt, None);
     }
 }
