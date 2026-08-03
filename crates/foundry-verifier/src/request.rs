@@ -323,8 +323,8 @@ pub async fn create_verification_request(
         })
     } else {
         let request_uri = format!("{base_url}/vp/request/{id}");
-        let host = dns_host_only(base_url);
-        let client_id = format!("x509_san_dns:{host}");
+        let leaf_pem = verifier_x5c_leaf_pem(config)?;
+        let client_id = x509_hash_client_id(&leaf_pem)?;
         let client_id_enc = utf8_percent_encode(&client_id, NON_ALPHANUMERIC).to_string();
         let request_uri_enc = utf8_percent_encode(&request_uri, NON_ALPHANUMERIC).to_string();
         let openid4vp_uri =
@@ -337,6 +337,47 @@ pub async fn create_verification_request(
             dc_api_request: None,
         })
     }
+}
+
+/// The configured leaf certificate PEM for `verifier.signing_key`.
+///
+/// Required for the `x509_hash` Client Identifier Prefix (HAIP OpenID4VP L256):
+/// the identifier *is* the certificate hash, so without a certificate there is no
+/// identifier to emit. Shared by both Request Object transports, so the
+/// identifier on the `openid4vp://` invocation URI and the identifier inside the
+/// signed Request Object it points to are derived from the same certificate.
+pub(crate) fn verifier_x5c_leaf_pem(config: &Config) -> Result<Vec<u8>, VerificationError> {
+    let key_entry = config
+        .keys
+        .get(&config.verifier.signing_key)
+        .ok_or_else(|| {
+            VerificationError::Crypto(format!(
+                "verifier signing key '{}' not found in config.keys",
+                config.verifier.signing_key
+            ))
+        })?;
+    let x5c_path = key_entry.x5c.as_ref().ok_or_else(|| {
+        VerificationError::Crypto(format!(
+            "verifier signing key '{}' has no x5c certificate; the x509_hash Client \
+             Identifier Prefix (HAIP OpenID4VP L256) requires one",
+            config.verifier.signing_key
+        ))
+    })?;
+    std::fs::read(x5c_path).map_err(|e| {
+        VerificationError::Crypto(format!("failed to read x5c file '{x5c_path}': {e}"))
+    })
+}
+
+/// The `x509_hash:` Client Identifier for a leaf certificate.
+///
+/// HAIP OpenID4VP L256 mandates the `x509_hash` Client Identifier Prefix for
+/// signed requests, narrowing OpenID4VP Section 5.9.3; the value is
+/// base64url(SHA-256(DER leaf)) per OpenID4VP L616.
+pub(crate) fn x509_hash_client_id(leaf_pem: &[u8]) -> Result<String, VerificationError> {
+    Ok(format!(
+        "x509_hash:{}",
+        foundry_core::trust::x509_hash_client_id_value(leaf_pem)?
+    ))
 }
 
 /// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
@@ -364,30 +405,30 @@ pub fn build_signed_request_object(
         .public_base_url
         .trim_end_matches('/');
     let host = dns_host_only(base_url);
-    let client_id = format!("x509_san_dns:{host}");
     let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
-    // OpenID4VP 1.0 Defined Client Identifier Prefixes / x509_san_dns (L614): the
-    // Client Identifier without the prefix MUST be a DNS name matching a dNSName
-    // SAN entry in the leaf certificate carried in x5c. GAP-VP-02: cross-check the
-    // derived host against the configured x5c leaf here, so a misconfigured
-    // public_base_url/certificate pairing fails loudly instead of silently signing
-    // a Request Object whose client_id claim contradicts the certificate that
-    // signs it -- relying entirely on the wallet's own SAN check to catch it.
-    let x5c = if let Some(ref path) = key_entry.x5c {
-        let pem_bytes = std::fs::read(path).map_err(|e| {
-            VerificationError::Crypto(format!("failed to read x5c file '{path}': {e}"))
-        })?;
-        if !foundry_core::trust::match_san_dns(&pem_bytes, &host)? {
-            return Err(VerificationError::Crypto(format!(
-                "client_id host '{host}' (derived from server.wallet_facing.public_base_url) \
-                 does not match any dNSName SAN entry in the configured x5c leaf certificate"
-            )));
-        }
-        Some(foundry_core::trust::build_x5c(&[pem_bytes])?)
-    } else {
-        None
-    };
+    // HAIP OpenID4VP L256: for signed requests the Verifier MUST use the Client
+    // Identifier Prefix `x509_hash`, narrowing OpenID4VP Section 5.9.3. The value
+    // is base64url(SHA-256(DER of the leaf)) per OpenID4VP L616. Because the
+    // identifier *is* the certificate hash, `x5c` is required -- with no
+    // certificate there is no Client Identifier to emit.
+    let pem_bytes = verifier_x5c_leaf_pem(config)?;
+
+    // OpenID4VP 1.0 Defined Client Identifier Prefixes / x509_san_dns (L614) via
+    // GAP-VP-02: the leaf's dNSName SAN is still cross-checked, but against
+    // public_base_url's host directly now -- the host is no longer carried in
+    // client_id under x509_hash, and public_base_url was always the real source of
+    // truth. Keeps a misconfigured public_base_url/certificate pairing failing
+    // loudly instead of signing a Request Object the wallet will reject.
+    if !foundry_core::trust::match_san_dns(&pem_bytes, &host)? {
+        return Err(VerificationError::Crypto(format!(
+            "host '{host}' (derived from server.wallet_facing.public_base_url) does not \
+             match any dNSName SAN entry in the configured x5c leaf certificate"
+        )));
+    }
+
+    let client_id = x509_hash_client_id(&pem_bytes)?;
+    let x5c = Some(foundry_core::trust::build_x5c(&[pem_bytes])?);
 
     let mut payload_map = serde_json::Map::new();
     payload_map.insert(
@@ -453,7 +494,7 @@ mod tests {
     use super::*;
     use crate::transaction::load_verification_transaction;
     use foundry_core::config::*;
-    use foundry_core::pki::generate_ec_key;
+    use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
     use foundry_core::storage::SqliteStorage;
     use josekit::jws::ES256;
     use std::collections::BTreeMap;
@@ -465,13 +506,37 @@ mod tests {
         SqliteStorage::connect(db.to_str().unwrap()).await.unwrap()
     }
 
+    /// A leaf certificate for `verifier.example.com` (this fixture's
+    /// `public_base_url` host), leaked to a tempfile so its path outlives the
+    /// call. HAIP OpenID4VP L256 makes `x5c` required for signed requests, so
+    /// every test config needs one -- not only the tests that call
+    /// `build_signed_request_object` directly, since `create_verification_request`
+    /// also computes the `x509_hash` Client Identifier for its unsigned
+    /// `openid4vp://` invocation URI.
+    fn sample_verifier_x5c_path() -> String {
+        let ca = new_ca("Foundry Test Verifier Root", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "verifier.example.com",
+            &["verifier.example.com".to_string()],
+            365,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("verifier_leaf.pem");
+        std::fs::write(&path, leaf.cert_pem.as_bytes()).unwrap();
+        std::mem::forget(dir);
+        path.to_str().unwrap().to_string()
+    }
+
     fn sample_config(key_path: &str) -> Config {
         let mut keys = BTreeMap::new();
         keys.insert(
             "verifier_signing".to_string(),
             KeyEntry {
                 private_key: key_path.to_string(),
-                x5c: None,
+                x5c: Some(sample_verifier_x5c_path()),
                 alg: "ES256".to_string(),
             },
         );
@@ -735,7 +800,16 @@ mod tests {
 
         let payload_bytes = B64URL.decode(parts[1]).unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
-        assert_eq!(payload["client_id"], "x509_san_dns:verifier.example.com");
+        // HAIP OpenID4VP L256: x509_hash, computed from the same leaf certificate
+        // build_signed_request_object reads -- never hardcode the hash, it would
+        // silently diverge if the fixture certificate is regenerated.
+        let leaf_pem = verifier_x5c_leaf_pem(&config).unwrap();
+        let expected_client_id = x509_hash_client_id(&leaf_pem).unwrap();
+        assert_eq!(payload["client_id"], expected_client_id);
+        assert!(payload["client_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("x509_hash:"));
         assert_eq!(
             payload["response_uri"],
             format!("https://verifier.example.com/vp/response/{}", tx.id)
@@ -765,15 +839,14 @@ mod tests {
         );
     }
 
-    /// GAP-HAIP-05 -- HAIP OpenID4VP (L256): for signed requests the
-    /// Verifier MUST use the Client Identifier Prefix `x509_hash` (the
-    /// leaf certificate's hash), not `x509_san_dns`. `build_signed_request_object`
-    /// always emits `client_id: "x509_san_dns:<host>"` regardless of whether
-    /// the request is signed (the `request_uri` transport, HAIP-0055, always
-    /// produces a signed JAR Request Object) -- `x509_hash` is not implemented
-    /// anywhere in this workspace (same evidence as VP-0068/VP-0069, Task 12).
+    /// GAP-HAIP-05 (closed) -- HAIP OpenID4VP (L256): for signed requests the
+    /// Verifier MUST use the Client Identifier Prefix `x509_hash` (the leaf
+    /// certificate's hash), not `x509_san_dns`. `build_signed_request_object`
+    /// now emits `client_id: "x509_hash:<base64url(SHA-256(DER leaf))>"` for
+    /// every signed request (the `request_uri` transport, HAIP-0055, always
+    /// produces a signed JAR Request Object), via
+    /// `foundry_core::trust::x509_hash_client_id_value`.
     #[tokio::test]
-    #[ignore = "GAP-HAIP-05: HAIP OpenID4VP (L256) -- for signed requests the Verifier MUST use the Client Identifier Prefix x509_hash, but build_signed_request_object always emits x509_san_dns and x509_hash is not implemented anywhere in this workspace"]
     async fn gap_haip_05_signed_request_object_never_uses_x509_hash_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let key_file = dir.path().join("verifier_key.pem");
@@ -805,6 +878,157 @@ mod tests {
             client_id.starts_with("x509_hash:"),
             "HAIP-0043 requires the x509_hash Client Identifier Prefix for signed \
              requests, got: {client_id}"
+        );
+    }
+
+    /// HAIP OpenID4VP L256 + OpenID4VP L616: the Client Identifier the Request
+    /// Object advertises MUST be exactly the value a wallet will use as its KB-JWT
+    /// audience, and `do_verify_vp_response` recomputes that expectation
+    /// independently. This test fails if the two sides are ever derived
+    /// differently -- the failure that would otherwise appear only as a
+    /// `verified: false` policy verdict at runtime.
+    #[tokio::test]
+    async fn client_id_is_the_x509_hash_of_the_configured_leaf_certificate() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let jws = build_signed_request_object(&config, &tx).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(jws.split('.').nth(1).unwrap()).unwrap())
+                .unwrap();
+        let client_id = payload["client_id"].as_str().unwrap();
+
+        let key_entry = config.keys.get(&config.verifier.signing_key).unwrap();
+        let pem = std::fs::read(key_entry.x5c.as_ref().unwrap()).unwrap();
+        let expected = format!(
+            "x509_hash:{}",
+            foundry_core::trust::x509_hash_client_id_value(&pem).unwrap()
+        );
+
+        assert_eq!(client_id, expected);
+        assert!(client_id.starts_with("x509_hash:"));
+    }
+
+    /// Decision 3: under `x509_hash` the Client Identifier *is* the certificate
+    /// hash, so a signed request with no configured `x5c` has no identifier to
+    /// emit. A configuration fault, and it must be a typed error.
+    #[tokio::test]
+    async fn signed_request_without_x5c_is_a_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let mut config = sample_config(key_file.to_str().unwrap());
+        if let Some(entry) = config.keys.get_mut(&config.verifier.signing_key) {
+            entry.x5c = None;
+        }
+        let storage = test_storage().await;
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        // The unsigned openid4vp:// URI branch of create_verification_request also
+        // needs x5c now (it computes the same x509_hash Client Identifier for the
+        // invocation URI), so the error surfaces here rather than only in
+        // build_signed_request_object.
+        let err = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Crypto(ref m) if m.contains("x5c")),
+            "expected a Crypto error naming x5c, got {err:?}"
+        );
+    }
+
+    /// HAIP-0045 -- HAIP OpenID4VP (L256): the X.509 certificate of the trust
+    /// anchor MUST NOT be included in the `x5c` JOSE header of the signed
+    /// request. `build_signed_request_object` calls
+    /// `foundry_core::trust::build_x5c(&[pem_bytes])` with only the leaf
+    /// certificate -- never the CA that issued it -- so the header's `x5c`
+    /// array always has exactly one entry, and that entry's DER never matches
+    /// the anchor's.
+    #[tokio::test]
+    async fn haip_0045_signed_request_x5c_excludes_the_trust_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = new_ca("Foundry Test Verifier Root", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "verifier.example.com",
+            &["verifier.example.com".to_string()],
+            365,
+        )
+        .unwrap();
+        let key_path = dir.path().join("leaf_key.pem");
+        std::fs::write(&key_path, leaf.key_pem.as_bytes()).unwrap();
+        let cert_path = dir.path().join("leaf_cert.pem");
+        std::fs::write(&cert_path, leaf.cert_pem.as_bytes()).unwrap();
+
+        let mut config = sample_config(key_path.to_str().unwrap());
+        config
+            .keys
+            .get_mut(&config.verifier.signing_key)
+            .unwrap()
+            .x5c = Some(cert_path.to_str().unwrap().to_string());
+        let storage = test_storage().await;
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let jws = build_signed_request_object(&config, &tx).unwrap();
+        let header_bytes = B64URL.decode(jws.split('.').next().unwrap()).unwrap();
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
+
+        let x5c = header["x5c"].as_array().unwrap();
+        assert_eq!(
+            x5c.len(),
+            1,
+            "x5c must carry only the leaf, never the trust anchor: {x5c:?}"
+        );
+
+        let anchor_der = foundry_core::trust::build_x5c(&[ca.cert_pem.into_bytes()]).unwrap();
+        assert_ne!(
+            x5c[0].as_str().unwrap(),
+            anchor_der[0],
+            "the sole x5c entry must be the leaf, not the trust anchor"
         );
     }
 
@@ -854,13 +1078,27 @@ mod tests {
         // VP-0130: redirect_uri is never present alongside it.
         assert!(payload.get("redirect_uri").is_none());
 
-        // VP-0132: response_uri is same-origin with client_id's own host.
-        let client_id = payload["client_id"].as_str().unwrap();
-        let client_host = client_id.strip_prefix("x509_san_dns:").unwrap();
+        // VP-0132: response_uri is same-origin with the Verifier's own host.
+        // Under x509_hash the host is no longer recoverable from client_id (it
+        // carries the certificate hash instead), so the expected host comes from
+        // public_base_url directly -- the actual source of truth this property
+        // has always rested on.
+        let client_host = dns_host_only(
+            config
+                .server
+                .wallet_facing
+                .public_base_url
+                .trim_end_matches('/'),
+        );
         assert!(
             response_uri.starts_with(&format!("https://{client_host}/")),
-            "response_uri {response_uri} must be same-origin as client_id host {client_host}"
+            "response_uri {response_uri} must be same-origin as the Verifier's public_base_url \
+             host {client_host}"
         );
+        assert!(payload["client_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("x509_hash:"));
     }
 
     /// The ephemeral response-encryption JWK must carry the metadata a wallet

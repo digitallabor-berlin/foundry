@@ -726,10 +726,19 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
     .unwrap();
     std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
 
-    let verifier_km =
-        foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
-            .unwrap();
-    std::fs::write(&verifier_key_path, &verifier_km.private_pem).unwrap();
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash, so the
+    // verifier signing key needs a leaf certificate now, not a bare key pair.
+    let verifier_leaf = foundry_core::pki::issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "localhost",
+        &["localhost".to_string()],
+        365,
+    )
+    .unwrap();
+    std::fs::write(&verifier_key_path, &verifier_leaf.key_pem).unwrap();
+    let verifier_cert_path = dir.path().join("verifier_leaf_cert.pem");
+    std::fs::write(&verifier_cert_path, &verifier_leaf.cert_pem).unwrap();
 
     let trust_root_path = dir.path().join("trust_root.pem");
     std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
@@ -751,7 +760,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
         "verifier_signing".to_string(),
         foundry_core::config::KeyEntry {
             private_key: verifier_key_path.to_str().unwrap().to_string(),
-            x5c: None,
+            x5c: Some(verifier_cert_path.to_str().unwrap().to_string()),
             alg: "ES256".to_string(),
         },
     );

@@ -75,8 +75,22 @@ async fn setup() -> (AppState, tempfile::TempDir) {
     let db_path = dir.path().join("foundry.db");
     let key_path = dir.path().join("issuer.pem");
 
-    let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).expect("key");
-    std::fs::write(&key_path, km.private_pem).expect("write key");
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash. This
+    // KeyEntry ("issuer_key") also signs the verifier's Request Objects
+    // (verifier.signing_key below), so it needs a leaf certificate whose SAN
+    // matches ISSUER's host, not a bare EC key pair.
+    let ca = foundry_core::pki::new_ca("Test Redaction Root CA", 3650).expect("ca");
+    let leaf = foundry_core::pki::issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "issuer.example.com",
+        &["issuer.example.com".to_string()],
+        365,
+    )
+    .expect("issue_leaf");
+    std::fs::write(&key_path, &leaf.key_pem).expect("write key");
+    let cert_path = dir.path().join("issuer_leaf_cert.pem");
+    std::fs::write(&cert_path, &leaf.cert_pem).expect("write cert");
 
     let storage = SqliteStorage::connect(db_path.to_str().expect("db path"))
         .await
@@ -87,7 +101,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
         "issuer_key".to_string(),
         KeyEntry {
             private_key: key_path.to_str().expect("key path").to_string(),
-            x5c: None,
+            x5c: Some(cert_path.to_str().expect("cert path").to_string()),
             alg: "ES256".to_string(),
         },
     );

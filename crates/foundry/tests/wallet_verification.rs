@@ -95,6 +95,12 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
     std::fs::write(&issuer_key_path, &issuer_leaf.key_pem).unwrap();
     std::fs::write(&verifier_key_path, &verifier_leaf.key_pem).unwrap();
 
+    // HAIP OpenID4VP L256: x509_hash requires a certificate to hash, so the
+    // verifier's leaf certificate (already generated above, SAN "localhost"
+    // matching public_base_url) must be persisted and wired into x5c.
+    let verifier_cert_path = dir.path().join("verifier_leaf_cert.pem");
+    std::fs::write(&verifier_cert_path, &verifier_leaf.cert_pem).unwrap();
+
     let trust_root_path = dir.path().join("trust_root.pem");
     std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
 
@@ -115,7 +121,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         "verifier_key".to_string(),
         KeyEntry {
             private_key: verifier_key_path.to_str().unwrap().to_string(),
-            x5c: None,
+            x5c: Some(verifier_cert_path.to_str().unwrap().to_string()),
             alg: "ES256".to_string(),
         },
     );

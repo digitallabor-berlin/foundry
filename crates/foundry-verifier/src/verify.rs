@@ -1,6 +1,7 @@
 use crate::dcql::{check_dcql_match, PresentedFormat};
 use crate::dcql_model::{CredentialFormat, DcqlQuery};
 use crate::error::VerificationError;
+use crate::request::verifier_x5c_leaf_pem;
 use crate::status::{check_status, StatusListResolver};
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
@@ -9,7 +10,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
-use foundry_core::url::dns_host_only;
 use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
 use josekit::jwk::Jwk;
 use serde_json::Value;
@@ -382,12 +382,19 @@ async fn do_verify_vp_response(
         .wallet_facing
         .public_base_url
         .trim_end_matches('/');
-    let host = dns_host_only(base_url);
-    let client_id = format!("x509_san_dns:{host}");
+
+    // HAIP OpenID4VP L256 / OpenID4VP L616: the Client Identifier is
+    // `x509_hash:<base64url(SHA-256(DER leaf))>`. A wallet binds its KB-JWT `aud`
+    // to the Client Identifier it received, so this MUST be computed by the same
+    // helper `build_signed_request_object` (request.rs) uses -- if the two ever
+    // diverge, every redirect-transport presentation fails as a policy verdict
+    // rather than a visible error.
+    let leaf_pem = verifier_x5c_leaf_pem(config)?;
+    let client_id = crate::request::x509_hash_client_id(&leaf_pem)?;
 
     // OpenID4VP L2543 / IETF SD-JWT VC Presentation Response L3179: over the
     // DC API transport the KB-JWT `aud` MUST be the Origin prefixed with
-    // `origin:`, not the `x509_san_dns:<host>` Client Identifier used by
+    // `origin:`, not the `x509_hash:<hash>` Client Identifier used by
     // every other transport. The Origin is a browsing-context property
     // (RFC 6454) this server cannot derive on its own, so it is read from
     // `verifier.dc_api_expected_origins` when configured; an unconfigured
@@ -609,8 +616,9 @@ mod tests {
     use crate::status::test_support::MockResolver;
     use crate::transaction::VerificationState;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, Config, IssuerConfig, LoggingConfig, Mode, ServerConfig,
-        StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
+        AdminConfig, AttestationMode, Config, IssuerConfig, KeyEntry, LoggingConfig, Mode,
+        ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig,
+        WalletFacingConfig,
     };
     use foundry_core::crypto::jwe::encrypt_compact;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
@@ -657,10 +665,49 @@ mod tests {
             .join("")
     }
 
+    /// The Client Identifier a wallet would have received for this fixture.
+    /// Computed, never hardcoded: a literal would silently diverge if the fixture
+    /// certificate is regenerated.
+    fn expected_client_id(config: &Config) -> String {
+        let leaf_pem = crate::request::verifier_x5c_leaf_pem(config).unwrap();
+        crate::request::x509_hash_client_id(&leaf_pem).unwrap()
+    }
+
     fn test_config(ca_pem: &str) -> (Config, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let cert_path = dir.path().join("root.pem");
         std::fs::write(&cert_path, ca_pem).unwrap();
+
+        // The verifier's own x509_hash leaf certificate (HAIP OpenID4VP L256),
+        // independent of the trust_anchors CA above: do_verify_vp_response never
+        // cross-checks it against trust_anchors, only against the dNSName SAN vs.
+        // public_base_url's host (build_signed_request_object does the equivalent
+        // check when emitting a request). SAN "localhost" matches this fixture's
+        // public_base_url below.
+        let verifier_ca = new_ca("Foundry Test Verifier Root", 3650).unwrap();
+        let verifier_leaf = issue_leaf(
+            &verifier_ca.cert_pem,
+            &verifier_ca.key_pem,
+            "localhost",
+            &["localhost".to_string()],
+            365,
+        )
+        .unwrap();
+        let verifier_leaf_path = dir.path().join("verifier_leaf.pem");
+        std::fs::write(&verifier_leaf_path, verifier_leaf.cert_pem.as_bytes()).unwrap();
+
+        let mut keys = BTreeMap::new();
+        keys.insert(
+            "verifier_key".to_string(),
+            KeyEntry {
+                // Never read by do_verify_vp_response (which only reads x5c); a
+                // placeholder is sufficient here.
+                private_key: "/dev/null".to_string(),
+                x5c: Some(verifier_leaf_path.to_str().unwrap().to_string()),
+                alg: "ES256".to_string(),
+            },
+        );
+
         let config = Config {
             server: ServerConfig {
                 wallet_facing: WalletFacingConfig {
@@ -680,7 +727,7 @@ mod tests {
                 path: "test.db".to_string(),
                 transaction_ttl_secs: 600,
             },
-            keys: Default::default(),
+            keys,
             trust_anchors: vec![TrustAnchor {
                 name: "test_ca".to_string(),
                 certs: cert_path.to_str().unwrap().to_string(),
@@ -783,9 +830,9 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost";
+        let client_id = expected_client_id(&config);
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, client_id, &tx.nonce).unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &tx.nonce).unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -853,7 +900,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
         )
         .unwrap();
@@ -946,7 +993,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
         )
         .unwrap();
@@ -1021,7 +1068,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
         )
         .unwrap();
@@ -1228,10 +1275,10 @@ mod tests {
         let issuer_pres =
             build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let client_id = "x509_san_dns:localhost";
+        let client_id = expected_client_id(&config);
         // Attach KB-JWT with wrong nonce
         let presentation =
-            attach_kb_jwt(issuer_pres, &holder_signer, client_id, "wrong-nonce").unwrap();
+            attach_kb_jwt(issuer_pres, &holder_signer, &client_id, "wrong-nonce").unwrap();
 
         let jwe_str = encrypt_compact(
             &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
@@ -1292,7 +1339,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
         )
         .unwrap();
@@ -1367,7 +1414,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx1.nonce,
         )
         .unwrap();
@@ -1461,7 +1508,7 @@ mod tests {
         let presentation = attach_kb_jwt(
             issuer_pres,
             &holder_signer,
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &tx.nonce,
         )
         .unwrap();
@@ -1536,7 +1583,7 @@ mod tests {
         // Handover applies (L2829-L2873) and the encrypted-response thumbprint
         // is present rather than null (L2870).
         let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
-            client_id: "x509_san_dns:localhost".to_string(),
+            client_id: expected_client_id(&config),
             nonce: tx.nonce.clone(),
             jwk_thumbprint: Some(
                 foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
@@ -1744,8 +1791,10 @@ mod tests {
 
     /// GAP-VP-07 / VP-0265 (OpenID4VP mdoc-adjacent IETF SD-JWT VC Presentation
     /// Response, L3179): "Over the DC API the `aud` claim MUST instead be the
-    /// Origin prefixed with `origin:`." `do_verify_vp_response` always computes
-    /// `expected_audience` as `x509_san_dns:<host>` (the Client Identifier),
+    /// Origin prefixed with `origin:`." `do_verify_vp_response` always computed
+    /// `expected_audience` as the `x509_san_dns:<host>` Client Identifier (now
+    /// `x509_hash:<hash>` per GAP-HAIP-05, but the bug this test guards against
+    /// is the same regardless of prefix),
     /// regardless of `tx.transport` -- there is no branch anywhere that
     /// switches to an Origin-prefixed audience for `dc_api` transport. A
     /// spec-conformant wallet responding to an *unsigned* DC API request (the
@@ -1947,8 +1996,8 @@ mod tests {
 
     /// Guards against over-broadening the fix: only the `dc_api` transport
     /// gets the Origin-prefixed audience treatment. A `request_uri` (or any
-    /// other) transport must still require the `x509_san_dns:<host>` Client
-    /// Identifier and reject an Origin-prefixed audience.
+    /// other) transport must still require the `x509_hash:<hash>` Client
+    /// Identifier (HAIP OpenID4VP L256) and reject an Origin-prefixed audience.
     #[tokio::test]
     async fn request_uri_transport_rejects_origin_prefixed_audience() {
         let (root_pem, leaf_cert, leaf_key) = test_pki();
@@ -2201,7 +2250,7 @@ mod tests {
         tx.dcql_query = mdoc_dcql_query();
 
         let legacy = pre_fix_ad_hoc_transcript(
-            "x509_san_dns:localhost",
+            &expected_client_id(&config),
             &format!("https://localhost:8443/vp/response/{}", tx.id),
             &tx.nonce,
         );
