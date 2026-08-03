@@ -372,6 +372,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         code_challenge_method: "S256".to_string(),
         issuer_state,
         scope: None,
+        dpop_jkt: None,
     };
     let outcome = handle_authorize_request(
         &storage,
@@ -1117,6 +1118,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         code_challenge_method: "S256".to_string(),
         issuer_state,
         scope: None,
+        dpop_jkt: None,
     };
     let outcome = handle_authorize_request(
         &storage,

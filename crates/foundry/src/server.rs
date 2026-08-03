@@ -335,6 +335,9 @@ pub(crate) struct AuthorizeQuery {
     /// HAIP OpenID4VCI L209: the Credential Type(s) to be issued.
     #[serde(default)]
     scope: Option<String>,
+    /// RFC 9449 §10: JWK Thumbprint of the wallet's DPoP key.
+    #[serde(default)]
+    dpop_jkt: Option<String>,
 }
 
 /// Percent-encode `params` (and `state`, if present) onto `base` as a query
@@ -387,6 +390,7 @@ async fn authorize_handler(
         code_challenge_method: q.code_challenge_method.unwrap_or_default(),
         issuer_state,
         scope: q.scope,
+        dpop_jkt: q.dpop_jkt,
     };
 
     let now = SystemTime::now()

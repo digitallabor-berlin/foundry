@@ -33,6 +33,17 @@ pub struct AuthorizeParams {
     /// (L186) and honour it when sent, not that a Wallet must send one;
     /// `issuer_state` remains the authoritative binding.
     pub scope: Option<String>,
+    /// RFC 9449 §10: the JWK Thumbprint (SHA-256, base64url) of the client's
+    /// proof-of-possession key, binding the issued authorization code to that
+    /// key. OPTIONAL for the client to send — but once sent, honouring it is a
+    /// MUST for the authorization server ("If they do not match, it MUST
+    /// reject the request"), which `handle_token_request` does.
+    ///
+    /// Not validated for shape here: any value that is not the thumbprint of
+    /// the key in the eventual DPoP proof simply fails that comparison at
+    /// `/token`. Rejecting malformed shapes here would add a second,
+    /// redundant failure mode for the same mistake.
+    pub dpop_jkt: Option<String>,
 }
 
 /// The result of processing an `/authorize` request. The HTTP layer
@@ -179,6 +190,10 @@ pub async fn handle_authorize_request(
     tx.authorization_code = Some(code.clone());
     tx.code_challenge = Some(params.code_challenge.clone());
     tx.code_challenge_method = Some(params.code_challenge_method.clone());
+    // RFC 9449 §10: pin the transaction to the client's DPoP key, so /token
+    // can reject a captured authorization code redeemed under a different key
+    // (§11.9).
+    tx.dpop_jkt = params.dpop_jkt.clone();
 
     if let Err(e) =
         save_transaction_with_auth_code(storage, &tx, tx_ttl_secs, AUTH_CODE_TTL_SECS, now_unix)
@@ -198,7 +213,9 @@ pub async fn handle_authorize_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{save_transaction_with_indices, IssuanceTransaction};
+    use crate::transaction::{
+        load_transaction, save_transaction_with_indices, IssuanceTransaction,
+    };
     use foundry_core::storage::SqliteStorage;
 
     async fn test_storage() -> SqliteStorage {
@@ -246,6 +263,7 @@ mod tests {
             code_challenge_method: "S256".to_string(),
             issuer_state: ISSUER_STATE.to_string(),
             scope: None,
+            dpop_jkt: None,
         }
     }
 
@@ -544,5 +562,66 @@ mod tests {
             AuthorizeOutcome::Success { state, .. } => assert_eq!(state, None),
             other => panic!("expected Success, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn dpop_jkt_is_persisted_on_the_transaction() {
+        // RFC 9449 §10: the dpop_jkt authorization request parameter binds the
+        // issued authorization code to the client's proof-of-possession key.
+        let storage = test_storage().await;
+        let tx = sample_tx(IssuanceState::Offered);
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let mut params = valid_params();
+        params.dpop_jkt = Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string());
+
+        let outcome = handle_authorize_request(
+            &storage,
+            &params,
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_010,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+        assert!(matches!(outcome, AuthorizeOutcome::Success { .. }));
+
+        let loaded = load_transaction(&storage, &tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.dpop_jkt,
+            Some("0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_absent_dpop_jkt_leaves_the_transaction_unpinned() {
+        // §10: "Use of the dpop_jkt authorization request parameter is OPTIONAL."
+        let storage = test_storage().await;
+        let tx = sample_tx(IssuanceState::Offered);
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let outcome = handle_authorize_request(
+            &storage,
+            &valid_params(),
+            ISSUER_IDENTIFIER,
+            600,
+            1_700_000_010,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
+        assert!(matches!(outcome, AuthorizeOutcome::Success { .. }));
+
+        let loaded = load_transaction(&storage, &tx.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.dpop_jkt, None);
     }
 }
