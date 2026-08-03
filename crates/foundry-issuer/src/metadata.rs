@@ -2,7 +2,7 @@
 //! Metadata, defined directly against the specification rather than derived
 //! from a generic protocol library's types.
 
-use foundry_core::config::Config;
+use foundry_core::config::{Config, Mode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -68,6 +68,17 @@ pub struct AuthorizationServerMetadata {
     /// `skip_serializing_if`): §2.3 wants it present and `true`, not merely
     /// inferable from its absence.
     pub authorization_response_iss_parameter_supported: bool,
+    /// RFC 9449 §5.1: "A JSON array containing a list of the JWS alg values
+    /// (from the [IANA.JOSE.ALGS] registry) supported by the authorization
+    /// server for DPoP proof JWTs."
+    ///
+    /// Omitted entirely when `issuer.dpop.mode` is `Disabled` — the field's
+    /// presence *is* the support signal, so advertising it while ignoring every
+    /// proof would tell a wallet it can sender-constrain when it cannot.
+    /// Contrast `authorization_response_iss_parameter_supported` above, which
+    /// RFC 9207 §2.3 wants present-and-true unconditionally.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dpop_signing_alg_values_supported: Vec<String>,
 }
 
 /// Build the Credential Issuer Metadata document, fully derived from
@@ -145,6 +156,14 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
         code_challenge_methods_supported: vec!["S256".to_string()],
         pre_authorized_grant_anonymous_access_supported: true,
         authorization_response_iss_parameter_supported: true,
+        dpop_signing_alg_values_supported: if cfg.issuer.dpop.mode == Mode::Disabled {
+            Vec::new()
+        } else {
+            // ES256 only: it is what josekit verification is wired for
+            // throughout this crate, and HAIP's crypto-suites section mandates
+            // it for every JWS in this profile.
+            vec!["ES256".to_string()]
+        },
     }
 }
 
@@ -396,5 +415,47 @@ mod tests {
 
         let meta = build_authorization_server_metadata(&cfg);
         assert_eq!(meta.issuer, cfg.issuer.credential_issuer);
+    }
+
+    #[test]
+    fn advertises_dpop_signing_algs_when_dpop_is_enabled() {
+        // RFC 9449 §5.1: dpop_signing_alg_values_supported is "A JSON array
+        // containing a list of the JWS alg values supported by the authorization
+        // server for DPoP proof JWTs". Its presence is the support signal.
+        let mut cfg = test_config();
+        cfg.issuer.dpop.mode = Mode::Optional;
+        let md = build_authorization_server_metadata(&cfg);
+        assert_eq!(
+            md.dpop_signing_alg_values_supported,
+            vec!["ES256".to_string()]
+        );
+    }
+
+    #[test]
+    fn advertises_dpop_signing_algs_under_required_mode_too() {
+        let mut cfg = test_config();
+        cfg.issuer.dpop.mode = Mode::Required;
+        let md = build_authorization_server_metadata(&cfg);
+        assert_eq!(
+            md.dpop_signing_alg_values_supported,
+            vec!["ES256".to_string()]
+        );
+    }
+
+    #[test]
+    fn omits_dpop_signing_algs_when_dpop_is_disabled() {
+        // Advertising support while ignoring every proof would be a lie: a wallet
+        // reading this field would conclude it can sender-constrain when it cannot.
+        let mut cfg = test_config();
+        cfg.issuer.dpop.mode = Mode::Disabled;
+        let md = build_authorization_server_metadata(&cfg);
+        assert!(md.dpop_signing_alg_values_supported.is_empty());
+
+        // skip_serializing_if means an empty vec is absent from the wire, not `[]`.
+        let json = serde_json::to_value(&md).unwrap();
+        assert!(
+            json.get("dpop_signing_alg_values_supported").is_none(),
+            "an empty list MUST be omitted, not serialized as []"
+        );
     }
 }

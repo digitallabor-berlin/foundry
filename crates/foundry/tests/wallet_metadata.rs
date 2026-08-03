@@ -128,4 +128,12 @@ async fn serves_authorization_server_metadata() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["issuer"], "https://localhost:8443");
     assert_eq!(json["token_endpoint"], "https://localhost:8443/token");
+
+    // RFC 9449 §5.1 -- HAIP OpenID4VCI L163 requires DPoP support, and this
+    // field is how a wallet discovers it. The harness builds the default
+    // config, so mode is Optional here (Task 1) and the field must be present.
+    assert_eq!(
+        json["dpop_signing_alg_values_supported"],
+        serde_json::json!(["ES256"])
+    );
 }
