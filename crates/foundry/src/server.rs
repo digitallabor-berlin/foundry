@@ -324,6 +324,9 @@ pub(crate) struct AuthorizeQuery {
     code_challenge_method: Option<String>,
     #[serde(default)]
     issuer_state: Option<String>,
+    /// HAIP OpenID4VCI L209: the Credential Type(s) to be issued.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Percent-encode `params` (and `state`, if present) onto `base` as a query
@@ -375,6 +378,7 @@ async fn authorize_handler(
         code_challenge: q.code_challenge.unwrap_or_default(),
         code_challenge_method: q.code_challenge_method.unwrap_or_default(),
         issuer_state,
+        scope: q.scope,
     };
 
     let now = SystemTime::now()
@@ -383,12 +387,21 @@ async fn authorize_handler(
         .unwrap_or(0);
     let tx_ttl_secs = state.config.storage.transaction_ttl_secs;
 
+    // HAIP OpenID4VCI L209 -- resolved scope -> credential type id.
+    let scopes: std::collections::BTreeMap<String, String> = state
+        .config
+        .credential_types
+        .iter()
+        .map(|ct| (ct.resolved_scope().to_string(), ct.id.clone()))
+        .collect();
+
     let outcome = foundry_issuer::handle_authorize_request(
         state.storage.as_ref(),
         &params,
         &state.config.issuer.credential_issuer,
         tx_ttl_secs,
         now,
+        &scopes,
     )
     .await;
 

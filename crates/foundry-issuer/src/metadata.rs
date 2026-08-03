@@ -370,4 +370,29 @@ mod tests {
             "eu.europa.ec.eudi.pid.1"
         );
     }
+
+    /// VCI-0145 (OpenID4VCI Credential Issuer Metadata L1392): "The Authorization
+    /// Server MUST be able to uniquely identify the Credential Issuer based on the
+    /// scope value." foundry's Authorization Server always serves exactly one
+    /// Credential Issuer (`config.issuer.credential_issuer`), so `issuer` in
+    /// `AuthorizationServerMetadata` is the same single value no matter which
+    /// Credential Type's scope a Wallet used to get there -- there is only ever one
+    /// candidate to identify.
+    #[test]
+    fn authorization_server_metadata_issuer_is_independent_of_credential_type_scope() {
+        let mut cfg = test_config();
+        cfg.credential_types.push(CredentialType {
+            id: "mdl".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://example.test/vct/mdl".to_string()),
+            doctype: None,
+            scope: Some("eu.europa.ec.eudi.pid.1".to_string()),
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![],
+        });
+
+        let meta = build_authorization_server_metadata(&cfg);
+        assert_eq!(meta.issuer, cfg.issuer.credential_issuer);
+    }
 }
