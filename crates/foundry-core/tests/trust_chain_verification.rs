@@ -195,3 +195,56 @@ fn android_chain_is_rejected_outside_the_intermediate_validity_window() {
         "expected Expired, got {err:?}"
     );
 }
+
+#[test]
+fn a_non_ca_certificate_cannot_act_as_an_intermediate() {
+    // `issue_leaf` emits IsCa::NoCa with keyUsage: DigitalSignature only. Using
+    // it to sign another certificate is the privilege escalation that DN-only
+    // path building permitted: any holder of a chained leaf could mint leaves.
+    let root = new_ca("Escalation Test Root CA", 3650).expect("generate root");
+    let non_ca = issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "notaca.test.local",
+        &["notaca.test.local".to_string()],
+        3650,
+    )
+    .expect("issue non-CA certificate");
+
+    let forged = issue_leaf(
+        &non_ca.cert_pem,
+        &non_ca.key_pem,
+        "escalated.test.local",
+        &["escalated.test.local".to_string()],
+        365,
+    )
+    .expect("issue leaf under the non-CA certificate");
+
+    let store = TrustStore::from_pems(&[root.cert_pem.clone().into_bytes()]).expect("store");
+
+    let err = validate_chain(
+        forged.cert_pem.as_bytes(),
+        &[non_ca.cert_pem.clone().into_bytes()],
+        &store,
+        now_secs(),
+    )
+    .expect_err("a chain through a non-CA certificate must be rejected");
+    assert!(
+        matches!(err, TrustError::UntrustedChain),
+        "expected UntrustedChain, got {err:?}"
+    );
+
+    // Positive control: a leaf signed directly by the real CA validates against
+    // the same store. Without this, the rejection above could be caused by
+    // anything.
+    let legitimate = issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "legit.test.local",
+        &["legit.test.local".to_string()],
+        365,
+    )
+    .expect("issue legitimate leaf");
+    validate_chain(legitimate.cert_pem.as_bytes(), &[], &store, now_secs())
+        .expect("a leaf signed by the real CA must validate");
+}
