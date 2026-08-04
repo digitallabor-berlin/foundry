@@ -2110,6 +2110,114 @@ async fn no_dpop_nonce_header_is_emitted_when_nonce_mode_is_disabled() {
     let cred_res = post_credential_with_dpop(&state, &access_token, &cred_proof).await;
     assert_eq!(cred_res.status(), StatusCode::OK);
     assert!(cred_res.headers().get("DPoP-Nonce").is_none());
+
+    // The default posture must also hold at the unauthenticated freshness
+    // endpoint: enabling nothing means emitting nothing, anywhere.
+    let wallet_app = wallet_router(state.clone());
+    let nonce_req = Request::builder()
+        .method("POST")
+        .uri("/nonce")
+        .body(Body::empty())
+        .unwrap();
+    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    assert!(nonce_res.headers().get("DPoP-Nonce").is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Google Wallet vendor profile (docs/specs/google-wallet-openid4vci-profile.md),
+// "Credential Endpoint": "DPoP Nonce is expected to be returned from the c_nonce
+// endpoint." No pinned specification requires this; OpenID4VCI 1.1 WG draft
+// §8.2-4 standardises it and this repository pins 1.0. See
+// docs/superpowers/specs/2026-08-04-dpop-nonce-freshness-endpoints-design.md.
+// ---------------------------------------------------------------------------
+
+/// The primary behaviour, under both enabled modes.
+#[tokio::test]
+async fn the_nonce_endpoint_supplies_a_dpop_nonce_when_enabled() {
+    for nonce_mode in [Mode::Optional, Mode::Required] {
+        let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+            mode: Mode::Required,
+            nonce_mode: nonce_mode.clone(),
+            ..DpopConfig::default()
+        })
+        .await;
+        let wallet_app = wallet_router(state.clone());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/nonce")
+            .body(Body::empty())
+            .unwrap();
+        let res = wallet_app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::OK, "nonce_mode: {nonce_mode:?}");
+        assert!(
+            res.headers()
+                .get("DPoP-Nonce")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|s| !s.is_empty()),
+            "nonce_mode {nonce_mode:?}: /nonce must supply a DPoP-Nonce"
+        );
+        // RFC 9449 §8: never more than one.
+        assert_eq!(res.headers().get_all("DPoP-Nonce").iter().count(), 1);
+        // OpenID4VCI §7.2 must survive the return-type change.
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
+    }
+}
+
+/// The header must carry a *usable* nonce, not merely a well-formed one: the
+/// value taken from `/nonce` is accepted by the very next `/token` DPoP proof
+/// under `nonce_mode: required`, which is the whole point of emitting it.
+/// This is the test that would catch a wrong `Domain` or a wrong TTL.
+#[tokio::test]
+async fn a_nonce_from_the_nonce_endpoint_is_accepted_at_the_token_endpoint() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+
+    let wallet_app = wallet_router(state.clone());
+    let nonce_req = Request::builder()
+        .method("POST")
+        .uri("/nonce")
+        .body(Body::empty())
+        .unwrap();
+    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    let dpop_nonce = nonce_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("/nonce must supply a DPoP-Nonce to retry with")
+        .to_string();
+
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/token",
+        "jti-nonce-endpoint-1",
+        pop_test_now_secs(),
+        None,
+        Some(&dpop_nonce),
+    );
+    let res = post_token_with_dpop(&state, &pre_auth_code, &proof).await;
+
+    // No `use_dpop_nonce` round trip: the first attempt succeeds.
+    assert_eq!(
+        res.status(),
+        StatusCode::OK,
+        "a nonce minted by /nonce must satisfy nonce_mode: required at /token"
+    );
 }
 
 /// A nonce-less proof must NOT be turned into a nonce error when the real
