@@ -2612,14 +2612,51 @@ var qrcode = function() {
   }
 
   // --- Issuance ---
+  let lastDcApiOffer = null;
+  let lastIssuanceId = null;
+
+  function initIssuanceDcApiTrigger() {
+    const dcApiBtn = document.getElementById('offer-dc-api-btn');
+    const errorEl = document.getElementById('issuance-error');
+
+    dcApiBtn.addEventListener('click', async function () {
+      if (!supportsDcApi('create', 'openid4vci-v1')) {
+        showError(errorEl, new Error('This browser does not support the Digital Credentials API for issuance.'));
+        return;
+      }
+      dcApiBtn.disabled = true;
+      try {
+        await invokeDcCreate(lastDcApiOffer);
+        // Nothing to relay: unlike presentation, the wallet talks directly to
+        // the wallet-facing listener (/token, /credential) after the handoff.
+        // The pollIssuance loop already running since "Create Offer" was
+        // clicked observes the Offered -> Issued transition on its next tick.
+      } catch (err) {
+        showError(errorEl, isDcApiNotSupportedError(err)
+          ? new Error('This browser does not support the Digital Credentials API for issuance.')
+          : err);
+      } finally {
+        dcApiBtn.disabled = false;
+      }
+    });
+  }
+
   function initIssuance() {
+    initIssuanceDcApiTrigger();
     const btn = document.getElementById('create-offer-btn');
     const errorEl = document.getElementById('issuance-error');
     const resultEl = document.getElementById('issuance-result');
+    const dcApiBtn = document.getElementById('offer-dc-api-btn');
+    const txCodeEl = document.getElementById('issuance-tx-code');
 
     btn.addEventListener('click', async function () {
       clearError(errorEl);
       resultEl.classList.add('hidden');
+      stopIssuancePolling();
+      dcApiBtn.classList.add('hidden');
+      txCodeEl.classList.add('hidden');
+      lastDcApiOffer = null;
+      lastIssuanceId = null;
 
       const credentialTypeId = document.getElementById('cred-type-id').value.trim();
       const claimsRaw = document.getElementById('claims-json').value;
@@ -2650,7 +2687,18 @@ var qrcode = function() {
         const offerOpenEl = document.getElementById('offer-open');
         offerOpenEl.href = body.credential_offer_uri;
         offerOpenEl.classList.remove('hidden');
+
+        if (body.dc_api_offer) {
+          lastDcApiOffer = prepareDcApiRequest(body.dc_api_offer, 'openid4vci-v1');
+          lastIssuanceId = body.transaction_id;
+          dcApiBtn.classList.remove('hidden');
+        }
+
+        document.getElementById('issuance-status').textContent = 'offered';
+        document.getElementById('issuance-status').className = 'badge offered';
         resultEl.classList.remove('hidden');
+
+        pollIssuance(body.transaction_id, errorEl);
       } catch (err) {
         showError(errorEl, err);
       } finally {
@@ -2734,6 +2782,67 @@ var qrcode = function() {
     tick();
   }
 
+  // --- Issuance status polling ---
+  // Its own timer, deliberately not shared with the verification card's
+  // `pollTimer`: a shared timer would let creating a verification request
+  // silently cancel issuance polling.
+  let issuancePollTimer = null;
+  let issuancePollFailures = 0;
+
+  function stopIssuancePolling() {
+    if (issuancePollTimer) {
+      clearTimeout(issuancePollTimer);
+      issuancePollTimer = null;
+    }
+  }
+
+  function renderIssuanceStatus(status) {
+    const statusEl = document.getElementById('issuance-status');
+    const txCodeEl = document.getElementById('issuance-tx-code');
+
+    statusEl.textContent = status.state;
+    statusEl.className = 'badge ' + status.state;
+
+    if (status.tx_code) {
+      txCodeEl.textContent = 'Transaction code (the wallet will prompt for this): ' + status.tx_code;
+      txCodeEl.classList.remove('hidden');
+    } else {
+      txCodeEl.textContent = '';
+      txCodeEl.classList.add('hidden');
+    }
+  }
+
+  function pollIssuance(id, errorEl) {
+    stopIssuancePolling();
+    issuancePollFailures = 0;
+
+    function tick() {
+      adminFetch('/admin/issuance/offers/' + encodeURIComponent(id), { method: 'GET' })
+        .then(function (status) {
+          issuancePollFailures = 0;
+          renderIssuanceStatus(status);
+          if (status.state === 'offered') {
+            issuancePollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+          }
+        })
+        .catch(function (err) {
+          if (err && err.status) {
+            // Hard error (404/500/...): stop polling, surface it.
+            showError(errorEl, err);
+            return;
+          }
+          issuancePollFailures += 1;
+          if (issuancePollFailures >= MAX_POLL_FAILURES) {
+            showError(errorEl, new Error('Gave up polling issuance status after ' + MAX_POLL_FAILURES + ' failed attempts.'));
+            return;
+          }
+          issuancePollTimer = setTimeout(tick, POLL_INTERVAL_MS);
+        });
+    }
+
+    tick();
+  }
+
   // --- Digital Credentials API (dc_api transport) ---
   // Function names and the transient-activation constraint documented on
   // invokeDc are aligned with the proven implementation in
@@ -2772,10 +2881,10 @@ var qrcode = function() {
       || /CredentialContainer/i.test(message);
   }
 
-  function prepareDcApiRequest(dcApiRequestData) {
+  function prepareDcApiRequest(dcApiRequestData, protocol) {
     return {
       digital: {
-        requests: [{ protocol: 'openid4vp-v1-unsigned', data: dcApiRequestData }]
+        requests: [{ protocol: protocol, data: dcApiRequestData }]
       }
     };
   }
@@ -2789,6 +2898,19 @@ var qrcode = function() {
       throw new Error('No DigitalCredential returned from navigator.credentials.get');
     }
     return credentialResponse.data;
+  }
+
+  // Issuance counterpart of invokeDc, and deliberately NOT symmetric with it:
+  // no return-shape assertion. Chrome's documented example for issuance
+  // ignores create()'s return value entirely, so asserting
+  // `constructor?.name === 'DigitalCredential'` the way invokeDc does would
+  // manufacture failures on a successful handoff. Non-throw is the success
+  // signal.
+  //
+  // Same transient-activation constraint as invokeDc: no await may land between
+  // the click and navigator.credentials.create().
+  async function invokeDcCreate(req) {
+    await navigator.credentials.create(req);
   }
 
   function initDcApiTrigger() {
@@ -2895,7 +3017,7 @@ var qrcode = function() {
           verificationOpenEl.classList.add('hidden');
           if (body.dc_api_request) {
             uriEl.textContent = '(dc_api transport: click "Trigger via Digital Credentials API" below)';
-            lastDcApiRequest = prepareDcApiRequest(body.dc_api_request);
+            lastDcApiRequest = prepareDcApiRequest(body.dc_api_request, 'openid4vp-v1-unsigned');
             lastVerificationId = body.verification_id;
             dcApiBtn.classList.remove('hidden');
           } else {
