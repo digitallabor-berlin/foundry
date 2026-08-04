@@ -109,6 +109,23 @@ transitions — MUST align with them.
 | [`draft-ietf-oauth-attestation-based-client-auth-07.txt`](docs/specs/draft-ietf-oauth-attestation-based-client-auth-07.txt) | ABCA — the Client Attestation JWT and Client Attestation PoP JWT formats OpenID4VCI's Wallet Attestation section (Appendix E, L2564/L2600) incorporates by reference; `foundry-issuer`'s `attestation.rs` and the `/token` route. Where OpenID4VCI defers to ABCA, ABCA governs. Kept as `.txt`, not `.md` — verbatim fidelity to the IETF text is the point of a pinned draft. |
 | [`rfc9449-dpop.txt`](docs/specs/rfc9449-dpop.txt) | DPoP — the sender-constrained access token mechanism HAIP OpenID4VCI L163 mandates by reference (`MUST support DPoP as defined in [@!RFC9449]`); `foundry-issuer`'s `dpop.rs`, the `/token` route and the `/credential` route. Where HAIP defers to RFC 9449, RFC 9449 governs. Kept as `.txt`, not `.md` — verbatim fidelity to the RFC text is the point of a pinned spec. |
 
+One pinned source is **not** a standards-track specification and is governed by
+its own rule below:
+
+| Vendor profile | Governs |
+|---|---|
+| [`google-wallet-openid4vci-profile.md`](docs/specs/google-wallet-openid4vci-profile.md) | Google Wallet's OpenID4VCI implementation — the choices it makes where the specifications permit several, and the two places it expects behaviour no specification defines (a `DPoP-Nonce` header on the ABCA challenge response and on the OpenID4VCI Nonce Endpoint response). Also the source of the real Android Keystore attestation chains used as interop fixtures. Governs foundry's Google-accommodating behaviour only — see the vendor-profile rule below. |
+
+**Vendor-profile rule.** A vendor profile records one implementation's
+observable behaviour and requirements. It is normative **only** for what foundry
+does when accommodating that implementation. It is **never** grounds for
+violating a MUST in a standards-track specification above; where the two
+conflict, the specification wins and the conflict is recorded as a known
+limitation. Behaviour whose only justification is a vendor profile MUST carry a
+code comment naming the profile, so a reader can tell vendor accommodation from
+conformance. Do not extend the "where HAIP is stricter, HAIP wins" precedence to
+a vendor profile by analogy — that would let accommodation read as conformance.
+
 Rules:
 
 - **Consult the spec before implementing or changing protocol-facing
