@@ -7,6 +7,7 @@ use utoipa::OpenApi;
         crate::server::health,
         crate::server::ready,
         crate::server::create_offer_handler,
+        crate::server::get_issuance_offer_handler,
         crate::server::create_verification_handler,
         crate::server::get_verification_handler,
         crate::server::post_admin_dc_api_response_handler,
@@ -14,6 +15,8 @@ use utoipa::OpenApi;
     components(schemas(
         foundry_issuer::CreateOfferRequest,
         foundry_issuer::CreateOfferResponse,
+        foundry_issuer::IssuanceState,
+        crate::server::AdminIssuanceStatus,
         foundry_issuer::CredentialOffer,
         foundry_issuer::CredentialOfferGrants,
         foundry_issuer::PreAuthorizedCodeGrant,

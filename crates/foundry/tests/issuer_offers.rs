@@ -225,3 +225,161 @@ async fn returns_bad_request_for_unknown_credential_type() {
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["error"].as_str().unwrap().contains("does-not-exist"));
 }
+
+/// Helper: create an offer and return the parsed response body.
+async fn create_offer_json(app: &axum::Router, tx_code_required: bool) -> serde_json::Value {
+    let body = serde_json::json!({
+        "credential_type_id": "pid",
+        "claims": {},
+        "tx_code_required": tx_code_required
+    });
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Helper: GET the status endpoint, returning (status, parsed body).
+async fn get_offer_status(app: &axum::Router, id: &str) -> (StatusCode, serde_json::Value) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/admin/issuance/offers/{id}"))
+                .header(AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn offer_status_reports_offered_for_a_fresh_offer() {
+    let app = test_app(true).await;
+    let offer = create_offer_json(&app, false).await;
+    let id = offer["transaction_id"].as_str().unwrap();
+
+    let (status, json) = get_offer_status(&app, id).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["transaction_id"], id);
+    assert_eq!(json["credential_type_id"], "pid");
+    assert_eq!(json["state"], "offered");
+    assert!(json["created_at"].is_i64());
+}
+
+/// The security property from the design doc: `IssuanceTransaction` holds
+/// `pre_authorized_code` and `access_token`, which are live bearer credentials
+/// against the wallet-facing listener. Returning them would let any admin-key
+/// holder redeem an offer intended for a wallet, so the endpoint returns a
+/// narrow projection rather than the transaction.
+#[tokio::test]
+async fn offer_status_never_returns_bearer_credentials_or_claims() {
+    let app = test_app(true).await;
+    let offer = create_offer_json(&app, false).await;
+    let id = offer["transaction_id"].as_str().unwrap();
+
+    let (status, json) = get_offer_status(&app, id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let obj = json.as_object().expect("status response must be an object");
+    for forbidden in [
+        "pre_authorized_code",
+        "access_token",
+        "authorization_code",
+        "code_challenge",
+        "code_challenge_method",
+        "dpop_jkt",
+        "claims",
+        "redirect_uri",
+        "issuer_state",
+    ] {
+        assert!(
+            !obj.contains_key(forbidden),
+            "offer status must not expose '{forbidden}'; body was: {json}"
+        );
+    }
+}
+
+/// `tx_code` is generated and persisted but surfaced nowhere else, which makes
+/// `tx_code_required: true` untestable through the console. Its whole purpose
+/// is out-of-band relay to the person completing the flow, and the
+/// authenticated operator who created the offer is that channel.
+#[tokio::test]
+async fn offer_status_returns_the_tx_code_when_one_was_generated() {
+    let app = test_app(true).await;
+    let offer = create_offer_json(&app, true).await;
+    let id = offer["transaction_id"].as_str().unwrap();
+
+    let (status, json) = get_offer_status(&app, id).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let tx_code = json["tx_code"]
+        .as_str()
+        .expect("tx_code must be present when tx_code_required was set");
+    assert_eq!(tx_code.len(), 4, "default tx_code length is 4 digits");
+    assert!(tx_code.chars().all(|c| c.is_ascii_digit()));
+}
+
+#[tokio::test]
+async fn offer_status_omits_the_tx_code_when_none_was_generated() {
+    let app = test_app(true).await;
+    let offer = create_offer_json(&app, false).await;
+    let id = offer["transaction_id"].as_str().unwrap();
+
+    let (_, json) = get_offer_status(&app, id).await;
+
+    assert!(
+        json.get("tx_code").is_none(),
+        "tx_code must be omitted when the offer needs none; body was: {json}"
+    );
+}
+
+#[tokio::test]
+async fn offer_status_returns_404_for_an_unknown_transaction_id() {
+    let app = test_app(true).await;
+    let (status, _) = get_offer_status(&app, "no-such-transaction").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn offer_status_requires_the_admin_bearer_token() {
+    let app = test_app(true).await;
+    let offer = create_offer_json(&app, false).await;
+    let id = offer["transaction_id"].as_str().unwrap();
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/admin/issuance/offers/{id}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}

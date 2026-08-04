@@ -166,6 +166,8 @@ async fn full_issuance_flow_end_to_end() {
         .unwrap();
     let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
 
+    let transaction_id = offer_json["transaction_id"].as_str().unwrap().to_string();
+
     let pre_auth_code = offer_json["credential_offer"]["grants"]
         ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
         .as_str()
@@ -243,6 +245,26 @@ async fn full_issuance_flow_end_to_end() {
     let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
     assert!(!credential_str.is_empty());
     assert!(credential_str.contains('~')); // SD-JWT VC format contains ~ separators
+
+    // 5. The admin status endpoint must now report the transaction as issued —
+    // this is what the console polls to show a real outcome rather than just
+    // "an offer was created".
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let status_req = Request::builder()
+        .method("GET")
+        .uri(format!("/admin/issuance/offers/{transaction_id}"))
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let status_res = admin_app.oneshot(status_req).await.unwrap();
+    assert_eq!(status_res.status(), StatusCode::OK);
+
+    let status_bytes = axum::body::to_bytes(status_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let status_json: serde_json::Value = serde_json::from_slice(&status_bytes).unwrap();
+    assert_eq!(status_json["state"], "issued");
 }
 
 #[tokio::test]

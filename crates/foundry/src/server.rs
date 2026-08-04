@@ -11,7 +11,8 @@ use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
 use foundry_issuer::{
     AuthorizationServerMetadata, CreateOfferRequest, CreateOfferResponse, CredentialIssuerMetadata,
-    CredentialRequest, CredentialResponse, NonceResponse, TokenRequest, TokenResponse,
+    CredentialRequest, CredentialResponse, IssuanceState, NonceResponse, TokenRequest,
+    TokenResponse,
 };
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
@@ -66,6 +67,10 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
 
     let authenticated = Router::new()
         .route("/admin/issuance/offers", post(create_offer_handler))
+        .route(
+            "/admin/issuance/offers/:id",
+            get(get_issuance_offer_handler),
+        )
         .route(
             "/admin/verification/requests",
             post(create_verification_handler),
@@ -193,6 +198,66 @@ pub(crate) async fn create_offer_handler(
         .await
         .map(Json)
         .map_err(|e| admin_error_response(&e))
+}
+
+/// Narrow, admin-facing projection of a [`foundry_issuer::IssuanceTransaction`].
+///
+/// Deliberately **not** the whole transaction, unlike `get_verification_handler`:
+/// `IssuanceTransaction` holds `pre_authorized_code` and `access_token`, which
+/// are live bearer credentials against the wallet-facing listener. Returning
+/// them would let any admin-key holder redeem an offer intended for a wallet,
+/// turning a read endpoint into a credential-exfiltration endpoint. Also
+/// excluded: `authorization_code`, `code_challenge`, `code_challenge_method`,
+/// `dpop_jkt`, `claims`, `redirect_uri`, `issuer_state`.
+///
+/// `tx_code` **is** included. Its entire purpose is to be relayed out-of-band to
+/// the person completing the flow, and the already-authenticated operator who
+/// created the offer is that channel; it is surfaced nowhere else today, which
+/// makes `tx_code_required: true` untestable through the console. Root
+/// AGENTS.md §4.5 forbids *logging* transaction codes and continues to apply
+/// unchanged.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AdminIssuanceStatus {
+    transaction_id: String,
+    credential_type_id: String,
+    state: IssuanceState,
+    created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_list_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_code: Option<String>,
+}
+
+/// Read the state of an issuance transaction, so the admin console can show
+/// whether a credential was actually issued rather than only that an offer was
+/// created.
+#[utoipa::path(
+    get,
+    path = "/admin/issuance/offers/{id}",
+    responses(
+        (status = 200, body = AdminIssuanceStatus),
+        (status = 404, description = "No such issuance transaction")
+    )
+)]
+#[tracing::instrument(skip_all)]
+pub(crate) async fn get_issuance_offer_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<AdminIssuanceStatus>, StatusCode> {
+    let tx = foundry_issuer::load_transaction(state.storage.as_ref(), &id)
+        .await
+        .map_err(|e| internal_error("load_transaction", e.kind(), e))?;
+    match tx {
+        Some(tx) => Ok(Json(AdminIssuanceStatus {
+            transaction_id: tx.transaction_id,
+            credential_type_id: tx.credential_type_id,
+            state: tx.state,
+            created_at: tx.created_at,
+            status_list_index: tx.status_list_index,
+            tx_code: tx.tx_code,
+        })),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 /// Cap on `error.detail` in log records and persisted verdicts. Long enough for
