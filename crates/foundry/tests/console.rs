@@ -248,3 +248,85 @@ async fn console_has_digital_credentials_api_trigger_for_dc_api_transport() {
         "console page should have a button to trigger the Digital Credentials API for dc_api transport"
     );
 }
+
+#[tokio::test]
+async fn console_has_digital_credentials_api_trigger_for_issuance() {
+    // Chrome 143 added navigator.credentials.create() for credential issuance.
+    // The console must expose it alongside the existing QR / deep-link
+    // affordances, and must be able to report a real outcome (offered ->
+    // issued) rather than only that an offer was created.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"id="offer-dc-api-btn""#),
+        "console page should have a button to add the offer to a wallet via the Digital Credentials API"
+    );
+    assert!(
+        html.contains(r#"id="issuance-status""#),
+        "console page should have an issuance status badge so the operator sees whether the credential was issued"
+    );
+    assert!(
+        html.contains(r#"id="issuance-tx-code""#),
+        "console page should have a place to display the tx_code the wallet will prompt for"
+    );
+    assert!(
+        html.contains("navigator.credentials.create"),
+        "console JS should invoke navigator.credentials.create for issuance"
+    );
+    assert!(
+        html.contains("openid4vci-v1"),
+        "console JS should use the openid4vci-v1 DC API protocol identifier"
+    );
+}
+
+#[tokio::test]
+async fn console_styles_the_issuance_badge_states() {
+    // The stylesheet historically defined only the verification states
+    // (pending / verified / failed). The issuance card reports `offered` and
+    // `issued`, and renders the server's state name verbatim as the class —
+    // so both need rules, or the badge renders unstyled.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(".badge.offered"),
+        "console CSS must style the `offered` issuance state"
+    );
+    assert!(
+        html.contains(".badge.issued"),
+        "console CSS must style the `issued` issuance state"
+    );
+}

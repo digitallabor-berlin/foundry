@@ -103,6 +103,13 @@
   .badge.pending { background: rgba(224,168,63,0.18); color: var(--amber); }
   .badge.verified { background: rgba(53,192,122,0.18); color: var(--green); }
   .badge.failed { background: rgba(224,86,86,0.18); color: var(--red); }
+  /* Issuance states. The issuance badge renders the state name the server
+     reported verbatim as its class, so `offered` and `issued` need their own
+     rules. Mapping them onto `pending` / `verified` in JS would make the
+     rendered class disagree with the reported state — exactly the kind of
+     silent translation that makes a debugging tool untrustworthy. */
+  .badge.offered { background: rgba(224,168,63,0.18); color: var(--amber); }
+  .badge.issued { background: rgba(53,192,122,0.18); color: var(--green); }
   .checks { list-style: none; padding: 0; margin: 10px 0; }
   .checks.hidden { display: none; }
   .checks li { font-size: 13px; padding: 4px 0; display: flex; gap: 8px; align-items: baseline; }
@@ -153,8 +160,11 @@
         <span class="uri-text" id="offer-uri"></span>
         <button class="copy-btn" data-copy-target="offer-uri">Copy</button>
         <a class="open-btn hidden" id="offer-open" target="_self">Open in Wallet</a>
+        <button class="open-btn hidden" id="offer-dc-api-btn">Add to Wallet (Digital Credentials API)</button>
       </div>
       <div class="qr-wrap" id="offer-qr"></div>
+      <p>Status: <span class="badge offered" id="issuance-status">offered</span></p>
+      <p class="hint hidden" id="issuance-tx-code"></p>
       <pre class="json" id="offer-json"></pre>
     </div>
   </section>
