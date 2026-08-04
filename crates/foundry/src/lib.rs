@@ -1,6 +1,7 @@
 pub mod admin_auth;
 pub mod cli;
 pub mod commands;
+pub mod extract;
 pub mod http_log;
 pub mod log_capture;
 pub mod logging;

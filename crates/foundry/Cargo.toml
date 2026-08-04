@@ -19,6 +19,7 @@ foundry-issuer = { path = "../foundry-issuer" }
 foundry-verifier = { path = "../foundry-verifier" }
 tokio = { workspace = true }
 axum = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

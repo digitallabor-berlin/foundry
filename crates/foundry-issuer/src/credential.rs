@@ -140,6 +140,7 @@ pub struct CredentialResponse {
         request_encrypted = request_was_encrypted,
     )
 )]
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_credential_request(
     config: &Config,
     storage: &dyn Storage,

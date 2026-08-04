@@ -11,8 +11,8 @@ use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
 use foundry_issuer::{
     AuthorizationServerMetadata, ChallengeResponse, CreateOfferRequest, CreateOfferResponse,
-    CredentialIssuerMetadata, CredentialRequest, CredentialResponse, IssuanceState, NonceResponse,
-    TokenRequest, TokenResponse,
+    CredentialIssuerMetadata, CredentialRequest, IssuanceState, NonceResponse, TokenRequest,
+    TokenResponse,
 };
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
@@ -30,6 +30,10 @@ pub struct AppState {
     /// Keys the MAC on `c_nonce` values minted by `POST /nonce`. Generated
     /// once per process — see [`foundry_issuer::NonceSecret`].
     pub nonce_secret: Arc<foundry_issuer::NonceSecret>,
+    /// OpenID4VCI request-decryption keys, loaded once at startup. Empty when
+    /// `issuer.request_encryption` is absent, which is what makes the feature
+    /// default-off.
+    pub request_decryption_keys: Arc<Vec<foundry_core::crypto::jwe::DecryptionKey>>,
 }
 
 impl AppState {
@@ -39,7 +43,20 @@ impl AppState {
             storage,
             config,
             nonce_secret: Arc::new(foundry_issuer::NonceSecret::random()),
+            request_decryption_keys: Arc::new(Vec::new()),
         }
+    }
+
+    /// Attach the loaded request-decryption keys.
+    ///
+    /// A builder rather than a fourth `new` parameter so the many existing
+    /// `AppState::new` call sites stay unchanged.
+    pub fn with_request_decryption_keys(
+        mut self,
+        keys: Vec<foundry_core::crypto::jwe::DecryptionKey>,
+    ) -> Self {
+        self.request_decryption_keys = Arc::new(keys);
+        self
     }
 }
 
@@ -140,8 +157,10 @@ pub(crate) async fn wallet_openapi_json_handler(
     responses((status = 200, body = CredentialIssuerMetadata))
 )]
 async fn issuer_metadata(State(state): State<AppState>) -> Json<CredentialIssuerMetadata> {
-    // Encryption keys are wired in alongside AppState in the extractor task.
-    Json(foundry_issuer::build_issuer_metadata(&state.config, &[]))
+    Json(foundry_issuer::build_issuer_metadata(
+        &state.config,
+        &state.request_decryption_keys,
+    ))
 }
 
 #[utoipa::path(
@@ -341,7 +360,7 @@ fn admin_error_response(
     )
 }
 
-fn wallet_error_response(
+pub(crate) fn wallet_error_response(
     e: &foundry_issuer::IssuanceError,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use foundry_issuer::IssuanceError::*;
@@ -994,6 +1013,9 @@ fn credential_error_response(
     ),
     responses(
         (status = 200, body = CredentialResponse),
+        (status = 200, content_type = "application/jwt",
+         description = "OpenID4VCI L1186: an encrypted Credential Response when the request \
+                        carried `credential_response_encryption`."),
         (status = 401, description = "RFC 9449 §7.1: WWW-Authenticate: DPoP \
                                      error=\"invalid_token\", algs=\"ES256\" -- the \
                                      access token's DPoP binding check failed \
@@ -1003,14 +1025,24 @@ fn credential_error_response(
                                      server-provided nonce is required and \
                                      missing/stale, accompanied by a fresh \
                                      DPoP-Nonce response header."),
+        (status = 415,
+         description = "OpenID4VCI L875: the Content-Type is neither application/json nor a \
+                        supported application/jwt."),
     )
 )]
 async fn credential_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CredentialRequest>,
-) -> Result<(HeaderMap, Json<CredentialResponse>), (StatusCode, HeaderMap, Json<serde_json::Value>)>
-{
+    body: crate::extract::MaybeEncrypted<CredentialRequest>,
+) -> Result<
+    (HeaderMap, crate::extract::CredentialResponseBody),
+    (StatusCode, HeaderMap, Json<serde_json::Value>),
+> {
+    let crate::extract::MaybeEncrypted {
+        value: req,
+        was_encrypted,
+    } = body;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1054,8 +1086,7 @@ async fn credential_handler(
         state.nonce_secret.as_ref(),
         &dpop,
         now,
-        // Wired to the extractor's `was_encrypted` flag in the extractor task.
-        false,
+        was_encrypted,
     )
     .await
     .map_err(|e| credential_error_response(&state, now, &e))?;
@@ -1066,7 +1097,35 @@ async fn credential_handler(
     if let Some((name, value)) = dpop_nonce_header(&state, now) {
         out.insert(name, value);
     }
-    Ok((out, Json(res)))
+
+    // OpenID4VCI L969: when the wallet supplied encryption parameters the
+    // response MUST be encrypted with them, "regardless of the content".
+    let body = match &req.credential_response_encryption {
+        None => crate::extract::CredentialResponseBody::Json(res),
+        Some(params) => {
+            let payload = serde_json::to_value(&res).map_err(|e| {
+                credential_error_response(
+                    &state,
+                    now,
+                    &foundry_issuer::IssuanceError::Serialization(e.to_string()),
+                )
+            })?;
+            // L1188 / VCI-0101: echo the recipient key's `kid` when it has one.
+            let kid = params.jwk.get("kid").and_then(|v| v.as_str());
+            let compact = foundry_core::crypto::jwe::encrypt_compact_with_kid(
+                &payload,
+                &params.jwk,
+                "ECDH-ES",
+                &params.enc,
+                kid,
+            )
+            .map_err(|e| {
+                credential_error_response(&state, now, &foundry_issuer::IssuanceError::Crypto(e))
+            })?;
+            crate::extract::CredentialResponseBody::Jwt(compact)
+        }
+    };
+    Ok((out, body))
 }
 
 fn verifier_admin_error_response(
@@ -1454,7 +1513,10 @@ pub fn spawn_sweeper(storage: Arc<dyn Storage>, interval_secs: u64) -> tokio::ta
     })
 }
 
-pub async fn serve(cfg: Config) -> anyhow::Result<()> {
+pub async fn serve(
+    cfg: Config,
+    request_decryption_keys: Vec<foundry_core::crypto::jwe::DecryptionKey>,
+) -> anyhow::Result<()> {
     if let Err(e) = std::fs::write(
         "openapi.json",
         crate::openapi::generate_admin_openapi_spec(),
@@ -1475,7 +1537,18 @@ pub async fn serve(cfg: Config) -> anyhow::Result<()> {
 
     let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::connect(&cfg.storage.path).await?);
     let config = Arc::new(cfg.clone());
-    let state = AppState::new(storage.clone(), config.clone());
+    // `kid`s are RFC 7638 thumbprints of *public* keys and are published in
+    // metadata, so logging them is safe and is what makes a `kid` mismatch
+    // diagnosable in the field.
+    if !request_decryption_keys.is_empty() {
+        tracing::info!(
+            count = request_decryption_keys.len(),
+            kids = ?request_decryption_keys.iter().map(|k| k.kid()).collect::<Vec<_>>(),
+            "loaded credential request-decryption keys"
+        );
+    }
+    let state = AppState::new(storage.clone(), config.clone())
+        .with_request_decryption_keys(request_decryption_keys);
     let _sweeper = spawn_sweeper(storage, 60);
 
     let api_key = AdminApiKey::resolve(&cfg.server.admin);

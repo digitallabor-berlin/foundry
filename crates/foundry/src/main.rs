@@ -50,7 +50,8 @@ async fn main() -> anyhow::Result<()> {
             cfg.validate()?;
             let base_dir = config.parent().unwrap_or_else(|| std::path::Path::new("."));
             cfg.validate_key_material(base_dir)?;
-            server::serve(cfg).await
+            let enc_keys = cfg.load_request_decryption_keys(base_dir)?;
+            server::serve(cfg, enc_keys).await
         }
         Command::Keys {
             action: KeysAction::Generate { alg, out },
