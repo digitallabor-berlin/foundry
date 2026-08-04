@@ -37,6 +37,7 @@ fn disabled_attestation() -> AttestationMode {
         mode: Mode::Disabled,
         trusted_anchors: Vec::new(),
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     }
 }
 
@@ -46,7 +47,16 @@ fn dpop_optional() -> DpopConfig {
     DpopConfig {
         mode: Mode::Optional,
         max_age_secs: 300,
+        nonce_mode: Mode::Disabled,
     }
+}
+
+/// A `NonceSecret` for the many `handle_token_request` call sites here that
+/// don't exercise the ABCA challenge mechanism -- every fixture in this file
+/// sets `challenge_mode` to `Disabled`, so the secret's value is never
+/// actually consulted.
+fn test_nonce_secret() -> NonceSecret {
+    NonceSecret::from_bytes([99u8; 32])
 }
 
 /// No `DPoP` header presented -- the pre-DPoP path.
@@ -99,6 +109,7 @@ fn dpop_proof_for_token_endpoint(jti: &str, now: i64) -> (String, String) {
         None,
         now,
         300,
+        None,
     )
     .unwrap()
     .jkt;
@@ -145,11 +156,13 @@ fn test_config() -> Config {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -357,6 +370,7 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -371,6 +385,7 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_020,
     )
@@ -486,6 +501,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -614,6 +630,7 @@ async fn setup_credential_flow(
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -936,6 +953,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1074,6 +1092,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         None,
         &dpop_optional(),
         &token_dpop_presentation(Some(&proof)),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1112,6 +1131,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1166,6 +1186,7 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         mode: Mode::Required,
         trusted_anchors: Vec::new(),
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     };
     let result = handle_token_request(
         &storage,
@@ -1175,6 +1196,7 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1211,6 +1233,7 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_000,
     )
@@ -1264,6 +1287,7 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1348,6 +1372,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
     )
@@ -1549,6 +1574,7 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
             certs: ca_path.to_str().unwrap().to_string(),
         }],
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     };
 
     // No Client Attestation PoP JWT is presented at all. A conformant issuer
@@ -1562,6 +1588,7 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
         None,
         &dpop_optional(),
         &no_dpop(),
+        &test_nonce_secret(),
         "https://issuer.example.com",
         now,
     )

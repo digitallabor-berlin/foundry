@@ -3,20 +3,24 @@
 //! Implements §4.2 (proof JWT syntax) and §4.3 (checking proofs) for both the
 //! Token Endpoint and the Credential Endpoint, plus §11.1 replay defence.
 //!
-//! **Two of §4.3's twelve checks are deliberately not here:**
+//! **One of §4.3's twelve checks is not here:**
 //!
 //! - **Check 1** ("not more than one DPoP HTTP request header field") needs the
 //!   header map, which this module never sees — it takes a single `&str`. It is
 //!   enforced in `crates/foundry/src/server.rs` via `exactly_one_header`.
-//! - **Check 10** (`nonce` matches a server-supplied nonce) is vacuous: foundry
-//!   does not implement §8/§9 server-provided nonces, so it never supplies one.
-//!   §11.3 ("MUST NOT accept any DPoP proofs without the nonce claim when a
-//!   DPoP nonce has been provided") is therefore satisfied by construction.
-//!   See the design doc §2.2 for why, and §6.2 for the residual §11.2 exposure.
+//!
+//! **Check 10** (`nonce` matches a server-supplied nonce) *is* implemented, as
+//! of the ABCA-challenge/DPoP-nonce change: it is gated on
+//! `issuer.dpop.nonce_mode`, which is `disabled` by default. Under `disabled` no
+//! nonce is ever supplied, so §11.3 ("MUST NOT accept any DPoP proofs without
+//! the nonce claim when a DPoP nonce has been provided") is satisfied
+//! vacuously; under `optional`/`required` it is actively enforced. See
+//! `docs/superpowers/specs/2026-08-04-abca-challenge-and-dpop-nonce-design.md`.
 
 use crate::error::IssuanceError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use foundry_core::config::Mode;
 use foundry_core::obs::thumbprint_bytes;
 use foundry_core::storage::Storage;
 use josekit::jwk::Jwk;
@@ -29,6 +33,17 @@ use sha2::{Digest, Sha256};
 /// Distinct from `max_age_secs`, which bounds how far into the *past* an `iat`
 /// may sit. Mirrors `attestation.rs`'s `POP_CLOCK_SKEW_SECS`.
 const DPOP_CLOCK_SKEW_SECS: i64 = 60;
+
+/// RFC 9449 §8/§9 server-provided nonce policy.
+///
+/// Passed as `Option` at every call site: `None` means "this server has never
+/// supplied a nonce to this client", which is precisely §4.3 check 10's
+/// precondition being false, and reproduces foundry's pre-nonce behaviour.
+pub struct DpopNoncePolicy<'a> {
+    pub mode: Mode,
+    /// The process MAC secret that minted the nonce. Never logged.
+    pub secret: &'a crate::challenge::NonceSecret,
+}
 
 /// A DPoP proof that has passed every §4.3 check this module is responsible
 /// for. Carries only what a caller still needs; every other claim was checked
@@ -118,6 +133,7 @@ fn normalize_htu(raw: &str) -> String {
 ///
 /// `skip_all` is mandatory: `proof_jwt` is the wallet's proof and
 /// `expected_ath` is derived from an access token (root `AGENTS.md` §4.5).
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(htm = %htm))]
 pub fn verify_dpop_proof(
     proof_jwt: &str,
@@ -126,6 +142,7 @@ pub fn verify_dpop_proof(
     expected_ath: Option<&str>,
     now_unix: i64,
     max_age_secs: u64,
+    nonce_policy: Option<&DpopNoncePolicy<'_>>,
 ) -> Result<VerifiedDpopProof, IssuanceError> {
     // Check 2: "a single and well-formed JWT".
     let parts: Vec<&str> = proof_jwt.split('.').collect();
@@ -286,6 +303,59 @@ pub fn verify_dpop_proof(
             return Err(IssuanceError::InvalidDpopProof(
                 "ath claim does not match the presented access token".into(),
             ));
+        }
+    }
+
+    // Check 10: "If the server provided a nonce value to the client, the nonce
+    // claim matches the server-provided nonce value." `nonce_policy` models the
+    // "if" -- see §8 (authorization server) and §9 (resource server). A `None`
+    // policy means no nonce was ever provided, so the precondition is false and
+    // §11.3 does not bind.
+    //
+    // Reaching this point means the proof is structurally sound and correctly
+    // signed, so a `use_dpop_nonce` here genuinely means "retry with a nonce",
+    // never "your proof was malformed".
+    if let Some(policy) = nonce_policy {
+        match (policy.mode.clone(), payload.get("nonce")) {
+            // No nonce is supplied under this mode, so there is nothing for the
+            // claim to match; a stray claim is ignored rather than rejected.
+            (Mode::Disabled, _) => {}
+
+            // Supplied but not yet mandatory: a wallet mid-migration is accepted.
+            (Mode::Optional, None) => {}
+
+            // §8: respond with `use_dpop_nonce` and a fresh `DPoP-Nonce` header
+            // (added by the HTTP layer) so the client can retry.
+            (Mode::Required, None) => {
+                tracing::warn!("dpop proof carried no nonce claim");
+                return Err(IssuanceError::UseDpopNonce(
+                    "a server-provided nonce claim is required in the DPoP proof".into(),
+                ));
+            }
+
+            (Mode::Optional | Mode::Required, Some(value)) => {
+                // §8.1's nonce syntax is `1*NQCHAR`, i.e. a string; a non-string
+                // is malformed rather than merely mismatched.
+                let nonce = value.as_str().ok_or_else(|| {
+                    IssuanceError::UseDpopNonce("nonce claim is not a string".into())
+                })?;
+                crate::challenge::verify(
+                    policy.secret,
+                    crate::challenge::Domain::DpopNonce,
+                    nonce,
+                    now_unix,
+                )
+                .map_err(|_| {
+                    // §8: on a mismatch the server "MAY include a DPoP-Nonce HTTP
+                    // header providing a new nonce value" -- the same response
+                    // path as an absent nonce, so one error variant covers both.
+                    // Never echoes the presented value (root `AGENTS.md` §4.5).
+                    tracing::warn!("dpop proof carried an unusable nonce");
+                    IssuanceError::UseDpopNonce(
+                        "nonce is malformed, expired, or was not issued by this issuer".into(),
+                    )
+                })?;
+            }
         }
     }
 
@@ -478,7 +548,7 @@ mod tests {
     #[test]
     fn a_valid_proof_is_accepted_and_yields_a_thumbprint() {
         let kp = keypair();
-        let v = verify_dpop_proof(&valid(&kp), "POST", HTU, None, NOW, MAX_AGE).unwrap();
+        let v = verify_dpop_proof(&valid(&kp), "POST", HTU, None, NOW, MAX_AGE, None).unwrap();
         assert_eq!(v.jti, "jti-1");
         assert_eq!(v.htu, HTU);
         assert!(!v.jkt.is_empty());
@@ -487,14 +557,14 @@ mod tests {
     #[test]
     fn rejects_a_non_jwt_string() {
         // Check 2.
-        let e = verify_dpop_proof("not-a-jwt", "POST", HTU, None, NOW, MAX_AGE).unwrap_err();
+        let e = verify_dpop_proof("not-a-jwt", "POST", HTU, None, NOW, MAX_AGE, None).unwrap_err();
         assert_eq!(e.kind(), "invalid_dpop_proof");
     }
 
     #[test]
     fn rejects_a_two_part_jws() {
         // Check 2.
-        assert!(verify_dpop_proof("aaa.bbb", "POST", HTU, None, NOW, MAX_AGE).is_err());
+        assert!(verify_dpop_proof("aaa.bbb", "POST", HTU, None, NOW, MAX_AGE, None).is_err());
     }
 
     #[test]
@@ -511,7 +581,7 @@ mod tests {
             Some("j"),
             None,
         );
-        let e = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE).unwrap_err();
+        let e = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).unwrap_err();
         assert!(e.to_string().contains("dpop+jwt"), "got: {e}");
     }
 
@@ -528,7 +598,7 @@ mod tests {
             None,
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("jti"));
@@ -539,7 +609,7 @@ mod tests {
         // Check 3.
         let kp = keypair();
         let p = dpop_proof(&kp, "dpop+jwt", None, Some(HTU), Some(NOW), Some("j"), None);
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("htm"));
@@ -558,7 +628,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("htu"));
@@ -577,7 +647,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("iat"));
@@ -602,7 +672,7 @@ mod tests {
             parts[1],
             parts[2]
         );
-        assert!(verify_dpop_proof(&forged, "POST", HTU, None, NOW, MAX_AGE).is_err());
+        assert!(verify_dpop_proof(&forged, "POST", HTU, None, NOW, MAX_AGE, None).is_err());
     }
 
     #[test]
@@ -620,7 +690,7 @@ mod tests {
             B64URL.encode(serde_json::to_vec(&payload).unwrap()),
             parts[2]
         );
-        assert!(verify_dpop_proof(&forged, "GET", HTU, None, NOW, MAX_AGE).is_err());
+        assert!(verify_dpop_proof(&forged, "GET", HTU, None, NOW, MAX_AGE, None).is_err());
     }
 
     #[test]
@@ -640,7 +710,7 @@ mod tests {
             parts[1],
             parts[2]
         );
-        let e = verify_dpop_proof(&leaked, "POST", HTU, None, NOW, MAX_AGE).unwrap_err();
+        let e = verify_dpop_proof(&leaked, "POST", HTU, None, NOW, MAX_AGE, None).unwrap_err();
         assert!(e.to_string().contains('d'), "must name the parameter: {e}");
         assert!(
             !e.to_string().contains("c3VwZXItc2VjcmV0"),
@@ -652,7 +722,7 @@ mod tests {
     fn rejects_htm_mismatch() {
         // Check 8.
         let kp = keypair();
-        let e = verify_dpop_proof(&valid(&kp), "GET", HTU, None, NOW, MAX_AGE).unwrap_err();
+        let e = verify_dpop_proof(&valid(&kp), "GET", HTU, None, NOW, MAX_AGE, None).unwrap_err();
         assert!(e.to_string().contains("htm"), "got: {e}");
     }
 
@@ -668,6 +738,7 @@ mod tests {
             None,
             NOW,
             MAX_AGE,
+            None,
         )
         .unwrap_err();
         assert!(e.to_string().contains("htu"), "got: {e}");
@@ -686,7 +757,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE).is_ok());
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_ok());
     }
 
     #[test]
@@ -702,7 +773,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE).is_ok());
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_ok());
     }
 
     #[test]
@@ -720,7 +791,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE).is_err());
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_err());
     }
 
     #[test]
@@ -736,7 +807,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("older"));
@@ -755,7 +826,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE)
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
             .unwrap_err()
             .to_string()
             .contains("future"));
@@ -775,7 +846,7 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE).is_ok());
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_ok());
     }
 
     #[test]
@@ -805,7 +876,7 @@ mod tests {
             // Must return an error, never panic. The signature no longer
             // verifies (the payload changed), which is fine: any error path is
             // acceptable here, the panic is what this test guards against.
-            assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, u64::MAX).is_err());
+            assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, u64::MAX, None).is_err());
         }
     }
 
@@ -820,6 +891,7 @@ mod tests {
             Some("expected-hash"),
             NOW,
             MAX_AGE,
+            None,
         )
         .unwrap_err();
         assert!(e.to_string().contains("ath"), "got: {e}");
@@ -845,7 +917,8 @@ mod tests {
             HTU,
             Some(&access_token_hash("at_two")),
             NOW,
-            MAX_AGE
+            MAX_AGE,
+            None
         )
         .is_err());
     }
@@ -869,7 +942,8 @@ mod tests {
             HTU,
             Some(&access_token_hash(token)),
             NOW,
-            MAX_AGE
+            MAX_AGE,
+            None
         )
         .is_ok());
     }
@@ -973,5 +1047,192 @@ mod tests {
         claim_dpop_jti(&storage, &proof_for("jkt-a", HTU, "j"), u64::MAX, NOW)
             .await
             .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7 of the ABCA challenge-retrieval / DPoP-nonce plan
+    // (docs/superpowers/plans/2026-08-04-abca-challenge-and-dpop-nonce-plan.md):
+    // RFC 9449 §4.3 check 10, the server-provided DPoP nonce.
+    // -----------------------------------------------------------------------
+
+    fn nonce_secret() -> crate::challenge::NonceSecret {
+        crate::challenge::NonceSecret::from_bytes([11u8; 32])
+    }
+
+    fn fresh_dpop_nonce(now: i64) -> String {
+        crate::challenge::mint(
+            &nonce_secret(),
+            crate::challenge::Domain::DpopNonce,
+            MAX_AGE,
+            now,
+        )
+        .expect("mint dpop nonce")
+    }
+
+    fn policy(mode: Mode) -> DpopNoncePolicy<'static> {
+        // A leaked box keeps the borrow simple in tests; production code holds
+        // the secret in `AppState` for the process lifetime.
+        DpopNoncePolicy {
+            mode,
+            secret: Box::leak(Box::new(nonce_secret())),
+        }
+    }
+
+    /// Mint a DPoP proof carrying a `nonce` claim of arbitrary JSON shape,
+    /// mirroring `dpop_proof`'s shape but with the one extra claim check 10
+    /// needs. `nonce` is `None` when the test wants no claim at all, distinct
+    /// from an empty string. Takes a raw `serde_json::Value` (rather than
+    /// `&str`) so a non-string claim (e.g. a number) can be minted with a
+    /// genuine, verifying signature -- post-hoc payload substitution (as
+    /// `rejects_a_tampered_payload` uses) breaks the signature and would
+    /// never reach check 10 at all.
+    #[allow(clippy::too_many_arguments)]
+    fn dpop_proof_with_nonce_value(
+        kp: &EcKeyPair,
+        iat: i64,
+        jti: &str,
+        nonce: Option<serde_json::Value>,
+    ) -> String {
+        let mut header = JwsHeader::new();
+        header.set_token_type("dpop+jwt");
+        header.set_jwk(kp.to_jwk_public_key());
+
+        let mut payload = JwtPayload::new();
+        payload.set_claim("htm", Some("POST".into())).unwrap();
+        payload.set_claim("htu", Some(HTU.into())).unwrap();
+        payload.set_claim("iat", Some(iat.into())).unwrap();
+        payload.set_claim("jti", Some(jti.into())).unwrap();
+        if let Some(n) = nonce {
+            payload.set_claim("nonce", Some(n)).unwrap();
+        }
+
+        let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+        jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+    }
+
+    fn dpop_proof_with_nonce(kp: &EcKeyPair, iat: i64, jti: &str, nonce: Option<&str>) -> String {
+        dpop_proof_with_nonce_value(kp, iat, jti, nonce.map(|s| serde_json::json!(s)))
+    }
+
+    #[test]
+    fn no_nonce_policy_accepts_a_proof_without_a_nonce() {
+        let kp = keypair();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-1", None);
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_ok());
+    }
+
+    #[test]
+    fn no_nonce_policy_ignores_a_garbage_nonce_claim() {
+        // The server never supplied one, so §4.3 check 10's precondition is
+        // false regardless of what the client sent.
+        let kp = keypair();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-2", Some("garbage"));
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None).is_ok());
+    }
+
+    #[test]
+    fn disabled_nonce_mode_accepts_a_proof_without_a_nonce() {
+        let kp = keypair();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-3", None);
+        let pol = policy(Mode::Disabled);
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).is_ok());
+    }
+
+    #[test]
+    fn optional_nonce_mode_accepts_a_proof_without_a_nonce() {
+        let kp = keypair();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-4", None);
+        let pol = policy(Mode::Optional);
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).is_ok());
+    }
+
+    #[test]
+    fn optional_nonce_mode_verifies_a_present_nonce() {
+        let kp = keypair();
+        let nonce = fresh_dpop_nonce(NOW);
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-5", Some(&nonce));
+        let pol = policy(Mode::Optional);
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).is_ok());
+    }
+
+    #[test]
+    fn required_nonce_mode_rejects_a_proof_without_a_nonce() {
+        let kp = keypair();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-6", None);
+        let pol = policy(Mode::Required);
+        let err = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).unwrap_err();
+        assert!(matches!(err, IssuanceError::UseDpopNonce(_)));
+        assert_eq!(err.kind(), "use_dpop_nonce");
+    }
+
+    #[test]
+    fn required_nonce_mode_accepts_a_fresh_nonce() {
+        let kp = keypair();
+        let nonce = fresh_dpop_nonce(NOW);
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-7", Some(&nonce));
+        let pol = policy(Mode::Required);
+        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).is_ok());
+    }
+
+    #[test]
+    fn an_expired_dpop_nonce_is_rejected() {
+        let kp = keypair();
+        let nonce = fresh_dpop_nonce(NOW);
+        // iat must stay within the DPoP proof's own freshness window, so the
+        // proof itself is minted at the later time too -- only the nonce's
+        // own TTL (MAX_AGE, from fresh_dpop_nonce) is what should expire here.
+        let later = NOW + MAX_AGE as i64 + 1;
+        let p = dpop_proof_with_nonce(&kp, later, "jti-8", Some(&nonce));
+        let pol = policy(Mode::Required);
+        let err = verify_dpop_proof(&p, "POST", HTU, None, later, MAX_AGE, Some(&pol)).unwrap_err();
+        assert!(matches!(err, IssuanceError::UseDpopNonce(_)));
+    }
+
+    #[test]
+    fn a_c_nonce_is_not_accepted_as_a_dpop_nonce() {
+        // Domain separation (Task 1's challenge::Domain) must hold here too:
+        // a c_nonce minted under the same secret must not verify as a DPoP
+        // nonce.
+        let kp = keypair();
+        let secret = nonce_secret();
+        let c_nonce =
+            crate::challenge::mint(&secret, crate::challenge::Domain::CNonce, MAX_AGE, NOW)
+                .unwrap();
+        let p = dpop_proof_with_nonce(&kp, NOW, "jti-9", Some(&c_nonce));
+        let pol = DpopNoncePolicy {
+            mode: Mode::Required,
+            secret: &secret,
+        };
+        let err = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).unwrap_err();
+        assert!(matches!(err, IssuanceError::UseDpopNonce(_)));
+    }
+
+    #[test]
+    fn a_non_string_nonce_claim_is_rejected() {
+        let kp = keypair();
+        let p = dpop_proof_with_nonce_value(&kp, NOW, "jti-11", Some(serde_json::json!(12345)));
+        let pol = policy(Mode::Required);
+        let err = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).unwrap_err();
+        assert!(matches!(err, IssuanceError::UseDpopNonce(_)));
+    }
+
+    /// §11.3's nonce check must not mask a structurally invalid proof: a wrong
+    /// `typ` is still `InvalidDpopProof`, not `UseDpopNonce`, so a client is not
+    /// told to retry with a nonce when the retry cannot possibly succeed.
+    #[test]
+    fn a_structurally_invalid_proof_is_not_reported_as_a_nonce_problem() {
+        let kp = keypair();
+        let p = dpop_proof(
+            &kp,
+            "jwt", // wrong typ -- Check 4.
+            Some("POST"),
+            Some(HTU),
+            Some(NOW),
+            Some("jti-10"),
+            None,
+        );
+        let pol = policy(Mode::Required);
+        let err = verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, Some(&pol)).unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidDpopProof(_)));
     }
 }

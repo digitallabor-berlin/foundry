@@ -10,9 +10,9 @@ use axum::{
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
 use foundry_issuer::{
-    AuthorizationServerMetadata, CreateOfferRequest, CreateOfferResponse, CredentialIssuerMetadata,
-    CredentialRequest, CredentialResponse, IssuanceState, NonceResponse, TokenRequest,
-    TokenResponse,
+    AuthorizationServerMetadata, ChallengeResponse, CreateOfferRequest, CreateOfferResponse,
+    CredentialIssuerMetadata, CredentialRequest, CredentialResponse, IssuanceState, NonceResponse,
+    TokenRequest, TokenResponse,
 };
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
@@ -90,7 +90,7 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
 }
 
 pub fn wallet_router(state: AppState) -> Router {
-    let router = Router::new()
+    let mut router = Router::new()
         .route(
             "/.well-known/openid-credential-issuer",
             get(issuer_metadata),
@@ -106,6 +106,13 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/vp/request/:id", get(get_request_object_handler))
         .route("/vp/response/:id", post(post_response_handler))
         .route("/statuslists/:id", get(status_list_handler));
+
+    // ABCA §8: the route exists only when the mechanism is enabled, so its
+    // absence and the absent `challenge_endpoint` metadata entry always agree.
+    if state.config.issuer.wallet_attestation.challenge_mode != foundry_core::config::Mode::Disabled
+    {
+        router = router.route("/challenge", post(challenge_handler));
+    }
 
     let router = if state.config.server.wallet_facing.swagger_ui_enabled {
         router.merge(utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
@@ -369,6 +376,18 @@ fn wallet_error_response(
         // *protected resource*, where §7.1 requires 401 + WWW-Authenticate
         // instead -- see `credential_error_response` (Task 9).
         InvalidDpopProof(_) => (StatusCode::BAD_REQUEST, "invalid_dpop_proof"),
+        // ABCA §6.2's error codes are returned "in either Authorization Server
+        // authenticated endpoint error responses (as defined in Section 5.2 of
+        // [RFC6749])" -- the same 400 shape as `invalid_client`. The mandatory
+        // OAuth-Client-Attestation-Challenge header is added by
+        // `token_error_response`, the only mapper on a route that can produce
+        // this error.
+        UseAttestationChallenge(_) => (StatusCode::BAD_REQUEST, "use_attestation_challenge"),
+        // RFC 9449 §8: "an HTTP 400 (Bad Request) error response ... using
+        // use_dpop_nonce as the error code value". The accompanying DPoP-Nonce
+        // header is added by `token_error_response`; the §9 (401) form for the
+        // Credential Endpoint is in `credential_error_response`.
+        UseDpopNonce(_) => (StatusCode::BAD_REQUEST, "use_dpop_nonce"),
         StatusListExhausted(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error"),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "server_error"),
     };
@@ -380,6 +399,97 @@ fn wallet_error_response(
             "error_description": e.to_string(),
         })),
     )
+}
+
+/// A freshly-minted ABCA §8.1 `OAuth-Client-Attestation-Challenge` header, or
+/// `None` when challenge retrieval is disabled.
+///
+/// §8.1 permits attaching a fresh challenge to *any* response; §6.2 *requires*
+/// it alongside a `use_attestation_challenge` error. One helper serves both, so
+/// the two paths can never disagree about the header's name or format.
+///
+/// A minting failure yields `None` rather than propagating: the challenge is an
+/// optimisation on a success path and a mandatory extra on an already-failing
+/// one, and in neither case should it become a *different* error. The failure is
+/// already logged inside `challenge::mint`.
+fn attestation_challenge_header(
+    state: &AppState,
+    now_unix: i64,
+) -> Option<(axum::http::HeaderName, axum::http::HeaderValue)> {
+    if state.config.issuer.wallet_attestation.challenge_mode == foundry_core::config::Mode::Disabled
+    {
+        return None;
+    }
+    let res = foundry_issuer::issue_attestation_challenge(
+        state.nonce_secret.as_ref(),
+        state.config.issuer.wallet_attestation.pop_max_age_secs,
+        now_unix,
+    )
+    .ok()?;
+    // Lowercase literal: axum normalises header names per RFC 9110, and
+    // `from_static` requires lowercase input.
+    let name = axum::http::HeaderName::from_static("oauth-client-attestation-challenge");
+    // The value is base64url, so `from_str` cannot fail in practice; `ok()?`
+    // rather than an unwrap because root `AGENTS.md` §4.1 forbids one here.
+    let value = axum::http::HeaderValue::from_str(&res.attestation_challenge).ok()?;
+    Some((name, value))
+}
+
+/// A freshly-minted RFC 9449 §8/§8.2 `DPoP-Nonce` header, or `None` when
+/// server-provided nonces are disabled.
+///
+/// One helper for every emission point — §8's 400, §9's 401, and §8.2's
+/// piggyback on a success — so §8's "there MUST NOT be more than one DPoP-Nonce
+/// header" holds structurally: each response inserts from here exactly once.
+///
+/// A minting failure yields `None` for the same reason as
+/// `attestation_challenge_header`: it must not convert one error into another.
+fn dpop_nonce_header(
+    state: &AppState,
+    now_unix: i64,
+) -> Option<(axum::http::HeaderName, axum::http::HeaderValue)> {
+    if state.config.issuer.dpop.nonce_mode == foundry_core::config::Mode::Disabled {
+        return None;
+    }
+    // TTL is `dpop.max_age_secs`: a nonce outliving the window in which the
+    // proof carrying it would be accepted anyway is useless (design doc §3).
+    let nonce = foundry_issuer::mint_dpop_nonce(
+        state.nonce_secret.as_ref(),
+        state.config.issuer.dpop.max_age_secs,
+        now_unix,
+    )
+    .ok()?;
+    let name = axum::http::HeaderName::from_static("dpop-nonce");
+    let value = axum::http::HeaderValue::from_str(&nonce).ok()?;
+    Some((name, value))
+}
+
+/// Error mapper for the Token Endpoint.
+///
+/// Wraps `wallet_error_response` and attaches the response headers ABCA §8.1
+/// and RFC 9449 §8 put on `/token` responses. `wallet_error_response` still
+/// emits the single log record (root `AGENTS.md` §4.5) -- this function adds no
+/// second one.
+fn token_error_response(
+    state: &AppState,
+    now_unix: i64,
+    e: &foundry_issuer::IssuanceError,
+) -> (StatusCode, HeaderMap, Json<serde_json::Value>) {
+    let (status, body) = wallet_error_response(e);
+    let mut headers = HeaderMap::new();
+    // §6.2 makes this mandatory on a `use_attestation_challenge` error; §8.1
+    // permits it on any other. Attaching it unconditionally (when enabled)
+    // satisfies both without a branch that could get the mandatory case wrong.
+    if let Some((name, value)) = attestation_challenge_header(state, now_unix) {
+        headers.insert(name, value);
+    }
+    // RFC 9449 §8 requires DPoP-Nonce alongside `use_dpop_nonce`; §8.2 permits
+    // it on any other response. Unconditional (when enabled) for the same
+    // reason as the ABCA challenge above.
+    if let Some((name, value)) = dpop_nonce_header(state, now_unix) {
+        headers.insert(name, value);
+    }
+    (status, headers, body)
 }
 
 /// Query parameters for `GET /authorize`. All fields are optional at the
@@ -588,14 +698,24 @@ fn exactly_one_header<'h>(
                                      Attestation PoP failure, `invalid_grant` for \
                                      an unusable code, `invalid_request` \
                                      otherwise, `invalid_dpop_proof` (RFC 9449 §5) \
-                                     for any DPoP proof failure."),
+                                     for any DPoP proof failure, `use_attestation_challenge` \
+                                     (ABCA §6.2) when the PoP's `challenge` claim is missing, \
+                                     stale, or wrong -- accompanied by a fresh \
+                                     OAuth-Client-Attestation-Challenge response header (§6.2, \
+                                     §8.1). The same header MAY also accompany a 200 response \
+                                     when challenge retrieval is enabled."),
     )
 )]
 async fn token_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body_bytes: axum::body::Bytes,
-) -> Result<Json<TokenResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<(HeaderMap, Json<TokenResponse>), (StatusCode, HeaderMap, Json<serde_json::Value>)> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     let content_type = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -603,15 +723,19 @@ async fn token_handler(
 
     let req: TokenRequest = if content_type.contains("application/json") {
         serde_json::from_slice(&body_bytes).map_err(|e| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
-                e.to_string(),
-            ))
+            token_error_response(
+                &state,
+                now,
+                &foundry_issuer::IssuanceError::InvalidRequest(e.to_string()),
+            )
         })?
     } else {
         serde_html_form::from_bytes(&body_bytes).map_err(|e| {
-            wallet_error_response(&foundry_issuer::IssuanceError::InvalidRequest(
-                e.to_string(),
-            ))
+            token_error_response(
+                &state,
+                now,
+                &foundry_issuer::IssuanceError::InvalidRequest(e.to_string()),
+            )
         })?
     };
 
@@ -628,20 +752,16 @@ async fn token_handler(
     // normalized to lowercase per RFC 9110), satisfying ABCA §6.1's header
     // matching requirement without any extra normalization here.
     let attestation_hdr = exactly_one_header(&headers, "OAuth-Client-Attestation")
-        .map_err(|e| wallet_error_response(&e))?;
+        .map_err(|e| token_error_response(&state, now, &e))?;
     let pop_hdr = exactly_one_header(&headers, "OAuth-Client-Attestation-PoP")
-        .map_err(|e| wallet_error_response(&e))?;
+        .map_err(|e| token_error_response(&state, now, &e))?;
 
     // RFC 9449 §4.3 check 1: "There is not more than one DPoP HTTP request
     // header field." `exactly_one_header` is the same guard ABCA §6.2 needs,
     // and for the same reason: `HeaderMap::get` silently returns only the
     // first of several.
-    let dpop_hdr = exactly_one_header(&headers, "DPoP").map_err(|e| wallet_error_response(&e))?;
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let dpop_hdr =
+        exactly_one_header(&headers, "DPoP").map_err(|e| token_error_response(&state, now, &e))?;
 
     // Sourced from the published AS metadata's own `issuer` field -- not
     // re-derived from `config.issuer.credential_issuer` -- so the value
@@ -661,7 +781,7 @@ async fn token_handler(
         ath: None,
     };
 
-    foundry_issuer::handle_token_request(
+    let res = foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
         &state.config.issuer.wallet_attestation,
@@ -669,12 +789,24 @@ async fn token_handler(
         pop_hdr,
         &state.config.issuer.dpop,
         &dpop_presentation,
+        state.nonce_secret.as_ref(),
         &issuer_identifier,
         now,
     )
     .await
-    .map(Json)
-    .map_err(|e| wallet_error_response(&e))
+    .map_err(|e| token_error_response(&state, now, &e))?;
+
+    // ABCA §8.1: a fresh challenge on the success response too, so a wallet
+    // never needs a second `/challenge` call.
+    let mut out = HeaderMap::new();
+    if let Some((name, value)) = attestation_challenge_header(&state, now) {
+        out.insert(name, value);
+    }
+    // RFC 9449 §8.2: a fresh nonce on the success response too.
+    if let Some((name, value)) = dpop_nonce_header(&state, now) {
+        out.insert(name, value);
+    }
+    Ok((out, Json(res)))
 }
 
 /// Nonce Endpoint (OpenID4VCI 1.0 Section 7).
@@ -710,6 +842,49 @@ async fn nonce_handler(
 
     // Section 7.2: the Credential Issuer MUST make the response uncacheable
     // by adding a Cache-Control header field including the value `no-store`.
+    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
+}
+
+/// Challenge Endpoint (ABCA draft -07 §8).
+///
+/// Registered only when `issuer.wallet_attestation.challenge_mode` is
+/// `optional` or `required`; under `disabled` the route does not exist, so a
+/// wallet cannot mistake foundry for a server that supports §8.
+///
+/// Deliberately **unauthenticated**, like `/nonce`: §8's request example carries
+/// no credentials, and a client needs a challenge *before* it can authenticate.
+/// Minting is stateless, so an anonymous caller cannot grow storage.
+#[utoipa::path(
+    post,
+    path = "/challenge",
+    responses(
+        (status = 200, body = ChallengeResponse,
+         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`)."),
+    )
+)]
+async fn challenge_handler(
+    State(state): State<AppState>,
+) -> Result<
+    (
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<ChallengeResponse>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let res = foundry_issuer::issue_attestation_challenge(
+        state.nonce_secret.as_ref(),
+        state.config.issuer.wallet_attestation.pop_max_age_secs,
+        now,
+    )
+    .map_err(|e| wallet_error_response(&e))?;
+
+    // §8: "The Authorization Server MUST make the response uncacheable by
+    // adding a Cache-Control header field including the value no-store."
     Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
 }
 
@@ -752,28 +927,50 @@ fn parse_authorization(header: &str) -> Result<(bool, &str), foundry_issuer::Iss
 ///
 /// Emits exactly one log record per error either way (root `AGENTS.md` §4.5).
 fn credential_error_response(
+    state: &AppState,
+    now_unix: i64,
     e: &foundry_issuer::IssuanceError,
 ) -> (StatusCode, HeaderMap, Json<serde_json::Value>) {
-    if matches!(e, foundry_issuer::IssuanceError::InvalidDpopProof(_)) {
+    use foundry_issuer::IssuanceError::{InvalidDpopProof, UseDpopNonce};
+
+    // RFC 9449 §9 + §7.1: at a protected resource both DPoP failure families
+    // answer 401 with a WWW-Authenticate challenge, but with *different* error
+    // codes -- §8's `use_dpop_nonce` is retriable, `invalid_token` is not.
+    let dpop_error = match e {
+        UseDpopNonce(_) => Some("use_dpop_nonce"),
+        InvalidDpopProof(_) => Some("invalid_token"),
+        _ => None,
+    };
+
+    if let Some(code) = dpop_error {
         log_typed_error("wallet", e.kind(), e, StatusCode::UNAUTHORIZED);
         let mut headers = HeaderMap::new();
         // §7.1: scheme name DPoP, an `error` parameter, and an `algs` parameter
         // "to signal to the client the JWS algorithms that are acceptable for
         // the DPoP proof JWT".
-        if let Ok(v) = axum::http::HeaderValue::from_str(
-            r#"DPoP error="invalid_token", error_description="DPoP binding check failed", algs="ES256""#,
-        ) {
+        let description = match code {
+            "use_dpop_nonce" => "a server-provided DPoP nonce is required",
+            _ => "DPoP binding check failed",
+        };
+        if let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+            r#"DPoP error="{code}", error_description="{description}", algs="ES256""#
+        )) {
             headers.insert(axum::http::header::WWW_AUTHENTICATE, v);
+        }
+        // §9: the nonce the client needs in order to retry.
+        if let Some((name, value)) = dpop_nonce_header(state, now_unix) {
+            headers.insert(name, value);
         }
         return (
             StatusCode::UNAUTHORIZED,
             headers,
             Json(serde_json::json!({
-                "error": "invalid_token",
+                "error": code,
                 "error_description": e.to_string(),
             })),
         );
     }
+
     let (status, body) = wallet_error_response(e);
     (status, HeaderMap::new(), body)
 }
@@ -800,34 +997,41 @@ fn credential_error_response(
                                      error=\"invalid_token\", algs=\"ES256\" -- the \
                                      access token's DPoP binding check failed \
                                      (missing/invalid proof, key mismatch, or a \
-                                     bound token presented as Bearer)."),
+                                     bound token presented as Bearer); or \
+                                     error=\"use_dpop_nonce\" (§8/§9) when a \
+                                     server-provided nonce is required and \
+                                     missing/stale, accompanied by a fresh \
+                                     DPoP-Nonce response header."),
     )
 )]
 async fn credential_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<CredentialRequest>,
-) -> Result<Json<CredentialResponse>, (StatusCode, HeaderMap, Json<serde_json::Value>)> {
-    let auth_header = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            credential_error_response(&foundry_issuer::IssuanceError::InvalidGrant(
-                "missing authorization header".into(),
-            ))
-        })?;
-
-    let (scheme_is_dpop, access_token) =
-        parse_authorization(auth_header).map_err(|e| credential_error_response(&e))?;
-
-    // RFC 9449 §4.3 check 1.
-    let dpop_hdr =
-        exactly_one_header(&headers, "DPoP").map_err(|e| credential_error_response(&e))?;
-
+) -> Result<(HeaderMap, Json<CredentialResponse>), (StatusCode, HeaderMap, Json<serde_json::Value>)>
+{
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            credential_error_response(
+                &state,
+                now,
+                &foundry_issuer::IssuanceError::InvalidGrant("missing authorization header".into()),
+            )
+        })?;
+
+    let (scheme_is_dpop, access_token) =
+        parse_authorization(auth_header).map_err(|e| credential_error_response(&state, now, &e))?;
+
+    // RFC 9449 §4.3 check 1.
+    let dpop_hdr = exactly_one_header(&headers, "DPoP")
+        .map_err(|e| credential_error_response(&state, now, &e))?;
 
     // §7: ath is always computed here, so the engine never has to.
     let ath = foundry_issuer::access_token_hash(access_token);
@@ -841,7 +1045,7 @@ async fn credential_handler(
         ath: Some(&ath),
     };
 
-    foundry_issuer::handle_credential_request(
+    let res = foundry_issuer::handle_credential_request(
         &state.config,
         state.storage.as_ref(),
         access_token,
@@ -851,8 +1055,15 @@ async fn credential_handler(
         now,
     )
     .await
-    .map(Json)
-    .map_err(|e| credential_error_response(&e))
+    .map_err(|e| credential_error_response(&state, now, &e))?;
+
+    // §8.2: supply a nonce on success too, so the wallet holds a usable one
+    // before its next request.
+    let mut out = HeaderMap::new();
+    if let Some((name, value)) = dpop_nonce_header(&state, now) {
+        out.insert(name, value);
+    }
+    Ok((out, Json(res)))
 }
 
 fn verifier_admin_error_response(

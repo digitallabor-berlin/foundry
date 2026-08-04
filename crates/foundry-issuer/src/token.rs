@@ -62,6 +62,7 @@ pub async fn handle_token_request(
     pop_header: Option<&str>,
     dpop_cfg: &DpopConfig,
     dpop: &DpopPresentation<'_>,
+    nonce_secret: &crate::challenge::NonceSecret,
     issuer_identifier: &str,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
@@ -82,6 +83,8 @@ pub async fn handle_token_request(
             issuer_identifier,
             now_unix,
             wallet_attestation.pop_max_age_secs,
+            wallet_attestation.challenge_mode.clone(),
+            nonce_secret,
         )
         .inspect_err(|e| {
             tracing::warn!(error.kind = e.kind(), "wallet attestation rejected");
@@ -132,6 +135,10 @@ pub async fn handle_token_request(
             ));
         }
         (Mode::Optional | Mode::Required, Some(proof_jwt)) => {
+            let nonce_policy = crate::dpop::DpopNoncePolicy {
+                mode: dpop_cfg.nonce_mode.clone(),
+                secret: nonce_secret,
+            };
             let verified = verify_dpop_proof(
                 proof_jwt,
                 dpop.htm,
@@ -141,6 +148,7 @@ pub async fn handle_token_request(
                 None,
                 now_unix,
                 dpop_cfg.max_age_secs,
+                Some(&nonce_policy),
             )
             .inspect_err(|e| {
                 tracing::warn!(error.kind = e.kind(), "dpop proof rejected");
@@ -348,6 +356,7 @@ mod tests {
             mode: Mode::Disabled,
             trusted_anchors: Vec::new(),
             pop_max_age_secs: 300,
+            challenge_mode: Mode::Disabled,
         }
     }
 
@@ -355,7 +364,16 @@ mod tests {
         DpopConfig {
             mode,
             max_age_secs: 300,
+            nonce_mode: Mode::Disabled,
         }
+    }
+
+    /// A `NonceSecret` for the many call sites here that don't exercise the
+    /// ABCA challenge or DPoP nonce mechanisms -- every fixture in this module
+    /// sets `challenge_mode`/`nonce_mode` to `Disabled`, so the secret's value
+    /// is never actually consulted.
+    fn test_nonce_secret() -> crate::challenge::NonceSecret {
+        crate::challenge::NonceSecret::from_bytes([99u8; 32])
     }
 
     const TOKEN_HTU: &str = "https://issuer.example.com/token";
@@ -403,7 +421,7 @@ mod tests {
         let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
         let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", TOKEN_HTU, None, now, 300)
+        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", TOKEN_HTU, None, now, 300, None)
             .unwrap()
             .jkt;
         (proof, jkt)
@@ -464,6 +482,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -506,6 +525,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -544,6 +564,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -567,6 +588,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -608,6 +630,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -622,6 +645,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -658,6 +682,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -719,6 +744,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -744,6 +770,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -771,6 +798,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -789,6 +817,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -815,6 +844,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -838,6 +868,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -864,6 +895,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -899,6 +931,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -939,6 +972,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Disabled),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -972,6 +1006,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Disabled),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1003,6 +1038,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1030,6 +1066,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1064,6 +1101,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1088,6 +1126,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1118,6 +1157,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &with_dpop("not-a-jwt"),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1134,6 +1174,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -1165,6 +1206,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1181,6 +1223,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Required),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1209,6 +1252,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1238,6 +1282,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &with_dpop(&proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1265,6 +1310,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1295,6 +1341,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &with_dpop(&wrong_proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
         )
@@ -1309,6 +1356,7 @@ mod tests {
             None,
             &dpop_cfg(Mode::Optional),
             &with_dpop(&good_proof),
+            &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
         )
@@ -1441,6 +1489,7 @@ mod tests {
                 certs: path.to_str().unwrap().to_string(),
             }],
             pop_max_age_secs: 300,
+            challenge_mode: Mode::Disabled,
         };
         (dir, mode)
     }
@@ -1476,6 +1525,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1519,6 +1569,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1539,6 +1590,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1590,6 +1642,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1611,6 +1664,7 @@ mod tests {
             Some(&pop_jwt_2),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1652,6 +1706,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1692,6 +1747,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )
@@ -1732,6 +1788,7 @@ mod tests {
             Some(&pop_jwt),
             &dpop_cfg(Mode::Optional),
             &no_dpop(),
+            &test_nonce_secret(),
             ISSUER_ID,
             now,
         )

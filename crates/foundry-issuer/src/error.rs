@@ -52,6 +52,25 @@ pub enum IssuanceError {
     /// MUST NOT echo the proof, the access token, or key material.
     #[error("invalid dpop proof: {0}")]
     InvalidDpopProof(String),
+    /// ABCA draft -07 §6.2: "use_attestation_challenge MUST be used when the
+    /// Client Attestation PoP JWT is not using an expected server-provided
+    /// challenge. When used this error code MUST be accompanied by the
+    /// OAuth-Client-Attestation-Challenge HTTP header field parameter."
+    ///
+    /// Distinct from `InvalidClient` deliberately: this condition is *retriable*
+    /// once the wallet picks up the fresh challenge the response carries, and
+    /// only a distinct code tells it so.
+    #[error("use attestation challenge: {0}")]
+    UseAttestationChallenge(String),
+    /// RFC 9449 §8/§9: the error code accompanying a `DPoP-Nonce` header when a
+    /// proof carried no nonce, or one that did not match.
+    ///
+    /// Distinct from `InvalidDpopProof` deliberately, for the same reason as
+    /// `UseAttestationChallenge`: §8 states the client "will typically retry the
+    /// request with the new nonce value supplied upon receiving a
+    /// use_dpop_nonce error".
+    #[error("use dpop nonce: {0}")]
+    UseDpopNonce(String),
     #[error("status list exhausted while allocating an index for credential_type '{0}'")]
     StatusListExhausted(String),
     #[error(transparent)]
@@ -90,6 +109,8 @@ impl IssuanceError {
             IssuanceError::ClaimValidation(_) => "claim_validation",
             IssuanceError::InvalidClient(_) => "invalid_client",
             IssuanceError::InvalidDpopProof(_) => "invalid_dpop_proof",
+            IssuanceError::UseAttestationChallenge(_) => "use_attestation_challenge",
+            IssuanceError::UseDpopNonce(_) => "use_dpop_nonce",
             IssuanceError::StatusListExhausted(_) => "status_list_exhausted",
             IssuanceError::Storage(_) => "storage",
             IssuanceError::Crypto(_) => "crypto",
@@ -143,6 +164,11 @@ mod tests {
             (IssuanceError::ClaimValidation(s()), "claim_validation"),
             (IssuanceError::InvalidClient(s()), "invalid_client"),
             (IssuanceError::InvalidDpopProof(s()), "invalid_dpop_proof"),
+            (
+                IssuanceError::UseAttestationChallenge(s()),
+                "use_attestation_challenge",
+            ),
+            (IssuanceError::UseDpopNonce(s()), "use_dpop_nonce"),
             (
                 IssuanceError::StatusListExhausted(s()),
                 "status_list_exhausted",
@@ -203,6 +229,26 @@ mod tests {
         assert_eq!(
             e.to_string(),
             "invalid dpop proof: htu claim does not match"
+        );
+    }
+
+    /// ABCA §6.2 and RFC 9449 §8 each mandate a *specific* error code that a wallet
+    /// keys its retry logic on. Collapsing either into a generic `invalid_client` /
+    /// `invalid_dpop_proof` would leave a compliant wallet unable to tell a
+    /// retriable condition from a permanent failure.
+    #[test]
+    fn challenge_and_nonce_errors_carry_their_own_wire_codes() {
+        assert_eq!(
+            IssuanceError::UseAttestationChallenge("x".into()).kind(),
+            "use_attestation_challenge"
+        );
+        assert_eq!(
+            IssuanceError::UseDpopNonce("x".into()).kind(),
+            "use_dpop_nonce"
+        );
+        assert_ne!(
+            IssuanceError::UseDpopNonce("x".into()).kind(),
+            IssuanceError::InvalidDpopProof("x".into()).kind()
         );
     }
 

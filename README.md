@@ -201,6 +201,7 @@ cargo run -p foundry -- serve --config config.yaml
 **Wallet-facing Server (`0.0.0.0:8443`):**
 - `GET /.well-known/openid-credential-issuer` — OpenID4VCI Credential Issuer Metadata
 - `GET /.well-known/oauth-authorization-server` — OAuth 2.0 Authorization Server Metadata
+- `POST /challenge` — ABCA §8 attestation challenge retrieval; registered only when `issuer.wallet_attestation.challenge_mode` is not `disabled` (see [ABCA Challenge Retrieval](#abca-challenge-retrieval-post-challenge))
 - `GET /api-docs` — Interactive OpenAPI/Swagger UI for the wallet-facing (OpenID4VCI/OpenID4VP) endpoints
 - `GET /api-docs/openapi.json` — Raw OpenAPI 3.x spec (JSON) for the wallet-facing endpoints
 
@@ -399,6 +400,47 @@ Two further rules are enforced and worth knowing when debugging a client:
   Attester that mistakenly embeds private key material is rejected, since such
   an attestation would let any observer mint PoPs for that wallet.
 
+### ABCA Challenge Retrieval (`POST /challenge`)
+
+Independently of the fields above, `issuer.wallet_attestation.challenge_mode`
+(`disabled` / `optional` / `required`, **`disabled` by default** — nothing
+changes for an existing deployment until an operator opts in) gates ABCA §8's
+server-provided challenge mechanism:
+
+```yaml
+issuer:
+  wallet_attestation:
+    challenge_mode: required   # disabled (default) | optional | required
+```
+
+- **`disabled`** (default) — `POST /challenge` is not served (404) and
+  `challenge_endpoint` is not advertised in `/.well-known/oauth-authorization-
+  server`. A Client Attestation PoP's `challenge` claim, if a wallet sends
+  one anyway, is ignored.
+- **`optional`** — `POST /challenge` is served; a PoP's `challenge` claim is
+  validated if present, but its absence is accepted.
+- **`required`** — a PoP MUST carry a valid `challenge` claim, minted by this
+  issuer via `POST /challenge` within `pop_max_age_secs` of the request. A
+  missing, expired, mismatched, or foreign `challenge` is rejected with HTTP
+  400 `{"error": "use_attestation_challenge"}`, and — per ABCA §6.2 — the
+  response carries a fresh `OAuth-Client-Attestation-Challenge` header the
+  wallet can retry with immediately, no extra round trip to `/challenge`
+  required. The same header rides a **successful** `/token` response too
+  (ABCA §8.1), so a wallet always holds a usable challenge for its next
+  request.
+
+> **`required` only binds a PoP that is actually presented.** `challenge_mode`
+> strengthens a Client Attestation PoP; it is not an independent authentication
+> requirement. Under `wallet_attestation.mode: optional`, a wallet that sends no
+> `OAuth-Client-Attestation` header at all is never asked for a PoP, so no
+> `challenge` is ever checked — `challenge_mode: required` is then effectively
+> optional. To make challenges genuinely mandatory, set **both**
+> `mode: required` and `challenge_mode: required`.
+
+`POST /challenge` is unauthenticated (like `POST /nonce`), returns
+`{"attestation_challenge": "..."}`, and sets `Cache-Control: no-store` on
+every response.
+
 ---
 
 ## DPoP (RFC 9449) — Sender-Constrained Access Tokens
@@ -442,6 +484,44 @@ Optionally, a wallet MAY send a `dpop_jkt` parameter to `GET /authorize`,
 pinning the eventual authorization code to that key; `POST /token` then
 rejects a mismatched key before the code is invalidated, so a captured code
 cannot be redeemed under an attacker-controlled key.
+
+### Server-Provided DPoP Nonces (RFC 9449 §8/§9)
+
+Independently of `mode` above, `issuer.dpop.nonce_mode` (`disabled` /
+`optional` / `required`, **`disabled` by default** — nothing changes for an
+existing deployment until an operator opts in) gates RFC 9449's optional
+server-provided nonce mechanism:
+
+```yaml
+issuer:
+  dpop:
+    nonce_mode: required   # disabled (default) | optional | required
+```
+
+- **`disabled`** (default) — no `DPoP-Nonce` header is ever emitted; a
+  proof's `nonce` claim, if a wallet sends one anyway, is ignored.
+- **`optional`** — a proof's `nonce` claim is verified if present, but its
+  absence is accepted.
+- **`required`** — a proof MUST carry a valid, unexpired `nonce` minted by
+  this issuer. A missing or stale one is rejected: at `POST /token` (RFC 9449
+  §8) with HTTP 400 `{"error": "use_dpop_nonce"}`; at `POST /credential` (§9)
+  with HTTP 401 and a `WWW-Authenticate: DPoP error="use_dpop_nonce",
+  algs="ES256"` challenge. Either way the response carries a fresh
+  `DPoP-Nonce` header the wallet retries with immediately. The same header
+  rides a **successful** response too (§8.2), so a wallet always holds a
+  usable nonce for its next request, and never more than one `DPoP-Nonce`
+  header is ever emitted on a single response.
+
+> **`required` only binds a proof that is actually presented.** `nonce_mode`
+> strengthens a DPoP proof; it is not an independent authentication requirement.
+> Under `dpop.mode: optional`, a wallet that sends no `DPoP` header receives a
+> plain `Bearer` token and never encounters the nonce requirement —
+> `nonce_mode: required` is then effectively optional. To make nonces genuinely
+> mandatory, set **both** `mode: required` and `nonce_mode: required`.
+
+A DPoP nonce, an ABCA `attestation_challenge`, and an OpenID4VCI `c_nonce` are
+minted from the same MAC secret but are domain-separated: one can never verify
+as another, even if presented in the wrong place.
 
 ---
 
@@ -544,10 +624,11 @@ in the log.
 
 Without the flag, no payload is logged at any level. Regardless of the flag,
 these are **never** logged: private and ephemeral JWKs, the admin API key,
-access tokens, `c_nonce` values and the nonce secret, pre-authorized codes,
-authorization codes and transaction codes. Public keys appear only as RFC 7638
-thumbprints. This is enforced by tests
-(`crates/foundry/tests/logging_redaction.rs`), not by convention.
+access tokens, `c_nonce` values, ABCA `attestation_challenge` values, DPoP
+`nonce` values, the nonce secret, pre-authorized codes, authorization codes and
+transaction codes. Public keys appear only as RFC 7638 thumbprints. This is
+enforced by tests (`crates/foundry/tests/logging_redaction.rs`), not by
+convention.
 
 ---
 

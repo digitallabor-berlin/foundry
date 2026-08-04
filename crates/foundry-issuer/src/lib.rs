@@ -1,5 +1,6 @@
 pub mod attestation;
 pub mod authorize;
+pub mod challenge;
 pub mod create_offer;
 pub mod credential;
 pub mod dpop;
@@ -15,17 +16,20 @@ pub mod transaction;
 pub use authorize::{
     handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
 };
+pub use challenge::{issue_attestation_challenge, mint_dpop_nonce, ChallengeResponse, NonceSecret};
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{
     handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
 };
-pub use dpop::{access_token_hash, verify_dpop_proof, DpopPresentation, VerifiedDpopProof};
+pub use dpop::{
+    access_token_hash, verify_dpop_proof, DpopNoncePolicy, DpopPresentation, VerifiedDpopProof,
+};
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,
     CredentialConfigurationSupported, CredentialIssuerMetadata, ProofTypeSupported,
 };
-pub use nonce::{issue_nonce, verify_nonce, NonceResponse, NonceSecret, C_NONCE_TTL_SECS};
+pub use nonce::{issue_nonce, verify_nonce, NonceResponse, C_NONCE_TTL_SECS};
 pub use offer::{
     build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
