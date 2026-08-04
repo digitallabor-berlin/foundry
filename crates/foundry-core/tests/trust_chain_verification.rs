@@ -112,3 +112,86 @@ fn leaf_signed_by_an_impostor_ca_with_an_identical_dn_is_rejected() {
     validate_chain(good.cert_pem.as_bytes(), &[], &store, now_secs())
         .expect("a genuinely signed leaf must validate");
 }
+
+/// A real Android Keystore attestation chain, captured from Google Wallet.
+///
+/// Structure (verified with `openssl verify`):
+///   leaf            CN=Android Keystore Key   EC P-256, sig ecdsa-with-SHA256
+///   intermediate-1  title=TEE, serial=58eb..  EC P-256, sig ecdsa-with-SHA256
+///   intermediate-2  title=TEE, serial=3fb6..  EC P-384, sig sha256WithRSAEncryption
+///   root            serial=f92009e853b6b045   RSA 4096, self-signed
+///
+/// Note intermediate-1 carries a P-256 key but is signed by intermediate-2's
+/// P-384 key using SHA-256 -- the digest is not derivable from the key curve.
+const ANDROID_LEAF: &[u8] = include_bytes!("fixtures/android-attestation/leaf.pem");
+const ANDROID_INT_P256: &[u8] =
+    include_bytes!("fixtures/android-attestation/intermediate-tee-p256.pem");
+const ANDROID_INT_P384: &[u8] =
+    include_bytes!("fixtures/android-attestation/intermediate-tee-p384.pem");
+const ANDROID_ROOT: &[u8] = include_bytes!("fixtures/android-attestation/root-rsa4096.pem");
+
+/// 2026-01-01T00:00:00Z. Pinned so the fixture assertions cannot rot: both TEE
+/// intermediates are valid 2022-03-20 -> 2032-03-17.
+const ANDROID_PINNED_NOW: u64 = 1_767_225_600;
+
+/// The chain exactly as Google transmits it: leaf first, root included last.
+fn android_presented_intermediates() -> Vec<Vec<u8>> {
+    vec![
+        ANDROID_INT_P256.to_vec(),
+        ANDROID_INT_P384.to_vec(),
+        ANDROID_ROOT.to_vec(),
+    ]
+}
+
+#[test]
+fn real_android_attestation_chain_validates_against_the_configured_google_root() {
+    let store = TrustStore::from_pems(&[ANDROID_ROOT.to_vec()]).expect("build store");
+    validate_chain(
+        ANDROID_LEAF,
+        &android_presented_intermediates(),
+        &store,
+        ANDROID_PINNED_NOW,
+    )
+    .expect("the real Android attestation chain must validate");
+}
+
+#[test]
+fn presented_android_root_grants_nothing_without_a_configured_anchor() {
+    // The full chain is presented, root included -- but the only configured
+    // anchor is unrelated. Trust must not be bootstrappable from a certificate
+    // the caller supplied.
+    let unrelated = new_ca("Unrelated Root CA", 3650).expect("generate unrelated CA");
+    let store = TrustStore::from_pems(&[unrelated.cert_pem.into_bytes()]).expect("store");
+
+    let err = validate_chain(
+        ANDROID_LEAF,
+        &android_presented_intermediates(),
+        &store,
+        ANDROID_PINNED_NOW,
+    )
+    .expect_err("a presented root must not establish trust");
+    assert!(
+        matches!(err, TrustError::UntrustedChain),
+        "expected UntrustedChain, got {err:?}"
+    );
+}
+
+#[test]
+fn android_chain_is_rejected_outside_the_intermediate_validity_window() {
+    // 2035-01-01T00:00:00Z -- past both TEE intermediates' 2032 notAfter,
+    // though still inside the leaf's absurd 2106 window. Proves the whole path
+    // is time-checked, not just the leaf.
+    const AFTER_INTERMEDIATES_EXPIRE: u64 = 2_051_222_400;
+    let store = TrustStore::from_pems(&[ANDROID_ROOT.to_vec()]).expect("build store");
+    let err = validate_chain(
+        ANDROID_LEAF,
+        &android_presented_intermediates(),
+        &store,
+        AFTER_INTERMEDIATES_EXPIRE,
+    )
+    .expect_err("an expired intermediate must be rejected");
+    assert!(
+        matches!(err, TrustError::Expired),
+        "expected Expired, got {err:?}"
+    );
+}
