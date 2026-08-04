@@ -308,7 +308,9 @@ rejected. Using system time would silently break that contract.
 **2. `X509VerifyFlags::PARTIAL_CHAIN` is set.** foundry's existing semantics
 allow a configured anchor to be *any* certificate, not necessarily a self-signed
 root. Without `PARTIAL_CHAIN`, OpenSSL insists on building a path to a
-self-signed root and would reject anchor bundles that pin an intermediate.
+self-signed root and would reject anchor bundles that pin an intermediate. This
+was confirmed against the real chain: pinning the P-384 TEE intermediate as the
+sole anchor validates the leaf only with `-partial_chain`.
 
 **3. Purpose is left unset.** Setting a purpose enables Extended Key Usage
 checks. Android attestation certificates carry no EKU, so setting a purpose
@@ -317,8 +319,22 @@ change to get wrong in the name of hardening.
 
 **4. A presented root is never trusted.** Step 2 discards self-signed
 certificates from the untrusted set; the anchor must come from configuration.
-Otherwise "chains to a Google root" degrades to "chains to a root the caller
-supplied", which is not trust at all.
+
+This is **defence-in-depth, not load-bearing**, and the distinction was
+established by experiment rather than assumed. OpenSSL already refuses to
+bootstrap trust from a presented root: with the real Google chain supplied in
+full — root included as an untrusted intermediate — and only an *unrelated*
+anchor configured, verification fails with `error 19 self-signed certificate in
+certificate chain`. Conversely, with the genuine root configured as an anchor
+*and* also presented in the chain (exactly what Google sends), verification
+succeeds. So the filtering step changes neither outcome.
+
+It is kept for two smaller reasons: it makes the intent explicit at the point
+where a reader would otherwise have to know OpenSSL's behaviour to be
+reassured, and it yields a more accurate error (`UntrustedChain` rather than a
+self-signed-in-chain code) when an anchor genuinely is not configured. The
+implementation comment must state that it is redundant with OpenSSL's own
+behaviour, so that a future reader does not mistake it for the sole barrier.
 
 Consequence, recorded here because it is operational setup rather than code:
 **sub-project D requires Google's two attestation roots to be installed as
@@ -356,10 +372,13 @@ therefore cannot break a match arm.
 - **§4.5** — certificate bytes, DNs, and public keys are never logged from
   `trust/`. `validate_chain` returns typed errors; the single log record is
   emitted by the existing error mapper in `crates/foundry/src/server.rs`.
-- **`X509Store` must be `Send + Sync`.** `TrustStore` is constructed and held
-  across `.await` points in `token.rs` and `credential.rs`. This is expected to
-  hold, but it is a compile-time fact to confirm during implementation rather
-  than an assumption to rely on.
+- **`X509Store` is `Send + Sync`** — confirmed: `openssl::x509::store` declares
+  it through `foreign_type_and_impl_send_sync!`. This matters because
+  `TrustStore` is constructed and held across `.await` points in `token.rs` and
+  `credential.rs`.
+- **`X509VerifyResult::from_raw` is `unsafe`**, so error classification reads
+  `ctx.error().as_raw()` and compares against integer constants declared locally
+  with a citation to OpenSSL's `x509_vfy.h`. No `unsafe` block is required.
 
 ## Testing
 
@@ -390,8 +409,19 @@ unmodified: `self_signed_leaf_is_rejected`, `expired_leaf_is_rejected`,
 `expired_leaf_is_rejected` is what proves `set_time` is wired rather than the
 system clock.
 
-**Curve coverage.** Chains built from `generate_ec_key` for `Es256`, `Es384` and
-`Es512` all validate, so P-521 does not silently regress.
+**Curve coverage.** P-256 and P-384 chains both validate, built through `rcgen`
+with explicit algorithms. Note that `pki::new_ca` and `pki::issue_leaf` call
+`rcgen::KeyPair::generate()`, which is hardcoded to `PKCS_ECDSA_P256_SHA256`, so
+a loop over those helpers would test one curve repeatedly while appearing to
+test several.
+
+P-521 is **not** covered by a test: `rcgen::PKCS_ECDSA_P521_SHA512` is gated
+behind `#[cfg(feature = "aws_lc_rs")]` and foundry builds `rcgen` with default
+features (`ring`), so the symbol does not exist in this build. This is a fixture
+limitation rather than a foundry gap — OpenSSL verifies P-521 natively, and
+`cert_ec_public_coords` already handles P-521 SPKIs — but it is recorded here
+rather than papered over. Enabling `aws_lc_rs` purely to obtain the fixture
+would switch the crypto backend of the whole workspace and is not worth it.
 
 **Anchor-as-intermediate.** A non-self-signed certificate configured as the
 anchor still validates. This pins `PARTIAL_CHAIN` and prevents a future cleanup
