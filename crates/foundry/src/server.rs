@@ -895,18 +895,14 @@ async fn nonce_handler(
     path = "/challenge",
     responses(
         (status = 200, body = ChallengeResponse,
-         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`)."),
+         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`). \
+                        Also carries a fresh `DPoP-Nonce` header when \
+                        `issuer.dpop.nonce_mode` is `optional` or `required`."),
     )
 )]
 async fn challenge_handler(
     State(state): State<AppState>,
-) -> Result<
-    (
-        [(axum::http::HeaderName, &'static str); 1],
-        Json<ChallengeResponse>,
-    ),
-    (StatusCode, Json<serde_json::Value>),
-> {
+) -> Result<(HeaderMap, Json<ChallengeResponse>), (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -919,9 +915,25 @@ async fn challenge_handler(
     )
     .map_err(|e| wallet_error_response(&e))?;
 
+    let mut out = HeaderMap::new();
     // §8: "The Authorization Server MUST make the response uncacheable by
     // adding a Cache-Control header field including the value no-store."
-    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
+    out.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    // Vendor accommodation, not conformance: the Google Wallet profile
+    // (docs/specs/google-wallet-openid4vci-profile.md, "Token Endpoint")
+    // expects the DPoP nonce here and says so explicitly of itself -- "Note:
+    // this is not standardized." ABCA draft -07 §8, which defines this
+    // endpoint, mentions no DPoP interaction, and no other pinned
+    // specification does either, so the profile is the only source. Gated on
+    // `nonce_mode` for the same reason as at the Nonce Endpoint. `insert`, not
+    // `append`: RFC 9449 §8 forbids a second DPoP-Nonce header.
+    if let Some((name, value)) = dpop_nonce_header(&state, now) {
+        out.insert(name, value);
+    }
+    Ok((out, Json(res)))
 }
 
 /// Split an `Authorization` header into its scheme and credentials.
