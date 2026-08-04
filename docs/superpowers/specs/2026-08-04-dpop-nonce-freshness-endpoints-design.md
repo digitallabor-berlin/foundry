@@ -247,12 +247,20 @@ new file, so the whole mechanism stays readable in one place.
 | 2 | `/challenge` carries it under both modes | ditto for the second endpoint |
 | 3 | Extend the existing disabled-mode test to assert **neither** endpoint emits it | the negative control; the default posture is unchanged |
 | 4 | A nonce read from `/nonce` is **accepted** by a subsequent `/token` DPoP proof under `nonce_mode: required` | that the header carries a *usable* value, not merely a well-formed one — the test that would catch a wrong-`Domain` or wrong-TTL mint |
-| 5 | That same value is **rejected** when submitted as a `c_nonce` in a holder proof | domain separation, as a positive/negative pair with #4 |
-| 6 | `Cache-Control: no-store` still present on both | regression guard on the return-type change from array to `HeaderMap` |
-| 7 | A `logging_redaction.rs` case: an enabled-mode `/nonce` and `/challenge` never log the minted value, including with `sensitive_payloads` enabled | §4.5 — key/freshness material is not unlocked by that flag |
+| 5 | `Cache-Control: no-store` still present on both | regression guard on the return-type change from array to `HeaderMap` |
+| 6 | A `logging_redaction.rs` case: an enabled-mode `/nonce` and `/challenge` never log the minted value, including with `sensitive_payloads` enabled | §4.5 — key/freshness material is not unlocked by that flag |
 
 Test 4 is the one that matters most. Tests 1–3 would pass against a handler
 that emitted a syntactically valid but semantically useless header.
+
+**Domain separation is deliberately not retested here.** `challenge.rs`'s own
+unit tests already prove it exhaustively and in all three directions
+(`a_c_nonce_is_rejected_as_a_dpop_nonce`,
+`a_dpop_nonce_is_rejected_as_an_attestation_challenge`,
+`an_attestation_challenge_is_rejected_as_a_c_nonce`). The property belongs to
+the MAC construction, not to the transport; asserting it again over HTTP would
+add a slower duplicate of a test that already exists, and would not fail for any
+reason the unit tests would miss.
 
 `openapi_endpoints.rs` already drift-tests both committed specs against
 generator output as parsed JSON, so the OpenAPI regeneration in §7 is covered by
