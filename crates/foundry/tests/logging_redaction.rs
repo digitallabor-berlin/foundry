@@ -215,6 +215,12 @@ struct IssuanceSecrets {
     access_token: String,
     c_nonce: String,
     credential: String,
+    /// ABCA §8 attestation_challenge -- empty unless produced by
+    /// `drive_issuance_with_challenge_and_nonce`.
+    attestation_challenge: String,
+    /// RFC 9449 §8/§9 DPoP nonce -- empty unless produced by
+    /// `drive_issuance_with_challenge_and_nonce`.
+    dpop_nonce: String,
 }
 
 /// Drive a complete issuance through the real routers.
@@ -317,7 +323,408 @@ async fn drive_issuance(state: &AppState) -> IssuanceSecrets {
         access_token,
         c_nonce,
         credential,
+        attestation_challenge: String::new(),
+        dpop_nonce: String::new(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 9 of the ABCA challenge-retrieval / DPoP-nonce plan
+// (docs/superpowers/plans/2026-08-04-abca-challenge-and-dpop-nonce-plan.md):
+// the ABCA attestation_challenge and the RFC 9449 DPoP nonce are exactly the
+// values an attacker needs to complete an otherwise-unforgeable PoP or DPoP
+// proof -- root AGENTS.md sect-4.5 makes this a *behavioural* requirement, so
+// it is asserted here, not only reviewed.
+// ---------------------------------------------------------------------------
+
+/// The `sub`/`iss` shared between the Wallet Attestation and its Client
+/// Attestation PoP JWTs in this section's tests.
+const CHALLENGE_WALLET_SUB: &str = "https://wallet-challenge.example.org";
+
+/// As `setup_with_required_attestation`, but with
+/// `wallet_attestation.challenge_mode`, `dpop.mode`, and `dpop.nonce_mode` all
+/// `Mode::Required` too -- Task 9 needs a state where both new freshness
+/// values actually flow through a request, or the redaction assertions below
+/// would be vacuous.
+async fn setup_with_challenge_and_dpop_nonce() -> (
+    AppState,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+    String,
+) {
+    let (state, dir, ca_dir, ca_cert_pem, ca_key_pem) = setup_with_required_attestation().await;
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.wallet_attestation.challenge_mode = Mode::Required;
+    cfg.issuer.dpop.mode = Mode::Required;
+    cfg.issuer.dpop.nonce_mode = Mode::Required;
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    (state, dir, ca_dir, ca_cert_pem, ca_key_pem)
+}
+
+/// Builds a Wallet Attestation JWT (chained to `ca_cert_pem`/`ca_key_pem`) and
+/// returns it alongside the EC key pair whose public JWK is embedded in its
+/// `cnf.jwk` -- sign a matching Client Attestation PoP JWT against that same
+/// key with `sign_pop_with_challenge`. Split from a single combined builder
+/// (as `signed_attestation_and_pop_with_planted_jti` above is) because this
+/// section's driver needs two *different* PoP JWTs -- one per /token attempt
+/// -- bound to the same attestation key: `claim_dpop_jti`'s sibling,
+/// `claim_pop_jti`, burns the first attempt's PoP jti even though that attempt
+/// only fails on the DPoP nonce check, so a retry needs a fresh PoP jti
+/// without a fresh attestation.
+fn build_wallet_attestation(ca_cert_pem: &str, ca_key_pem: &str, now: i64) -> (String, EcKeyPair) {
+    use base64::Engine as _;
+    use foundry_core::crypto::{FileSigner, SignatureAlgorithm as SigAlg, Signer};
+    use foundry_core::pki::issue_leaf;
+    use foundry_core::trust::build_x5c;
+
+    let kp = EcKeyPair::generate(EcCurve::P256).expect("pop keypair");
+    let mut cnf_jwk = kp.to_jwk_public_key();
+    cnf_jwk.set_algorithm("ES256");
+
+    let leaf = issue_leaf(
+        ca_cert_pem,
+        ca_key_pem,
+        "wallet-provider.example.com",
+        &["wallet-provider.example.com".to_string()],
+        365,
+    )
+    .expect("issue_leaf");
+    let x5c = build_x5c(&[leaf.cert_pem.clone().into_bytes()]).expect("x5c");
+
+    let header = serde_json::json!({
+        "typ": "oauth-client-attestation+jwt", "alg": "ES256", "x5c": x5c,
+    });
+    let payload = serde_json::json!({
+        "iss": "https://wallet-provider.example.com",
+        "sub": CHALLENGE_WALLET_SUB,
+        "exp": now + 100_000,
+        "cnf": { "jwk": cnf_jwk },
+    });
+    let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&header).unwrap());
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&payload).unwrap());
+    let signing_input = format!("{header_b64}.{payload_b64}");
+    let leaf_signer =
+        FileSigner::from_pem(leaf.key_pem.as_bytes(), SigAlg::Es256).expect("leaf signer");
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(leaf_signer.sign(signing_input.as_bytes()).unwrap());
+    let attestation_jwt = format!("{signing_input}.{sig_b64}");
+
+    (attestation_jwt, kp)
+}
+
+/// Signs a Client Attestation PoP JWT (ABCA §5.2) against `kp` (from
+/// `build_wallet_attestation`), optionally carrying a `challenge` claim (ABCA
+/// §5.2/§8, Task 4 of the ABCA/DPoP-nonce plan).
+fn sign_pop_with_challenge(kp: &EcKeyPair, jti: &str, now: i64, challenge: Option<&str>) -> String {
+    use base64::Engine as _;
+    use josekit::jws::JwsSigner;
+
+    let pop_signer = ES256
+        .signer_from_jwk(&kp.to_jwk_private_key())
+        .expect("pop signer");
+    let pop_header = serde_json::json!({
+        "typ": "oauth-client-attestation-pop+jwt", "alg": "ES256",
+    });
+    let mut pop_payload = serde_json::json!({
+        "iss": CHALLENGE_WALLET_SUB, "aud": ISSUER, "jti": jti, "iat": now,
+    });
+    if let Some(c) = challenge {
+        pop_payload["challenge"] = serde_json::json!(c);
+    }
+    let pop_header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&pop_header).unwrap());
+    let pop_payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&pop_payload).unwrap());
+    let pop_signing_input = format!("{pop_header_b64}.{pop_payload_b64}");
+    let pop_sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(pop_signer.sign(pop_signing_input.as_bytes()).unwrap());
+    format!("{pop_signing_input}.{pop_sig_b64}")
+}
+
+/// A DPoP proof JWT (RFC 9449 §4.2), with an optional `nonce` claim (§8/§9)
+/// and an optional `ath` claim (§7, for /credential presentations --
+/// `access_token` is what gets hashed into it).
+fn create_dpop_proof_with_nonce(
+    kp: &EcKeyPair,
+    method: &str,
+    htu: &str,
+    jti: &str,
+    iat: i64,
+    access_token: Option<&str>,
+    nonce: Option<&str>,
+) -> String {
+    let mut header = JwsHeader::new();
+    header.set_token_type("dpop+jwt");
+    header.set_jwk(kp.to_jwk_public_key());
+
+    let mut payload = JwtPayload::new();
+    payload.set_claim("htm", Some(method.into())).unwrap();
+    payload.set_claim("htu", Some(htu.into())).unwrap();
+    payload.set_claim("iat", Some(iat.into())).unwrap();
+    payload.set_claim("jti", Some(jti.into())).unwrap();
+    if let Some(at) = access_token {
+        let ath = foundry_issuer::access_token_hash(at);
+        payload.set_claim("ath", Some(ath.into())).unwrap();
+    }
+    if let Some(n) = nonce {
+        payload.set_claim("nonce", Some(n.into())).unwrap();
+    }
+
+    let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+/// Drives issuance with ABCA challenge retrieval and DPoP nonces **enabled**,
+/// so the new secrets actually flow through the request path this test then
+/// scans. Running the default (disabled) config here would make the
+/// assertions vacuously true.
+///
+/// Mirrors `drive_issuance`, but: fetches an attestation_challenge from
+/// `POST /challenge`; drives `/token` with a Wallet Attestation + PoP (the PoP
+/// carrying that challenge) and a DPoP proof, retrying once (fresh PoP jti,
+/// fresh DPoP jti, the server-supplied nonce) exactly as RFC 9449 §8
+/// prescribes; then completes `/nonce` and `/credential` as `drive_issuance`
+/// does, reusing the same DPoP nonce value at `/credential` too --
+/// `Domain::DpopNonce` is not endpoint-scoped, so no second failed round trip
+/// is needed to prove that.
+async fn drive_issuance_with_challenge_and_nonce(
+    state: &AppState,
+    ca_cert_pem: &str,
+    ca_key_pem: &str,
+) -> IssuanceSecrets {
+    let admin = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+
+    let challenge_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/challenge")
+                .body(Body::empty())
+                .expect("challenge request"),
+        )
+        .await
+        .expect("challenge response");
+    assert_eq!(challenge_res.status(), StatusCode::OK);
+    let attestation_challenge = body_json(challenge_res).await["attestation_challenge"]
+        .as_str()
+        .expect("attestation_challenge")
+        .to_string();
+
+    let offer_res = admin
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_type_id": "pid",
+                        "claims": { "given_name": PLANTED_CLAIM },
+                        "tx_code_required": false
+                    })
+                    .to_string(),
+                ))
+                .expect("offer request"),
+        )
+        .await
+        .expect("offer response");
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer = body_json(offer_res).await;
+    let pre_auth_code = offer["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized code")
+        .to_string();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time")
+        .as_secs() as i64;
+    let (attestation_jwt, attestation_kp) = build_wallet_attestation(ca_cert_pem, ca_key_pem, now);
+    let dpop_kp = EcKeyPair::generate(EcCurve::P256).expect("dpop keypair");
+    let token_htu = format!("{ISSUER}/token");
+
+    // First attempt: attestation + challenge verify fully, but the DPoP proof
+    // carries no `nonce` claim yet -- expected to fail with use_dpop_nonce.
+    let pop_jwt_1 = sign_pop_with_challenge(
+        &attestation_kp,
+        "jti-pop-nonce-1",
+        now,
+        Some(&attestation_challenge),
+    );
+    let dpop_proof_1 =
+        create_dpop_proof_with_nonce(&dpop_kp, "POST", &token_htu, "jti-dpop-1", now, None, None);
+    let token_res_1 = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("OAuth-Client-Attestation", &attestation_jwt)
+                .header("OAuth-Client-Attestation-PoP", &pop_jwt_1)
+                .header("DPoP", &dpop_proof_1)
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .expect("token request 1"),
+        )
+        .await
+        .expect("token response 1");
+    assert_eq!(token_res_1.status(), StatusCode::BAD_REQUEST);
+    let dpop_nonce = token_res_1
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("first /token attempt must supply a DPoP-Nonce")
+        .to_string();
+
+    // Retry: a fresh Client Attestation PoP jti (claim_pop_jti already burned
+    // the first) and a DPoP proof carrying the supplied nonce.
+    let pop_jwt_2 = sign_pop_with_challenge(
+        &attestation_kp,
+        "jti-pop-nonce-2",
+        now,
+        Some(&attestation_challenge),
+    );
+    let dpop_proof_2 = create_dpop_proof_with_nonce(
+        &dpop_kp,
+        "POST",
+        &token_htu,
+        "jti-dpop-2",
+        now,
+        None,
+        Some(&dpop_nonce),
+    );
+    let token_res_2 = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header("OAuth-Client-Attestation", &attestation_jwt)
+                .header("OAuth-Client-Attestation-PoP", &pop_jwt_2)
+                .header("DPoP", &dpop_proof_2)
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .expect("token request 2"),
+        )
+        .await
+        .expect("token response 2");
+    assert_eq!(token_res_2.status(), StatusCode::OK);
+    let token = body_json(token_res_2).await;
+    assert_eq!(token["token_type"], "DPoP");
+    let access_token = token["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_string();
+
+    let nonce_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nonce")
+                .body(Body::empty())
+                .expect("nonce request"),
+        )
+        .await
+        .expect("nonce response");
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    let c_nonce = body_json(nonce_res).await["c_nonce"]
+        .as_str()
+        .expect("c_nonce")
+        .to_string();
+
+    let cred_htu = format!("{ISSUER}/credential");
+    let cred_proof = create_dpop_proof_with_nonce(
+        &dpop_kp,
+        "POST",
+        &cred_htu,
+        "jti-dpop-cred-1",
+        now,
+        Some(&access_token),
+        Some(&dpop_nonce),
+    );
+    let cred_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credential")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("DPoP {access_token}"))
+                .header("DPoP", &cred_proof)
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_configuration_id": "pid",
+                        "format": "dc+sd-jwt",
+                        "proofs": { "jwt": [create_proof(&c_nonce)] },
+                    })
+                    .to_string(),
+                ))
+                .expect("credential request"),
+        )
+        .await
+        .expect("credential response");
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    let credential = body_json(cred_res).await["credentials"][0]["credential"]
+        .as_str()
+        .expect("credential")
+        .to_string();
+
+    IssuanceSecrets {
+        pre_auth_code,
+        access_token,
+        c_nonce,
+        credential,
+        attestation_challenge,
+        dpop_nonce,
+    }
+}
+
+/// Both new freshness values are secrets: leaking one hands an attacker what it
+/// needs to complete a forged PoP or DPoP proof. Root `AGENTS.md` §4.5.
+#[tokio::test]
+async fn issuance_never_logs_challenges_or_dpop_nonces() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir, _ca_dir, ca_cert_pem, ca_key_pem) =
+        setup_with_challenge_and_dpop_nonce().await;
+    let (guard, log) = capture_at_trace();
+    let secrets = drive_issuance_with_challenge_and_nonce(&state, &ca_cert_pem, &ca_key_pem).await;
+    drop(guard);
+
+    assert!(
+        !log.events().is_empty(),
+        "captured nothing; the negative assertions below would be vacuous"
+    );
+
+    for (label, secret) in [
+        ("attestation_challenge", &secrets.attestation_challenge),
+        ("dpop_nonce", &secrets.dpop_nonce),
+    ] {
+        assert!(
+            !secret.is_empty(),
+            "{label} was empty, so its assertion would be vacuous"
+        );
+        assert!(!log.contains_value(secret), "{label} leaked into the log");
+    }
+}
+
+/// Positive control: proves the capture harness would have caught a leak. If
+/// this fails, the assertions above are meaningless.
+#[tokio::test]
+async fn the_capture_harness_would_catch_a_leaked_challenge() {
+    let _flag = lock_flag().await;
+    let (guard, log) = capture_at_trace();
+    let planted = "planted-challenge-value-must-be-visible";
+    tracing::trace!(planted = planted, "deliberate leak");
+    drop(guard);
+    assert!(log.contains_value(planted));
 }
 
 /// Create a verification request and post `jwe` to it, returning the status.

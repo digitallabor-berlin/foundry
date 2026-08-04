@@ -146,9 +146,10 @@ Logging is a request-path concern and is governed like one.
   `Config`, `VerificationTransaction` (holding `ephem_private_jwk`), access
   tokens, holder proofs and raw JWEs. Fields are opt-in, always.
 - **Never logged, at any level, under any flag:** private and ephemeral JWKs,
-  signer keys, the admin API key, access tokens, `c_nonce` values and the nonce
-  secret, pre-authorized codes, authorization codes, transaction codes. Public
-  keys appear only as RFC 7638 thumbprints (`foundry_core::obs::thumbprint`).
+  signer keys, the admin API key, access tokens, `c_nonce` values, ABCA
+  `attestation_challenge` values, DPoP `nonce` values, the nonce secret,
+  pre-authorized codes, authorization codes, transaction codes. Public keys
+  appear only as RFC 7638 thumbprints (`foundry_core::obs::thumbprint`).
 - **Payload fields require BOTH `foundry_core::obs::sensitive_enabled()` AND a
   `debug`/`trace` level** — never one alone. A level is not authorisation;
   `RUST_LOG=debug` is ordinary in production.
