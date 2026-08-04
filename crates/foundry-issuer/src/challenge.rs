@@ -238,6 +238,23 @@ pub fn issue_attestation_challenge(
     })
 }
 
+/// Mint an RFC 9449 §8/§9 server-provided DPoP `nonce`.
+///
+/// Returns the bare string rather than a wrapper type: unlike the ABCA
+/// challenge, a DPoP nonce is delivered only in a header, never in a JSON body,
+/// so there is no wire shape to model.
+///
+/// `skip_all` is mandatory: the argument is the process MAC secret and the
+/// result is a freshness secret (root `AGENTS.md` §4.5).
+#[tracing::instrument(skip_all)]
+pub fn mint_dpop_nonce(
+    secret: &NonceSecret,
+    ttl_secs: u64,
+    now_unix: i64,
+) -> Result<String, IssuanceError> {
+    mint(secret, Domain::DpopNonce, ttl_secs, now_unix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

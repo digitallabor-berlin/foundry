@@ -1700,6 +1700,452 @@ async fn gap_vci_14_duplicate_attestation_header_is_rejected_per_abca_6_2_rule_1
 }
 
 // ---------------------------------------------------------------------------
+// Task 8 of the ABCA challenge-retrieval / DPoP-nonce plan
+// (docs/superpowers/plans/2026-08-04-abca-challenge-and-dpop-nonce-plan.md):
+// DPoP-Nonce response wiring (RFC 9449 §8/§9) at /token (400) and /credential
+// (401).
+// ---------------------------------------------------------------------------
+
+/// As `setup_test_app`, but with `issuer.dpop` overridden.
+async fn setup_test_app_with_dpop(dpop: DpopConfig) -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup_test_app().await;
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.dpop = dpop;
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    (state, dir)
+}
+
+/// A DPoP proof JWT (RFC 9449 §4.2), with an optional `nonce` claim (§8/§9,
+/// Tasks 7-8 of the ABCA/DPoP-nonce plan) and an optional `ath` claim (§7, for
+/// /credential presentations -- `access_token` is what gets hashed into it).
+fn create_dpop_proof(
+    kp: &EcKeyPair,
+    method: &str,
+    htu: &str,
+    jti: &str,
+    iat: i64,
+    access_token: Option<&str>,
+    nonce: Option<&str>,
+) -> String {
+    let mut header = JwsHeader::new();
+    header.set_token_type("dpop+jwt");
+    header.set_jwk(kp.to_jwk_public_key());
+
+    let mut payload = JwtPayload::new();
+    payload.set_claim("htm", Some(method.into())).unwrap();
+    payload.set_claim("htu", Some(htu.into())).unwrap();
+    payload.set_claim("iat", Some(iat.into())).unwrap();
+    payload.set_claim("jti", Some(jti.into())).unwrap();
+    if let Some(at) = access_token {
+        let ath = foundry_issuer::access_token_hash(at);
+        payload.set_claim("ath", Some(ath.into())).unwrap();
+    }
+    if let Some(n) = nonce {
+        payload.set_claim("nonce", Some(n.into())).unwrap();
+    }
+
+    let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+    jwt::encode_with_signer(&payload, &header, &signer).unwrap()
+}
+
+async fn post_token_with_dpop(
+    state: &AppState,
+    pre_auth_code: &str,
+    proof: &str,
+) -> axum::http::Response<Body> {
+    let wallet_app = wallet_router(state.clone());
+    let token_form_body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+    );
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header("DPoP", proof)
+        .body(Body::from(token_form_body))
+        .unwrap();
+    wallet_app.oneshot(token_req).await.unwrap()
+}
+
+/// Mints a fresh `c_nonce` and holder proof internally, so each call is
+/// independent -- no jti/nonce replay concerns between successive calls in
+/// the same test.
+async fn post_credential_with_dpop(
+    state: &AppState,
+    access_token: &str,
+    proof: &str,
+) -> axum::http::Response<Body> {
+    let c_nonce = mint_c_nonce(state).await;
+    let holder_proof = create_proof(&c_nonce, "https://issuer.example.com");
+    let cred_req_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [holder_proof] },
+    });
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("DPoP {access_token}"))
+        .header("DPoP", proof)
+        .body(Body::from(cred_req_body.to_string()))
+        .unwrap();
+    wallet_app.oneshot(cred_req).await.unwrap()
+}
+
+/// Drives the /token nonce handshake end-to-end (dpop.mode=Required,
+/// dpop.nonce_mode=Required): a first request with no `nonce` claim is
+/// rejected per RFC 9449 §8 and returns a fresh `DPoP-Nonce`; a second
+/// request, re-signed with that nonce and a fresh `jti` (claim_dpop_jti burned
+/// the first), succeeds. Returns the resulting DPoP-bound access token and the
+/// keypair it is bound to. Assumes the caller's `state` already has
+/// dpop.mode/nonce_mode set to Required.
+async fn issue_bound_token_via_nonce_handshake(state: &AppState) -> (String, EcKeyPair) {
+    let pre_auth_code = create_pre_auth_offer(state).await;
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let now = pop_test_now_secs();
+    let htu = "https://issuer.example.com/token";
+
+    let first_proof = create_dpop_proof(&kp, "POST", htu, "jti-handshake-1", now, None, None);
+    let first_res = post_token_with_dpop(state, &pre_auth_code, &first_proof).await;
+    assert_eq!(first_res.status(), StatusCode::BAD_REQUEST);
+    let nonce = first_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("first /token attempt must supply a DPoP-Nonce to retry with")
+        .to_string();
+
+    let second_proof =
+        create_dpop_proof(&kp, "POST", htu, "jti-handshake-2", now, None, Some(&nonce));
+    let second_res = post_token_with_dpop(state, &pre_auth_code, &second_proof).await;
+    assert_eq!(second_res.status(), StatusCode::OK);
+    let body_bytes = axum::body::to_bytes(second_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        json["token_type"], "DPoP",
+        "RFC 9449 §5: a key-bound token MUST be signalled with token_type DPoP"
+    );
+    (json["access_token"].as_str().unwrap().to_string(), kp)
+}
+
+/// RFC 9449 §8: an AS "responds to requests that do not include a nonce with
+/// an HTTP 400 (Bad Request) error response ... using use_dpop_nonce as the
+/// error code value. The authorization server includes a DPoP-Nonce HTTP
+/// header in the response supplying a nonce value to be used when sending the
+/// subsequent request."
+#[tokio::test]
+async fn the_token_endpoint_demands_a_nonce_and_supplies_one() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let now = pop_test_now_secs();
+    let proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/token",
+        "jti-nonce-demand-1",
+        now,
+        None,
+        None,
+    );
+    let res = post_token_with_dpop(&state, &pre_auth_code, &proof).await;
+
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let nonce = res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("§8 requires a DPoP-Nonce header on this error")
+        .to_string();
+    assert!(!nonce.is_empty());
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["error"], "use_dpop_nonce");
+}
+
+/// §8: "the client is expected to retry its token request using a DPoP proof
+/// including the supplied nonce value in the nonce claim." The loop must
+/// close -- `issue_bound_token_via_nonce_handshake` performs and asserts
+/// exactly this retry.
+#[tokio::test]
+async fn a_wallet_can_retry_the_token_request_with_the_supplied_nonce() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let (access_token, _kp) = issue_bound_token_via_nonce_handshake(&state).await;
+    assert!(!access_token.is_empty());
+}
+
+/// §9 / §7.1: at a protected resource the answer is 401 with a
+/// WWW-Authenticate challenge, not the §8 400.
+#[tokio::test]
+async fn the_credential_endpoint_demands_a_nonce_with_a_401_challenge() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let (access_token, kp) = issue_bound_token_via_nonce_handshake(&state).await;
+    let now = pop_test_now_secs();
+    let proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/credential",
+        "jti-cred-nonce-1",
+        now,
+        Some(&access_token),
+        None,
+    );
+    let res = post_credential_with_dpop(&state, &access_token, &proof).await;
+
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let www = res
+        .headers()
+        .get(axum::http::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .expect("§7.1 requires a WWW-Authenticate challenge")
+        .to_string();
+    assert!(www.contains(r#"error="use_dpop_nonce""#), "got: {www}");
+    assert!(www.contains(r#"algs="ES256""#), "got: {www}");
+    assert!(res.headers().get("DPoP-Nonce").is_some());
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["error"], "use_dpop_nonce");
+}
+
+#[tokio::test]
+async fn a_wallet_can_retry_the_credential_request_with_the_supplied_nonce() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let (access_token, kp) = issue_bound_token_via_nonce_handshake(&state).await;
+    let now = pop_test_now_secs();
+    let htu = "https://issuer.example.com/credential";
+
+    let first_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        htu,
+        "jti-cred-retry-1",
+        now,
+        Some(&access_token),
+        None,
+    );
+    let first_res = post_credential_with_dpop(&state, &access_token, &first_proof).await;
+    assert_eq!(first_res.status(), StatusCode::UNAUTHORIZED);
+    let nonce = first_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("must supply a nonce to retry with")
+        .to_string();
+
+    let second_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        htu,
+        "jti-cred-retry-2",
+        now,
+        Some(&access_token),
+        Some(&nonce),
+    );
+    let second_res = post_credential_with_dpop(&state, &access_token, &second_proof).await;
+    assert_eq!(
+        second_res.status(),
+        StatusCode::OK,
+        "a retry using the supplied nonce must succeed"
+    );
+}
+
+/// §8.2 permits supplying a nonce on any response. Doing so on success means a
+/// wallet never needs a rejection round-trip after its first request.
+#[tokio::test]
+async fn successful_responses_carry_a_dpop_nonce_when_enabled() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Optional,
+        ..DpopConfig::default()
+    })
+    .await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let now = pop_test_now_secs();
+
+    // No nonce claim: Optional accepts absence.
+    let token_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/token",
+        "jti-optional-token-1",
+        now,
+        None,
+        None,
+    );
+    let token_res = post_token_with_dpop(&state, &pre_auth_code, &token_proof).await;
+    assert_eq!(token_res.status(), StatusCode::OK);
+    assert!(token_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| !s.is_empty()));
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    let cred_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/credential",
+        "jti-optional-cred-1",
+        now,
+        Some(&access_token),
+        None,
+    );
+    let cred_res = post_credential_with_dpop(&state, &access_token, &cred_proof).await;
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    assert!(cred_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| !s.is_empty()));
+}
+
+/// §8: "there MUST NOT be more than one DPoP-Nonce header."
+#[tokio::test]
+async fn exactly_one_dpop_nonce_header_is_emitted() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let now = pop_test_now_secs();
+    let htu = "https://issuer.example.com/token";
+
+    let first_proof = create_dpop_proof(&kp, "POST", htu, "jti-single-1", now, None, None);
+    let first_res = post_token_with_dpop(&state, &pre_auth_code, &first_proof).await;
+    assert_eq!(first_res.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(first_res.headers().get_all("DPoP-Nonce").iter().count(), 1);
+    let nonce = first_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+
+    let second_proof = create_dpop_proof(&kp, "POST", htu, "jti-single-2", now, None, Some(&nonce));
+    let second_res = post_token_with_dpop(&state, &pre_auth_code, &second_proof).await;
+    assert_eq!(second_res.status(), StatusCode::OK);
+    assert_eq!(second_res.headers().get_all("DPoP-Nonce").iter().count(), 1);
+}
+
+/// Under the default nothing changes for an existing deployment.
+#[tokio::test]
+async fn no_dpop_nonce_header_is_emitted_when_nonce_mode_is_disabled() {
+    // setup_test_app()'s default DpopConfig: mode Optional, nonce_mode Disabled.
+    let (state, _dir) = setup_test_app().await;
+    let pre_auth_code = create_pre_auth_offer(&state).await;
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let now = pop_test_now_secs();
+
+    let token_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/token",
+        "jti-disabled-token-1",
+        now,
+        None,
+        None,
+    );
+    let token_res = post_token_with_dpop(&state, &pre_auth_code, &token_proof).await;
+    assert_eq!(token_res.status(), StatusCode::OK);
+    assert!(token_res.headers().get("DPoP-Nonce").is_none());
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    let cred_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/credential",
+        "jti-disabled-cred-1",
+        now,
+        Some(&access_token),
+        None,
+    );
+    let cred_res = post_credential_with_dpop(&state, &access_token, &cred_proof).await;
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    assert!(cred_res.headers().get("DPoP-Nonce").is_none());
+}
+
+/// A nonce-less proof must NOT be turned into a nonce error when the real
+/// problem is elsewhere -- otherwise a wallet retries forever.
+#[tokio::test]
+async fn a_bad_ath_is_still_invalid_token_not_use_dpop_nonce() {
+    let (state, _dir) = setup_test_app_with_dpop(DpopConfig {
+        mode: Mode::Required,
+        nonce_mode: Mode::Required,
+        ..DpopConfig::default()
+    })
+    .await;
+    let (access_token, kp) = issue_bound_token_via_nonce_handshake(&state).await;
+    let now = pop_test_now_secs();
+    let nonce = foundry_issuer::mint_dpop_nonce(
+        state.nonce_secret.as_ref(),
+        state.config.issuer.dpop.max_age_secs,
+        now,
+    )
+    .unwrap();
+
+    // A valid nonce is present (§8/§9's precondition is satisfied), but the
+    // proof's `ath` binds to a *different* token than the one being presented
+    // -- this must surface as invalid_token, not use_dpop_nonce.
+    let bad_ath_proof = create_dpop_proof(
+        &kp,
+        "POST",
+        "https://issuer.example.com/credential",
+        "jti-bad-ath-1",
+        now,
+        Some("not-the-real-access-token"),
+        Some(&nonce),
+    );
+    let res = post_credential_with_dpop(&state, &access_token, &bad_ath_proof).await;
+
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body["error"], "invalid_token");
+}
+
+// ---------------------------------------------------------------------------
 // Task 6 of the ABCA challenge-retrieval / DPoP-nonce plan
 // (docs/superpowers/plans/2026-08-04-abca-challenge-and-dpop-nonce-plan.md):
 // `use_attestation_challenge` status mapping and the ABCA §8.1

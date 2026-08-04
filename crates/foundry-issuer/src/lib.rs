@@ -16,7 +16,7 @@ pub mod transaction;
 pub use authorize::{
     handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
 };
-pub use challenge::{issue_attestation_challenge, ChallengeResponse, NonceSecret};
+pub use challenge::{issue_attestation_challenge, mint_dpop_nonce, ChallengeResponse, NonceSecret};
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{
     handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
