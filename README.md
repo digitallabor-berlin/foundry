@@ -429,6 +429,14 @@ issuer:
   (ABCA §8.1), so a wallet always holds a usable challenge for its next
   request.
 
+> **`required` only binds a PoP that is actually presented.** `challenge_mode`
+> strengthens a Client Attestation PoP; it is not an independent authentication
+> requirement. Under `wallet_attestation.mode: optional`, a wallet that sends no
+> `OAuth-Client-Attestation` header at all is never asked for a PoP, so no
+> `challenge` is ever checked — `challenge_mode: required` is then effectively
+> optional. To make challenges genuinely mandatory, set **both**
+> `mode: required` and `challenge_mode: required`.
+
 `POST /challenge` is unauthenticated (like `POST /nonce`), returns
 `{"attestation_challenge": "..."}`, and sets `Cache-Control: no-store` on
 every response.
@@ -503,6 +511,13 @@ issuer:
   rides a **successful** response too (§8.2), so a wallet always holds a
   usable nonce for its next request, and never more than one `DPoP-Nonce`
   header is ever emitted on a single response.
+
+> **`required` only binds a proof that is actually presented.** `nonce_mode`
+> strengthens a DPoP proof; it is not an independent authentication requirement.
+> Under `dpop.mode: optional`, a wallet that sends no `DPoP` header receives a
+> plain `Bearer` token and never encounters the nonce requirement —
+> `nonce_mode: required` is then effectively optional. To make nonces genuinely
+> mandatory, set **both** `mode: required` and `nonce_mode: required`.
 
 A DPoP nonce, an ABCA `attestation_challenge`, and an OpenID4VCI `c_nonce` are
 minted from the same MAC secret but are domain-separated: one can never verify

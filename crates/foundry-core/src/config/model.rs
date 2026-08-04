@@ -163,6 +163,14 @@ pub struct AttestationMode {
     /// - `required` — the route is served and advertised, and a PoP with no
     ///   `challenge` claim is rejected with `use_attestation_challenge` (§6.2).
     ///
+    /// **`required` only binds a PoP that is actually presented.** This field
+    /// strengthens a Client Attestation PoP; it is not an independent
+    /// authentication requirement. Under `mode: Optional` a wallet presenting
+    /// no attestation is never asked for a PoP, so no `challenge` is ever
+    /// checked and `challenge_mode: Required` is effectively optional. Genuinely
+    /// mandatory challenges need **both** `mode` and `challenge_mode` set to
+    /// `Required`.
+    ///
     /// Consulted **only** for `issuer.wallet_attestation` -- `AttestationMode`
     /// is shared with `issuer.key_attestation`, which has no PoP and therefore
     /// no challenge mechanism, and never reads this field. Same restriction as
@@ -231,6 +239,13 @@ pub struct DpopConfig {
     /// - `required` — a proof without a valid `nonce` is rejected with
     ///   `use_dpop_nonce` plus a fresh `DPoP-Nonce` header. This is what closes
     ///   §11.2 (proof pre-generation).
+    ///
+    /// **`required` only binds a proof that is actually presented.** This field
+    /// strengthens a DPoP proof; it is not an independent authentication
+    /// requirement. Under `mode: Optional` a wallet sending no `DPoP` header
+    /// receives a `Bearer` token and never encounters the nonce requirement, so
+    /// `nonce_mode: Required` is effectively optional. Genuinely mandatory
+    /// nonces need **both** `mode` and `nonce_mode` set to `Required`.
     #[serde(default = "default_disabled")]
     pub nonce_mode: Mode,
 }
