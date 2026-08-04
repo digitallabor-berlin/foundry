@@ -118,6 +118,10 @@ pub async fn handle_credential_request(
                 IssuanceError::Internal("dpop presentation is missing the computed ath".into())
             })?;
 
+            let nonce_policy = crate::dpop::DpopNoncePolicy {
+                mode: config.issuer.dpop.nonce_mode.clone(),
+                secret: nonce_secret,
+            };
             let verified = verify_dpop_proof(
                 proof_jwt,
                 dpop.htm,
@@ -125,6 +129,7 @@ pub async fn handle_credential_request(
                 Some(expected_ath),
                 now_unix,
                 config.issuer.dpop.max_age_secs,
+                Some(&nonce_policy),
             )
             .inspect_err(|e| {
                 tracing::warn!(error.kind = e.kind(), "dpop proof rejected at /credential");
@@ -815,9 +820,10 @@ mod tests {
         let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
         let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", CRED_HTU, Some(&ath), now, 300)
-            .unwrap()
-            .jkt;
+        let jkt =
+            crate::dpop::verify_dpop_proof(&proof, "POST", CRED_HTU, Some(&ath), now, 300, None)
+                .unwrap()
+                .jkt;
         (proof, jkt)
     }
 

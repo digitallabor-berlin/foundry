@@ -21,7 +21,9 @@ pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{
     handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
 };
-pub use dpop::{access_token_hash, verify_dpop_proof, DpopPresentation, VerifiedDpopProof};
+pub use dpop::{
+    access_token_hash, verify_dpop_proof, DpopNoncePolicy, DpopPresentation, VerifiedDpopProof,
+};
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,

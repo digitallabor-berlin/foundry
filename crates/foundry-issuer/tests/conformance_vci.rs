@@ -109,6 +109,7 @@ fn dpop_proof_for_token_endpoint(jti: &str, now: i64) -> (String, String) {
         None,
         now,
         300,
+        None,
     )
     .unwrap()
     .jkt;

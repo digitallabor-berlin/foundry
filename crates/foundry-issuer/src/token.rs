@@ -135,6 +135,10 @@ pub async fn handle_token_request(
             ));
         }
         (Mode::Optional | Mode::Required, Some(proof_jwt)) => {
+            let nonce_policy = crate::dpop::DpopNoncePolicy {
+                mode: dpop_cfg.nonce_mode.clone(),
+                secret: nonce_secret,
+            };
             let verified = verify_dpop_proof(
                 proof_jwt,
                 dpop.htm,
@@ -144,6 +148,7 @@ pub async fn handle_token_request(
                 None,
                 now_unix,
                 dpop_cfg.max_age_secs,
+                Some(&nonce_policy),
             )
             .inspect_err(|e| {
                 tracing::warn!(error.kind = e.kind(), "dpop proof rejected");
@@ -416,7 +421,7 @@ mod tests {
         let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
         let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
 
-        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", TOKEN_HTU, None, now, 300)
+        let jkt = crate::dpop::verify_dpop_proof(&proof, "POST", TOKEN_HTU, None, now, 300, None)
             .unwrap()
             .jkt;
         (proof, jkt)

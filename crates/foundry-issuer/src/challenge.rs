@@ -43,12 +43,6 @@ pub(crate) const VALUE_LEN: usize = PAYLOAD_LEN + TAG_LEN;
 
 /// Which protocol a value was minted for. Mixed into the MAC input so a value
 /// minted for one domain cannot verify in another.
-///
-/// `AttestationChallenge` and `DpopNonce` are constructed only by this
-/// module's own tests until the ABCA challenge (attestation.rs) and DPoP
-/// nonce (dpop.rs) verification call sites land; the `allow` below is
-/// removed once those exist.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Domain {
     /// OpenID4VCI 1.0 §7 `c_nonce`.
