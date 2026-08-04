@@ -747,6 +747,7 @@ dependencies = [
  "base64",
  "flate2",
  "josekit",
+ "openssl",
  "rcgen",
  "serde",
  "serde_json",

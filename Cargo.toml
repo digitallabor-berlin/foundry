@@ -29,6 +29,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1"
 async-trait = "0.1"
 josekit = "0.10"
+openssl = "0.10"
 x509-cert = { version = "0.3", features = ["pem"] }
 base64 = "0.22"
 rcgen = { version = "0.14", features = ["x509-parser"] }
