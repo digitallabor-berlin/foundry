@@ -348,6 +348,7 @@ mod tests {
             mode: Mode::Disabled,
             trusted_anchors: Vec::new(),
             pop_max_age_secs: 300,
+            challenge_mode: Mode::Disabled,
         }
     }
 
@@ -355,6 +356,7 @@ mod tests {
         DpopConfig {
             mode,
             max_age_secs: 300,
+            nonce_mode: Mode::Disabled,
         }
     }
 
@@ -1441,6 +1443,7 @@ mod tests {
                 certs: path.to_str().unwrap().to_string(),
             }],
             pop_max_age_secs: 300,
+            challenge_mode: Mode::Disabled,
         };
         (dir, mode)
     }

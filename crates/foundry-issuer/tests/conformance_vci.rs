@@ -37,6 +37,7 @@ fn disabled_attestation() -> AttestationMode {
         mode: Mode::Disabled,
         trusted_anchors: Vec::new(),
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     }
 }
 
@@ -46,6 +47,7 @@ fn dpop_optional() -> DpopConfig {
     DpopConfig {
         mode: Mode::Optional,
         max_age_secs: 300,
+        nonce_mode: Mode::Disabled,
     }
 }
 
@@ -145,11 +147,13 @@ fn test_config() -> Config {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -1166,6 +1170,7 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         mode: Mode::Required,
         trusted_anchors: Vec::new(),
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     };
     let result = handle_token_request(
         &storage,
@@ -1549,6 +1554,7 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
             certs: ca_path.to_str().unwrap().to_string(),
         }],
         pop_max_age_secs: 300,
+        challenge_mode: Mode::Disabled,
     };
 
     // No Client Attestation PoP JWT is presented at all. A conformant issuer

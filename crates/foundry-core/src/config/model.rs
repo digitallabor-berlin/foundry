@@ -138,7 +138,7 @@ pub struct IssuerConfig {
     pub dpop: DpopConfig,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AttestationMode {
     #[serde(default)]
     pub mode: Mode,
@@ -152,10 +152,49 @@ pub struct AttestationMode {
     /// reads this field.
     #[serde(default = "default_pop_max_age_secs")]
     pub pop_max_age_secs: u64,
+    /// ABCA draft -07 §8 challenge retrieval.
+    ///
+    /// - `disabled` (default) — no `/challenge` route, `challenge_endpoint` is
+    ///   absent from AS metadata, and a `challenge` claim in a Client
+    ///   Attestation PoP is ignored. Reproduces pre-challenge behaviour exactly.
+    /// - `optional` — the route is served and advertised, but a PoP without a
+    ///   `challenge` claim is still accepted. The migration rung: wallets adopt
+    ///   at their own pace.
+    /// - `required` — the route is served and advertised, and a PoP with no
+    ///   `challenge` claim is rejected with `use_attestation_challenge` (§6.2).
+    ///
+    /// Consulted **only** for `issuer.wallet_attestation` -- `AttestationMode`
+    /// is shared with `issuer.key_attestation`, which has no PoP and therefore
+    /// no challenge mechanism, and never reads this field. Same restriction as
+    /// `pop_max_age_secs` above.
+    #[serde(default = "default_disabled")]
+    pub challenge_mode: Mode,
 }
 
 fn default_pop_max_age_secs() -> u64 {
     300
+}
+
+/// Both ABCA challenge retrieval and DPoP nonces default to **off**.
+///
+/// Deliberately not `#[serde(default)]`: `Mode::default()` is `Optional`, which
+/// would silently enable both mechanisms on every existing deployment.
+fn default_disabled() -> Mode {
+    Mode::Disabled
+}
+
+// Hand-written rather than derived: the derive would give `challenge_mode` the
+// `Mode::default()` value (`Optional`), silently enabling ABCA challenge
+// retrieval for any code path building this struct with `..Default::default()`.
+impl Default for AttestationMode {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            trusted_anchors: Vec::new(),
+            pop_max_age_secs: default_pop_max_age_secs(),
+            challenge_mode: default_disabled(),
+        }
+    }
 }
 
 /// RFC 9449 DPoP policy for the Token and Credential Endpoints.
@@ -181,6 +220,19 @@ pub struct DpopConfig {
     /// `iat` "in the reasonably near future" to absorb clock skew.
     #[serde(default = "default_dpop_max_age_secs")]
     pub max_age_secs: u64,
+    /// RFC 9449 §8 (authorization server) and §9 (resource server)
+    /// server-provided nonce.
+    ///
+    /// - `disabled` (default) — no `DPoP-Nonce` header is ever emitted and a
+    ///   `nonce` claim is ignored, so §11.3 is satisfied vacuously (the
+    ///   pre-nonce behaviour recorded in the 2026-08-03 DPoP design §2.2).
+    /// - `optional` — a `DPoP-Nonce` is supplied and a presented `nonce` is
+    ///   verified, but a proof without one is still accepted.
+    /// - `required` — a proof without a valid `nonce` is rejected with
+    ///   `use_dpop_nonce` plus a fresh `DPoP-Nonce` header. This is what closes
+    ///   §11.2 (proof pre-generation).
+    #[serde(default = "default_disabled")]
+    pub nonce_mode: Mode,
 }
 
 fn default_dpop_max_age_secs() -> u64 {
@@ -192,6 +244,7 @@ impl Default for DpopConfig {
         Self {
             mode: Mode::default(),
             max_age_secs: default_dpop_max_age_secs(),
+            nonce_mode: default_disabled(),
         }
     }
 }
@@ -442,6 +495,39 @@ verifier:
             serde_json::from_str(r#"{"mode":"required","max_age_secs":60}"#).unwrap();
         assert_eq!(cfg.mode, Mode::Required);
         assert_eq!(cfg.max_age_secs, 60);
+    }
+
+    /// Both new toggles default to `Disabled`, not to `Mode::default()`
+    /// (`Optional`). A wrong default would silently turn on ABCA challenge
+    /// retrieval and DPoP nonces for every existing deployment.
+    #[test]
+    fn challenge_and_nonce_modes_default_to_disabled() {
+        let attestation: AttestationMode = serde_json::from_str("{}").expect("attestation");
+        assert_eq!(attestation.challenge_mode, Mode::Disabled);
+        // The pre-existing default is unchanged.
+        assert_eq!(attestation.mode, Mode::Optional);
+
+        let dpop: DpopConfig = serde_json::from_str("{}").expect("dpop");
+        assert_eq!(dpop.nonce_mode, Mode::Disabled);
+        assert_eq!(dpop.mode, Mode::Optional);
+    }
+
+    /// `Default::default()` must agree with serde's default, or a `..Default::default()`
+    /// struct literal anywhere in the codebase would enable the features silently.
+    #[test]
+    fn the_default_impls_agree_with_serde() {
+        assert_eq!(AttestationMode::default().challenge_mode, Mode::Disabled);
+        assert_eq!(DpopConfig::default().nonce_mode, Mode::Disabled);
+    }
+
+    #[test]
+    fn challenge_and_nonce_modes_are_settable() {
+        let attestation: AttestationMode =
+            serde_json::from_str(r#"{"challenge_mode":"required"}"#).expect("attestation");
+        assert_eq!(attestation.challenge_mode, Mode::Required);
+
+        let dpop: DpopConfig = serde_json::from_str(r#"{"nonce_mode":"optional"}"#).expect("dpop");
+        assert_eq!(dpop.nonce_mode, Mode::Optional);
     }
 }
 

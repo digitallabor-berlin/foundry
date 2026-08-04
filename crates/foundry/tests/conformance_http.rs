@@ -104,11 +104,13 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -655,11 +657,13 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -796,11 +800,13 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -1222,11 +1228,13 @@ async fn setup_pop_test_app_with_mode(
                     certs: ca_path.to_str().unwrap().to_string(),
                 }],
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,

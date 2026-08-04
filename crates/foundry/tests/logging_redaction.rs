@@ -133,11 +133,13 @@ async fn setup() -> (AppState, tempfile::TempDir) {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
@@ -606,11 +608,13 @@ async fn setup_with_required_attestation() -> (
                     certs: ca_path.to_str().expect("ca path").to_string(),
                 }],
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
+                challenge_mode: Mode::Disabled,
             },
             status_list: StatusListConfig {
                 enabled: false,
