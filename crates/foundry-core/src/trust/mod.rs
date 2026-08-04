@@ -15,6 +15,8 @@ use x509_cert::ext::pkix::SubjectAltName;
 
 pub use x509_cert::Certificate;
 
+pub mod android_attestation;
+
 // OpenSSL verification result codes, from `include/openssl/x509_vfy.h`. These
 // are a stable part of OpenSSL's ABI. Declared locally rather than pulling in
 // `openssl-sys` as a second direct dependency; `X509VerifyResult::from_raw` is
