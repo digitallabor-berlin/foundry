@@ -13,14 +13,15 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
-use foundry_core::crypto::jwe::encrypt_compact;
+use foundry_core::crypto::jwe::{encrypt_compact, encrypt_compact_with_kid};
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_sd_jwt_vc::builder::attach_kb_jwt;
 use foundry_verifier::{
     CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
 };
+use josekit::jwe::ECDH_ES;
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-use josekit::jwk::KeyPair as _;
+use josekit::jwk::{Jwk, KeyPair as _};
 use josekit::jws::{JwsHeader, ES256};
 use josekit::jwt::{self, JwtPayload};
 use std::io::{BufRead, BufReader, Read};
@@ -112,6 +113,64 @@ fn rewrite_config_for_e2e(config_path: &Path, admin_port: u16, wallet_port: u16)
 /// documents running `foundry serve` from the directory containing its
 /// `config.yaml`/`keys/`/`trust/`). Polls `/ready` before returning.
 async fn spawn_server() -> (ServerGuard, tempfile::TempDir, u16, u16) {
+    spawn_server_inner(|_config_path| {}).await
+}
+
+/// Rewrite the `quickstart`-generated config in place: uncomment both
+/// encryption blocks by removing their leading `#`/`#   ` prefixes. Editing
+/// the emitted file rather than writing a fresh one is deliberate: it proves
+/// the shipped commented block is syntactically correct once uncommented, not
+/// just that some hand-written encryption config would be.
+///
+/// The two `enc_values_supported` / `encryption_required` comment lines
+/// appear **twice** in the template (once per block), and `str::replace`
+/// replaces every occurrence -- which is exactly what is wanted here.
+fn enable_encryption_in_config(config_path: &Path) {
+    let text = std::fs::read_to_string(config_path).expect("read quickstart config");
+    let enabled = text
+        .replace("  # request_encryption:", "  request_encryption:")
+        .replace(
+            "  #   keys: [issuer_request_enc]",
+            "    keys: [issuer_request_enc]",
+        )
+        .replace(
+            "  #   enc_values_supported: [A128GCM, A256GCM]",
+            "    enc_values_supported: [A128GCM, A256GCM]",
+        )
+        .replace(
+            "  #   encryption_required: false",
+            "    encryption_required: false",
+        )
+        .replace("  # response_encryption:", "  response_encryption:");
+    assert_ne!(
+        text, enabled,
+        "expected the commented encryption block lines to be present in the \
+         quickstart template -- if this fails, QUICKSTART_CONFIG in commands.rs \
+         changed and this rewrite needs updating"
+    );
+    std::fs::write(config_path, enabled).expect("write enabled config");
+
+    let cfg = foundry_core::config::Config::load(config_path).expect("edited config parses");
+    assert!(cfg.issuer.request_encryption.is_some());
+    assert!(cfg.issuer.response_encryption.is_some());
+}
+
+/// As `spawn_server`, but with both encryption blocks in the generated config
+/// uncommented before `foundry serve` is started. A separate entry point
+/// (sharing `spawn_server_inner`'s body) because the config must be edited
+/// between `quickstart` and `serve` -- there is no such hook on the plain
+/// `spawn_server` path.
+async fn spawn_server_with_encryption() -> (ServerGuard, tempfile::TempDir, u16, u16) {
+    spawn_server_inner(enable_encryption_in_config).await
+}
+
+/// Shared boot sequence for both `spawn_server` and
+/// `spawn_server_with_encryption`: run `quickstart`, let `configure` edit the
+/// generated config, rewrite it for the pre-selected E2E ports, then start
+/// `foundry serve` and poll `/ready`.
+async fn spawn_server_inner(
+    configure: impl FnOnce(&Path),
+) -> (ServerGuard, tempfile::TempDir, u16, u16) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let binary = env!("CARGO_BIN_EXE_foundry");
 
@@ -123,6 +182,8 @@ async fn spawn_server() -> (ServerGuard, tempfile::TempDir, u16, u16) {
     assert!(quickstart_status.success(), "foundry quickstart failed");
 
     let config_path = dir.path().join("config.yaml");
+    configure(&config_path);
+
     let admin_port = free_port();
     let wallet_port = free_port();
     rewrite_config_for_e2e(&config_path, admin_port, wallet_port);
@@ -557,4 +618,164 @@ async fn full_flow_issue_verify_revoke_reverify() {
             );
         }
     }
+}
+
+/// The encrypted `/credential` round trip through the real binary.
+///
+/// Distinct from the in-process tests: this is the only place where the
+/// config file, the `quickstart`-generated PEM, `Config::load_request_decryption_keys`,
+/// and the served metadata document all participate. A `kid` derived from a
+/// key the server actually loaded from disk is the thing that cannot be faked
+/// in-process.
+#[tokio::test]
+#[ignore]
+async fn e2e_encrypted_credential_request_and_response() {
+    let (guard, _dir, admin_port, wallet_port) = spawn_server_with_encryption().await;
+    let admin_base = format!("http://127.0.0.1:{admin_port}");
+    let wallet_base = format!("http://127.0.0.1:{wallet_port}");
+    let client = reqwest::Client::new();
+
+    // Metadata must publish both encryption objects now that the config
+    // blocks are uncommented.
+    let meta_res = client
+        .get(format!(
+            "{wallet_base}/.well-known/openid-credential-issuer"
+        ))
+        .send()
+        .await
+        .expect("GET issuer metadata");
+    assert_eq!(
+        meta_res.status(),
+        reqwest::StatusCode::OK,
+        "logs:\n{}",
+        guard.dump_logs()
+    );
+    let meta: serde_json::Value = meta_res.json().await.unwrap();
+    let issuer_jwk = meta["credential_request_encryption"]["jwks"]["keys"][0].clone();
+    let issuer_kid = issuer_jwk["kid"]
+        .as_str()
+        .expect("published request-encryption jwk carries a kid")
+        .to_string();
+    assert_eq!(
+        meta["credential_response_encryption"]["alg_values_supported"],
+        serde_json::json!(["ECDH-ES"])
+    );
+
+    // Offer + redeem for an access token, exactly as the plaintext flow does.
+    let offer_res = client
+        .post(format!("{admin_base}/admin/issuance/offers"))
+        .bearer_auth("dev-admin-key")
+        .json(&serde_json::json!({
+            "credential_type_id": "pid",
+            "claims": { "given_name": "Alice", "birthdate": "1990-01-01" },
+            "tx_code_required": false
+        }))
+        .send()
+        .await
+        .expect("POST /admin/issuance/offers");
+    assert_eq!(offer_res.status(), reqwest::StatusCode::OK);
+    let offer_json: serde_json::Value = offer_res.json().await.unwrap();
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized_code present")
+        .to_string();
+
+    let token_form = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+    );
+    let token_res = client
+        .post(format!("{wallet_base}/token"))
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(token_form)
+        .send()
+        .await
+        .expect("POST /token");
+    assert_eq!(token_res.status(), reqwest::StatusCode::OK);
+    let token_json: serde_json::Value = token_res.json().await.unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    let nonce_res = client
+        .post(format!("{wallet_base}/nonce"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .expect("POST /nonce");
+    assert_eq!(nonce_res.status(), reqwest::StatusCode::OK);
+    let c_nonce = nonce_res.json::<serde_json::Value>().await.unwrap()["c_nonce"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (proof_jwt, _holder_keypair) = create_proof(&c_nonce, "https://localhost:8443");
+
+    // The wallet's ephemeral response-encryption keypair.
+    let wallet_kp = EcKeyPair::generate(EcCurve::P256).expect("wallet enc keypair");
+    let mut wallet_public =
+        serde_json::to_value(wallet_kp.to_jwk_public_key()).expect("public jwk");
+    if let Some(o) = wallet_public.as_object_mut() {
+        o.insert("alg".to_string(), serde_json::json!("ECDH-ES"));
+    }
+    let wallet_private = serde_json::to_value(wallet_kp.to_jwk_private_key()).expect("private jwk");
+
+    let request_body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [proof_jwt] },
+        "credential_response_encryption": {
+            "jwk": wallet_public,
+            "enc": "A128GCM",
+        },
+    });
+    let jwe = encrypt_compact_with_kid(
+        &request_body,
+        &issuer_jwk,
+        "ECDH-ES",
+        "A256GCM",
+        Some(&issuer_kid),
+    )
+    .expect("encrypt credential request");
+
+    let cred_res = client
+        .post(format!("{wallet_base}/credential"))
+        .bearer_auth(&access_token)
+        .header("content-type", "application/jwt")
+        .body(jwe)
+        .send()
+        .await
+        .expect("POST /credential");
+    assert_eq!(
+        cred_res.status(),
+        reqwest::StatusCode::OK,
+        "logs:\n{}",
+        guard.dump_logs()
+    );
+    assert_eq!(
+        cred_res
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("application/jwt")
+    );
+    let compact = cred_res.text().await.unwrap();
+
+    let jwk = Jwk::from_bytes(serde_json::to_string(&wallet_private).unwrap().as_bytes())
+        .expect("wallet private jwk");
+    let decrypter = ECDH_ES.decrypter_from_jwk(&jwk).expect("decrypter");
+    let (payload, _header) =
+        jwt::decode_with_decrypter(&compact, &decrypter).expect("decrypt credential response");
+    let claims = serde_json::to_value(payload.claims_set()).unwrap();
+    let credential = claims["credentials"][0]["credential"]
+        .as_str()
+        .expect("credentials[0].credential present")
+        .to_string();
+    assert!(
+        credential.contains('~'),
+        "SD-JWT VC compact serialization must contain '~' separators"
+    );
+    let issuer_jwt = credential.split('~').next().unwrap();
+    assert_eq!(
+        issuer_jwt.split('.').count(),
+        3,
+        "issuer-signed JWT must be a compact JWS"
+    );
 }
