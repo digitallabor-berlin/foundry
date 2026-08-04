@@ -27,8 +27,9 @@ pub use metadata::{
 };
 pub use nonce::{issue_nonce, verify_nonce, NonceResponse, NonceSecret, C_NONCE_TTL_SECS};
 pub use offer::{
-    build_offer_uri, generate_pre_authorized_code, generate_tx_code, AuthorizationCodeGrant,
-    CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
+    build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
+    AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
+    TxCodeDefinition,
 };
 pub use proof::{verify_holder_proof, ProofsRequest, VerifiedProof};
 pub use status_index::allocate_status_index;

@@ -1,7 +1,9 @@
 //! Pre-authorized code / tx_code generation and `CredentialOffer` construction.
 
 use crate::error::IssuanceError;
+use crate::metadata::{build_authorization_server_metadata, build_issuer_metadata};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use foundry_core::config::Config;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -77,6 +79,63 @@ pub fn build_offer_uri(offer: &CredentialOffer) -> Result<String, IssuanceError>
     Ok(format!(
         "openid-credential-offer://?credential_offer={encoded}"
     ))
+}
+
+/// Render `offer` as the `data` member of a W3C Digital Credentials API
+/// issuance request — `navigator.credentials.create()` with protocol
+/// `openid4vci-v1`.
+///
+/// Sibling of [`build_offer_uri`]: the same offer, rendered for a different
+/// wallet-facing transport. Nothing about the OpenID4VCI wire protocol changes
+/// — same pre-authorized-code grant, same `/token`, same `/credential`; only
+/// the channel by which the offer reaches the wallet differs.
+///
+/// `openid4vci-v1` is a Chrome origin-trial protocol identifier with **no
+/// pinned specification** in `docs/specs/`. The shape below follows Chrome's
+/// documentation
+/// (<https://developer.chrome.com/blog/digital-credentials-api-143-issuance-ot>),
+/// the only normative source that currently exists for it. This is a
+/// deliberate, documented departure from root AGENTS.md §4.4's
+/// implement-only-against-`docs/specs/` rule; see
+/// `docs/superpowers/specs/2026-08-04-admin-console-dc-api-issuance-design.md`.
+///
+/// `credential_configurations_supported` is narrowed to exactly the
+/// configuration ids named in the offer. The wallet renders its consent screen
+/// from that map, so shipping every configured credential type would leave it
+/// to guess which one the offer is about.
+///
+/// The returned value embeds the `pre-authorized_code`, exactly as
+/// [`CredentialOffer`] and `credential_offer_uri` do. It is a secret: never log
+/// it, at any level, under any flag (root AGENTS.md §4.5).
+pub fn build_dc_api_offer(
+    cfg: &Config,
+    offer: &CredentialOffer,
+) -> Result<serde_json::Value, IssuanceError> {
+    // Serialize the offer rather than hand-building the object: `CredentialOffer`
+    // already owns the serde renames for the grant URN key and the hyphenated
+    // `pre-authorized_code`, and duplicating them here is how they drift.
+    let mut root =
+        serde_json::to_value(offer).map_err(|e| IssuanceError::Serialization(e.to_string()))?;
+
+    let mut issuer_metadata = build_issuer_metadata(cfg);
+    issuer_metadata
+        .credential_configurations_supported
+        .retain(|id, _| offer.credential_configuration_ids.contains(id));
+
+    let issuer_metadata = serde_json::to_value(issuer_metadata)
+        .map_err(|e| IssuanceError::Serialization(e.to_string()))?;
+    let as_metadata = serde_json::to_value(build_authorization_server_metadata(cfg))
+        .map_err(|e| IssuanceError::Serialization(e.to_string()))?;
+
+    let obj = root.as_object_mut().ok_or_else(|| {
+        IssuanceError::Serialization(
+            "CredentialOffer did not serialize to a JSON object".to_string(),
+        )
+    })?;
+    obj.insert("authorization_server_metadata".to_string(), as_metadata);
+    obj.insert("credential_issuer_metadata".to_string(), issuer_metadata);
+
+    Ok(root)
 }
 
 #[cfg(test)]

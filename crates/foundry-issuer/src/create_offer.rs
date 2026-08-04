@@ -4,8 +4,9 @@
 
 use crate::error::IssuanceError;
 use crate::offer::{
-    build_offer_uri, generate_pre_authorized_code, generate_tx_code, AuthorizationCodeGrant,
-    CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant, TxCodeDefinition,
+    build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
+    AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
+    TxCodeDefinition,
 };
 use crate::status_index::allocate_status_index;
 use crate::transaction::{save_transaction_with_indices, IssuanceState, IssuanceTransaction};
@@ -34,6 +35,15 @@ pub struct CreateOfferResponse {
     pub transaction_id: String,
     pub credential_offer: CredentialOffer,
     pub credential_offer_uri: String,
+    /// The same offer rendered for the W3C Digital Credentials API
+    /// (`navigator.credentials.create()`, protocol `openid4vci-v1`) — see
+    /// [`build_dc_api_offer`].
+    ///
+    /// Not `Option`, unlike the verifier's `dc_api_request`: issuance has no
+    /// transport fork, so this is always derivable from the offer that was just
+    /// built. The caller picks a transport by choosing which field to use.
+    #[schema(value_type = Object)]
+    pub dc_api_offer: serde_json::Value,
 }
 
 /// Default tx_code length when `tx_code_required` is set (HAIP-typical 4 digits).
@@ -186,11 +196,13 @@ pub async fn create_offer(
         grants,
     };
     let credential_offer_uri = build_offer_uri(&offer)?;
+    let dc_api_offer = build_dc_api_offer(cfg, &offer)?;
 
     Ok(CreateOfferResponse {
         transaction_id,
         credential_offer: offer,
         credential_offer_uri,
+        dc_api_offer,
     })
 }
 
@@ -286,6 +298,120 @@ mod tests {
         let db = dir.path().join("c.db");
         std::mem::forget(dir);
         SqliteStorage::connect(db.to_str().unwrap()).await.unwrap()
+    }
+
+    /// `test_config()` plus a second credential type.
+    ///
+    /// Load-bearing for the narrowing assertion: with only one configured
+    /// credential type, "filtered to the offered id" and "not filtered at all"
+    /// produce identical output, so the test could not fail.
+    fn test_config_two_types() -> Config {
+        let mut cfg = test_config();
+        cfg.credential_types.push(CredentialType {
+            id: "mdl".to_string(),
+            format: "mso_mdoc".to_string(),
+            vct: None,
+            doctype: Some("org.iso.18013.5.1.mDL".to_string()),
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![ClaimDef {
+                path: vec!["family_name".to_string()],
+                selectively_disclosable: true,
+                display: vec![],
+            }],
+        });
+        cfg
+    }
+
+    /// The DC API payload must carry the offer's own three members verbatim,
+    /// so a wallet reading `dc_api_offer` sees exactly the offer that
+    /// `credential_offer_uri` encodes.
+    #[tokio::test]
+    async fn dc_api_offer_carries_the_offer_and_both_metadata_objects() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+
+        let res = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims,
+                tx_code_required: false,
+                redirect_uri: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let dc = &res.dc_api_offer;
+
+        assert_eq!(dc["credential_issuer"], "https://issuer.example.com");
+        assert_eq!(
+            dc["credential_configuration_ids"],
+            serde_json::json!(["pid"])
+        );
+        assert!(
+            dc["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+                ["pre-authorized_code"]
+                .is_string(),
+            "dc_api_offer must carry the pre-authorized_code grant, got: {dc}"
+        );
+        assert_eq!(
+            dc["authorization_server_metadata"]["token_endpoint"],
+            "https://issuer.example.com/token"
+        );
+        assert_eq!(
+            dc["credential_issuer_metadata"]["credential_endpoint"],
+            "https://issuer.example.com/credential"
+        );
+    }
+
+    /// `credential_issuer_metadata.credential_configurations_supported` must be
+    /// narrowed to the offered ids: the wallet renders its consent screen from
+    /// it, and shipping every configured type leaves it guessing which one the
+    /// offer is about.
+    #[tokio::test]
+    async fn dc_api_offer_narrows_credential_configurations_to_the_offered_ids() {
+        let cfg = test_config_two_types();
+        let storage = test_storage().await;
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+
+        let res = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims,
+                tx_code_required: false,
+                redirect_uri: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .unwrap();
+
+        let configs = res.dc_api_offer["credential_issuer_metadata"]
+            ["credential_configurations_supported"]
+            .as_object()
+            .expect("credential_configurations_supported must be an object");
+
+        assert_eq!(
+            configs.len(),
+            1,
+            "expected only the offered configuration, got keys: {:?}",
+            configs.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            configs.contains_key("pid"),
+            "expected the offered id 'pid', got keys: {:?}",
+            configs.keys().collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]

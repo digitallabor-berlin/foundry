@@ -122,6 +122,50 @@ async fn creates_an_offer_with_valid_bearer_token() {
 }
 
 #[tokio::test]
+async fn create_offer_response_carries_a_dc_api_offer() {
+    let app = test_app(true).await;
+    let body =
+        serde_json::json!({ "credential_type_id": "pid", "claims": {}, "tx_code_required": false });
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let dc = &json["dc_api_offer"];
+    assert!(
+        dc.is_object(),
+        "dc_api_offer must be present on the create-offer response, got: {json}"
+    );
+    assert_eq!(dc["credential_issuer"], "https://localhost:8443");
+    assert_eq!(
+        dc["credential_configuration_ids"],
+        serde_json::json!(["pid"])
+    );
+    assert!(
+        dc["authorization_server_metadata"]["token_endpoint"].is_string(),
+        "dc_api_offer must inline authorization_server_metadata"
+    );
+    assert!(
+        dc["credential_issuer_metadata"]["credential_configurations_supported"]["pid"].is_object(),
+        "dc_api_offer must inline credential_issuer_metadata for the offered id"
+    );
+}
+
+#[tokio::test]
 async fn rejects_offer_creation_without_bearer_token() {
     let app = test_app(true).await;
     let body = serde_json::json!({ "credential_type_id": "pid", "claims": {} });
