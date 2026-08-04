@@ -200,6 +200,27 @@ foundry --test e2e_full_flow -- --ignored` → `cargo clippy --workspace
 
 ## Follow-ups / Known Limitations
 
+- **A structurally-valid-but-unusable wallet response JWK burns the offer.**
+  `check_encryption_policy` validates that `credential_response_encryption.jwk`
+  *has* an `alg` member (L1188) but does not verify the JWK is a usable EC
+  public key. Response encryption then happens in `credential_handler`
+  **after** `handle_credential_request` has already marked the transaction
+  `Issued` (credential.rs), so a wallet sending e.g. `kty: RSA`, an unknown
+  `crv`, or a JWK missing `x`/`y` passes the gate, consumes its single-use
+  offer, and receives a 500 `server_error` from
+  `encrypt_compact_with_kid` → `IssuanceError::Crypto` → `wallet_error_response`'s
+  catch-all arm. The credential is then unrecoverable.
+
+  Not a security defect — the failure is fail-closed (nothing is disclosed in
+  plaintext) and only a wallet's own offer is affected, so there is no
+  cross-tenant impact. But it is both a robustness wart and a status
+  misclassification: an unusable client-supplied JWK is a client error (400
+  `invalid_credential_request`), not a server fault. The fix is to move the
+  usability check into `check_encryption_policy` — attempt to build the
+  encrypter, or at minimum require `kty: "EC"` with `crv`/`x`/`y` present —
+  so it runs *before* any transaction state mutation. Deferred rather than
+  patched at the end of this branch because it needs its own test to be worth
+  having.
 - One pre-existing, confirmed-unrelated intermittent failure in a
   `foundry-verifier` trust-chain-validity-window test was observed during this
   branch's scoped gates; reproduced independently against the unmodified
