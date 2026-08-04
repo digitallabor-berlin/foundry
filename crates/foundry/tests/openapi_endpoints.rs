@@ -54,6 +54,8 @@ fn test_config(swagger_ui_enabled: bool) -> Config {
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: Vec::new(),
         verifier: VerifierConfig {

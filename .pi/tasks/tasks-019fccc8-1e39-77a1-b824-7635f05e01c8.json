@@ -1,101 +1,104 @@
 {
-  "nextId": 9,
+  "nextId": 18,
   "tasks": [
     {
-      "id": "1",
-      "subject": "Explore project context for item C",
-      "description": "Read specs (OpenID4VCI Credential Request/Response, Encrypted Messages, Issuer Metadata), conformance rows, existing jwe.rs, credential.rs, metadata.rs, server.rs credential_handler. DONE.",
+      "id": "9",
+      "subject": "Task 1: DecryptionKey, decrypt_compact, encrypt_compact_with_kid",
+      "description": "foundry-core::crypto::jwe.rs — DONE, committed 1d9348d.",
       "status": "completed",
-      "activeForm": "Exploring project context",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
-      "createdAt": 1785847208690,
-      "updatedAt": 1785847214247
+      "createdAt": 1785851217642,
+      "updatedAt": 1785851222812
     },
     {
-      "id": "2",
-      "subject": "Ask clarifying questions one at a time",
-      "description": "Purpose, constraints, success criteria: what Google Wallet actually requires, request-vs-response scope, key management, config default posture, zip support.",
-      "status": "completed",
-      "activeForm": "Asking clarifying questions",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208692,
-      "updatedAt": 1785847717288
-    },
-    {
-      "id": "3",
-      "subject": "Propose 2-3 approaches with trade-offs",
-      "description": "Present alternatives for the encryption layer placement (core primitive vs issuer-local, axum extractor design, key config shape) with a recommendation.",
-      "status": "completed",
-      "activeForm": "Proposing approaches",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208693,
-      "updatedAt": 1785847753726
-    },
-    {
-      "id": "4",
-      "subject": "Present design in sections, approve each",
-      "description": "Architecture, components, data flow, error handling, observability, testing — approval after each section.",
-      "status": "completed",
-      "activeForm": "Presenting design sections",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208694,
-      "updatedAt": 1785848456037
-    },
-    {
-      "id": "5",
-      "subject": "Write design doc to docs/superpowers/specs/",
-      "description": "Save as docs/superpowers/specs/2026-08-04-credential-request-response-encryption-design.md and commit.",
-      "status": "completed",
-      "activeForm": "Writing design doc",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208695,
-      "updatedAt": 1785848633191
-    },
-    {
-      "id": "6",
-      "subject": "Spec self-review",
-      "description": "Placeholder scan, internal consistency, scope check, ambiguity check. Fix inline.",
-      "status": "completed",
-      "activeForm": "Self-reviewing spec",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208696,
-      "updatedAt": 1785848633193
-    },
-    {
-      "id": "7",
-      "subject": "User reviews written spec",
-      "description": "Ask the user to review the committed spec file and wait for approval before planning.",
-      "status": "completed",
-      "activeForm": "Awaiting spec review",
-      "metadata": {},
-      "blocks": [],
-      "blockedBy": [],
-      "createdAt": 1785847208697,
-      "updatedAt": 1785848677341
-    },
-    {
-      "id": "8",
-      "subject": "Transition to writing-plans skill",
-      "description": "Invoke superpowers:writing-plans to produce docs/superpowers/plans/2026-08-04-...-plan.md. Terminal state of brainstorming.",
+      "id": "10",
+      "subject": "Task 2: Config blocks, key loading, startup validation",
+      "description": "crates/foundry-core/src/config/{model.rs,validate.rs,mod.rs}: RequestEncryptionConfig, ResponseEncryptionConfig, IssuerConfig fields, SUPPORTED_ENC_VALUES, Config::load_request_decryption_keys, 4 validation rules, fix all IssuerConfig literals. See plan Task 2.",
       "status": "in_progress",
-      "activeForm": "Writing implementation plan",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
-      "createdAt": 1785847208698,
-      "updatedAt": 1785848677343
+      "createdAt": 1785851217645,
+      "updatedAt": 1785851222814
+    },
+    {
+      "id": "11",
+      "subject": "Task 3: Metadata objects",
+      "description": "crates/foundry-issuer/src/metadata.rs: CredentialRequestEncryption, CredentialResponseEncryption, build_issuer_metadata signature change to take &[DecryptionKey], fix ~20 call sites. See plan Task 3.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217647,
+      "updatedAt": 1785851217647
+    },
+    {
+      "id": "12",
+      "subject": "Task 4: Request parameters and encryption policy",
+      "description": "crates/foundry-issuer/src/credential.rs: CredentialResponseEncryptionParams, CredentialRequest field, check_encryption_policy, handle_credential_request gains request_was_encrypted: bool, fix ~11+15 call sites. See plan Task 4.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217648,
+      "updatedAt": 1785851217648
+    },
+    {
+      "id": "13",
+      "subject": "Task 5: MaybeEncrypted extractor and encrypted response body",
+      "description": "crates/foundry/src/extract.rs (new), AppState/serve/main.rs wiring, credential_handler rewrite, tests/credential_encryption.rs + tests/support/mod.rs. See plan Task 5.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217649,
+      "updatedAt": 1785851217649
+    },
+    {
+      "id": "14",
+      "subject": "Task 6: HTTP rejection matrix",
+      "description": "crates/foundry/tests/conformance_http.rs — one test per conformance row (VCI-0054,0055,0056,0063,0098,0100,0101,0135, required-encryption). See plan Task 6.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217651,
+      "updatedAt": 1785851217651
+    },
+    {
+      "id": "15",
+      "subject": "Task 7: quickstart, metadata absence, redaction gate",
+      "description": "crates/foundry/src/commands.rs quickstart key gen + config template; tests/quickstart.rs, tests/wallet_metadata.rs, tests/logging_redaction.rs. See plan Task 7.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217652,
+      "updatedAt": 1785851217652
+    },
+    {
+      "id": "16",
+      "subject": "Task 8: Real-subprocess E2E coverage",
+      "description": "crates/foundry/tests/e2e_full_flow.rs — #[ignore]d encrypted request/response round trip through real binary. See plan Task 8.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217653,
+      "updatedAt": 1785851217653
+    },
+    {
+      "id": "17",
+      "subject": "Task 9: OpenAPI, conformance report, docs, full gate",
+      "description": "Regenerate openapi-wallet.json, flip 16 conformance rows, update README/AGENTS.md files, change record, full workspace gate + ignored E2E + clippy --workspace. See plan Task 9.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785851217655,
+      "updatedAt": 1785851217655
     }
   ]
 }

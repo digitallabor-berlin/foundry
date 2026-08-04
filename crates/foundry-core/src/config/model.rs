@@ -136,6 +136,19 @@ pub struct IssuerConfig {
     /// `Optional`, which reproduces foundry's pre-DPoP behaviour exactly.
     #[serde(default)]
     pub dpop: DpopConfig,
+    /// OpenID4VCI §Credential Request (L848, L871) and §Credential Issuer
+    /// Metadata (L1373): encryption of the Credential Request on top of TLS.
+    /// Absent means the mechanism is off and `credential_request_encryption` is
+    /// omitted from metadata entirely.
+    #[serde(default)]
+    pub request_encryption: Option<RequestEncryptionConfig>,
+    /// OpenID4VCI §Credential Response (L960, L969) and §Credential Issuer
+    /// Metadata (L1378): encryption of the Credential Response on top of TLS.
+    ///
+    /// Distinct from `verifier.response_encryption`, which configures the
+    /// unrelated OpenID4VP authorization-response JWE.
+    #[serde(default)]
+    pub response_encryption: Option<ResponseEncryptionConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -262,6 +275,54 @@ impl Default for DpopConfig {
             nonce_mode: default_disabled(),
         }
     }
+}
+
+/// The only content-encryption algorithms foundry advertises or accepts.
+///
+/// HAIP OpenID4VP L260 requires both on the presentation side; mirroring them on
+/// the issuance side keeps one algorithm story across the codebase.
+pub const SUPPORTED_ENC_VALUES: [&str; 2] = ["A128GCM", "A256GCM"];
+
+fn default_enc_values_supported() -> Vec<String> {
+    SUPPORTED_ENC_VALUES.iter().map(|s| s.to_string()).collect()
+}
+
+/// OpenID4VCI `credential_request_encryption` (L1373–L1377).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestEncryptionConfig {
+    /// Names of `keys:` entries whose private keys decrypt Credential Requests.
+    ///
+    /// Ordered and non-empty. Listing several at once is how rotation happens
+    /// without downtime: all are published and all decrypt.
+    ///
+    /// The referenced `keys:` entry carries `alg: ES256`, naming the **key
+    /// material** (a P-256 EC key) — `validate_key_material` parses every entry's
+    /// `alg` as a `SignatureAlgorithm`, so `ECDH-ES` there would fail startup.
+    /// The published JWK carries `alg: "ECDH-ES"` instead; see
+    /// `DecryptionKey::published_jwk`.
+    pub keys: Vec<String>,
+    #[serde(default = "default_enc_values_supported")]
+    pub enc_values_supported: Vec<String>,
+    /// L1377. `false` (the default) lets a wallet choose; `true` rejects an
+    /// unencrypted Credential Request (L1192).
+    #[serde(default)]
+    pub encryption_required: bool,
+}
+
+/// OpenID4VCI `credential_response_encryption` (L1378–L1381).
+///
+/// No `alg_values_supported`: it is always `["ECDH-ES"]`, because
+/// `foundry_core::crypto::jwe::encrypt_compact_with_kid` rejects every other
+/// key-management algorithm. Making it configurable could only advertise
+/// something the code cannot do.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponseEncryptionConfig {
+    #[serde(default = "default_enc_values_supported")]
+    pub enc_values_supported: Vec<String>,
+    /// L1381. `true` requires every Credential Response to be encrypted, which
+    /// in turn requires the wallet to supply keys in the request.
+    #[serde(default)]
+    pub encryption_required: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]

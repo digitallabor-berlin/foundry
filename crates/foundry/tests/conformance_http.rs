@@ -119,6 +119,8 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -811,6 +813,8 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![],
         verifier: VerifierConfig {
@@ -954,6 +958,8 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1433,6 +1439,8 @@ async fn setup_pop_test_app_with_modes(
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

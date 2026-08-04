@@ -77,6 +77,8 @@ async fn setup(status_list_enabled: bool) -> (AppState, tempfile::TempDir) {
                 public_base_url: Some("https://issuer.example.com/statuslists".to_string()),
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![],
         verifier: VerifierConfig {

@@ -171,6 +171,8 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
                 public_base_url: None,
             },
             dpop: DpopConfig::default(),
+            request_encryption: None,
+            response_encryption: None,
         },
         credential_types: vec![],
         verifier: VerifierConfig {

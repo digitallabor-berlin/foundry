@@ -120,8 +120,80 @@ impl Config {
             ));
         }
 
+        // OpenID4VCI Credential Issuer Metadata (L1373): `jwks` is REQUIRED, so
+        // an enabled block with no resolvable keys is unservable metadata.
+        if let Some(re) = &self.issuer.request_encryption {
+            if re.keys.is_empty() {
+                return Err(ConfigError::Validation(
+                    "issuer.request_encryption.keys must be non-empty".to_string(),
+                ));
+            }
+            for name in &re.keys {
+                if !self.keys.contains_key(name) {
+                    return Err(ConfigError::Validation(format!(
+                        "issuer.request_encryption.keys references unknown key '{name}'"
+                    )));
+                }
+                // One EC key must not serve both ECDSA signing and ECDH key
+                // agreement. The `keys:` map is shared, so this is the only place
+                // cross-purpose reuse can be prevented.
+                if name == &self.verifier.signing_key {
+                    return Err(ConfigError::Validation(format!(
+                        "issuer.request_encryption.keys references '{name}', which is also \
+                         verifier.signing_key; an encryption key must not be reused for signing"
+                    )));
+                }
+                if self.issuer.status_list.signing_key.as_deref() == Some(name.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "issuer.request_encryption.keys references '{name}', which is also \
+                         issuer.status_list.signing_key; an encryption key must not be reused \
+                         for signing"
+                    )));
+                }
+            }
+            check_enc_values("issuer.request_encryption", &re.enc_values_supported)?;
+        }
+
+        if let Some(rs) = &self.issuer.response_encryption {
+            check_enc_values("issuer.response_encryption", &rs.enc_values_supported)?;
+            // OpenID4VCI L960: a request carrying `credential_response_encryption`
+            // MUST itself be encrypted. Requiring response encryption while
+            // supporting no request decryption is unsatisfiable.
+            let no_request_keys = match &self.issuer.request_encryption {
+                None => true,
+                Some(re) => re.keys.is_empty(),
+            };
+            if rs.encryption_required && no_request_keys {
+                return Err(ConfigError::Validation(
+                    "issuer.response_encryption.encryption_required is true but \
+                     issuer.request_encryption has no keys; OpenID4VCI L960 requires a request \
+                     carrying credential_response_encryption to be encrypted, so no conformant \
+                     wallet could use this deployment"
+                        .to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// An `enc` value may be advertised only if it can actually be honoured.
+fn check_enc_values(block: &str, values: &[String]) -> Result<(), ConfigError> {
+    if values.is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "{block}.enc_values_supported must be non-empty"
+        )));
+    }
+    for v in values {
+        if !crate::config::SUPPORTED_ENC_VALUES.contains(&v.as_str()) {
+            return Err(ConfigError::Validation(format!(
+                "{block}.enc_values_supported contains unsupported value '{v}' (supported: {})",
+                crate::config::SUPPORTED_ENC_VALUES.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// GAP-VCI-08's documented exemption from the `https` MUST (OpenID4VCI L1368/L1369).
@@ -284,6 +356,8 @@ mod tests {
                     public_base_url: None,
                 },
                 dpop: DpopConfig::default(),
+                request_encryption: None,
+                response_encryption: None,
             },
             credential_types: Vec::new(),
             verifier: VerifierConfig {
@@ -559,5 +633,125 @@ mod tests {
         let mut cfg = config_passing_keyref_check();
         cfg.issuer.dpop.max_age_secs = 1;
         assert!(cfg.validate().is_ok());
+    }
+
+    fn cfg_with_signing_key() -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let km = crate::pki::generate_ec_key(crate::crypto::SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(dir.path().join("key.pem"), km.private_pem).unwrap();
+        let mut cfg = minimal_config();
+        cfg.keys.insert(
+            "verifier_signing".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "key.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        (cfg, dir)
+    }
+
+    fn req_enc(keys: Vec<String>) -> crate::config::RequestEncryptionConfig {
+        crate::config::RequestEncryptionConfig {
+            keys,
+            enc_values_supported: vec!["A128GCM".to_string()],
+            encryption_required: false,
+        }
+    }
+
+    #[test]
+    fn request_encryption_key_must_resolve() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.issuer.request_encryption = Some(req_enc(vec!["nope".to_string()]));
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("nope"),
+            "message must name the key, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn request_encryption_keys_must_be_non_empty() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.issuer.request_encryption = Some(req_enc(Vec::new()));
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("non-empty"), "got: {msg}");
+    }
+
+    #[test]
+    fn an_encryption_key_may_not_also_be_a_signing_key() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.issuer.request_encryption = Some(req_enc(vec!["verifier_signing".to_string()]));
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("verifier_signing") && msg.contains("signing"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn required_response_encryption_needs_request_encryption() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.issuer.response_encryption = Some(crate::config::ResponseEncryptionConfig {
+            enc_values_supported: vec!["A128GCM".to_string()],
+            encryption_required: true,
+        });
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("request_encryption"), "got: {msg}");
+    }
+
+    #[test]
+    fn advertised_enc_values_must_be_supported() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.issuer.response_encryption = Some(crate::config::ResponseEncryptionConfig {
+            enc_values_supported: vec!["A192GCM".to_string()],
+            encryption_required: false,
+        });
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(msg.contains("A192GCM"), "got: {msg}");
+    }
+
+    #[test]
+    fn loads_request_decryption_keys_and_derives_distinct_kids() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = minimal_config();
+        for name in ["enc_a", "enc_b"] {
+            let km = crate::pki::generate_ec_key(crate::crypto::SignatureAlgorithm::Es256).unwrap();
+            std::fs::write(dir.path().join(format!("{name}.pem")), km.private_pem).unwrap();
+            cfg.keys.insert(
+                name.to_string(),
+                crate::config::model::KeyEntry {
+                    private_key: format!("{name}.pem"),
+                    x5c: None,
+                    alg: "ES256".to_string(),
+                },
+            );
+        }
+        cfg.issuer.request_encryption =
+            Some(req_enc(vec!["enc_a".to_string(), "enc_b".to_string()]));
+        let keys = cfg.load_request_decryption_keys(dir.path()).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0].kid(), keys[1].kid());
+    }
+
+    #[test]
+    fn loads_no_keys_when_the_feature_is_off() {
+        let cfg = minimal_config();
+        assert!(cfg
+            .load_request_decryption_keys(std::path::Path::new("."))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn encryption_blocks_default_to_both_gcm_sizes_and_optional() {
+        let yaml = "server:\n  wallet_facing:\n    public_base_url: https://example.test\n    bind: 127.0.0.1:8080\n  admin:\n    bind: 127.0.0.1:8081\nstorage:\n  path: ./t.db\nissuer:\n  credential_issuer: https://example.test\n  status_list:\n    enabled: false\n  request_encryption:\n    keys: [k]\n  response_encryption: {}\nverifier:\n  signing_key: verifier-key\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("config should parse");
+        let re = cfg.issuer.request_encryption.as_ref().unwrap();
+        assert_eq!(re.enc_values_supported, vec!["A128GCM", "A256GCM"]);
+        assert!(!re.encryption_required);
+        let rs = cfg.issuer.response_encryption.as_ref().unwrap();
+        assert_eq!(rs.enc_values_supported, vec!["A128GCM", "A256GCM"]);
+        assert!(!rs.encryption_required);
     }
 }
