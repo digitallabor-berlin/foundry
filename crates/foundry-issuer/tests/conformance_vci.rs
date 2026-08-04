@@ -666,6 +666,7 @@ async fn vci_0058_proofs_are_required_when_proof_types_supported() {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
         proofs: None,
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -676,6 +677,7 @@ async fn vci_0058_proofs_are_required_when_proof_types_supported() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -727,6 +729,7 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -737,6 +740,7 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -768,6 +772,7 @@ async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invali
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -778,6 +783,7 @@ async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invali
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -806,6 +812,7 @@ async fn gap_vci_02_absent_credential_configuration_id_is_invalid_credential_req
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -816,6 +823,7 @@ async fn gap_vci_02_absent_credential_configuration_id_is_invalid_credential_req
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -844,6 +852,7 @@ async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verifica
         proofs: Some(ProofsRequest {
             jwt: vec!["not-a-jwt-at-all".to_string()],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -854,6 +863,7 @@ async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verifica
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -884,6 +894,7 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
 
     let res = handle_credential_request(
@@ -894,6 +905,7 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await
     .expect("mdoc issuance must succeed");
@@ -973,6 +985,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
     let res = handle_credential_request(
         &cfg,
@@ -982,6 +995,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await
     .expect("mdoc issuance must succeed");
@@ -1857,6 +1871,7 @@ async fn vci_0196_proofs_jwt_array_must_be_non_empty() {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
         proofs: Some(ProofsRequest { jwt: vec![] }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -1867,6 +1882,7 @@ async fn vci_0196_proofs_jwt_array_must_be_non_empty() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -2051,6 +2067,7 @@ async fn vci_0207_proof_iss_must_be_omitted_after_anonymous_pre_auth_access() {
         proofs: Some(ProofsRequest {
             jwt: vec![proof_jwt],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -2061,6 +2078,7 @@ async fn vci_0207_proof_iss_must_be_omitted_after_anonymous_pre_auth_access() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -2182,6 +2200,7 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
         proofs: Some(ProofsRequest {
             jwt: vec![good, bad],
         }),
+        credential_response_encryption: None,
     };
 
     let result = handle_credential_request(
@@ -2192,6 +2211,7 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await;
 
@@ -2451,6 +2471,7 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
         proofs: Some(ProofsRequest {
             jwt: vec![first, second],
         }),
+        credential_response_encryption: None,
     };
 
     let res = handle_credential_request(
@@ -2461,6 +2482,7 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
         &secret,
         &bearer_presentation(),
         1_700_000_020,
+        false,
     )
     .await
     .expect("two independently valid proofs for the same Credential Dataset must be accepted");

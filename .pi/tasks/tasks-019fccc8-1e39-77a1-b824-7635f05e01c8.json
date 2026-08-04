@@ -27,23 +27,23 @@
       "id": "11",
       "subject": "Task 3: Metadata objects",
       "description": "crates/foundry-issuer/src/metadata.rs: CredentialRequestEncryption, CredentialResponseEncryption, build_issuer_metadata signature change to take &[DecryptionKey], fix ~20 call sites. See plan Task 3.",
-      "status": "in_progress",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217647,
-      "updatedAt": 1785852415905
+      "updatedAt": 1785853045384
     },
     {
       "id": "12",
       "subject": "Task 4: Request parameters and encryption policy",
       "description": "crates/foundry-issuer/src/credential.rs: CredentialResponseEncryptionParams, CredentialRequest field, check_encryption_policy, handle_credential_request gains request_was_encrypted: bool, fix ~11+15 call sites. See plan Task 4.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217648,
-      "updatedAt": 1785851217648
+      "updatedAt": 1785853045387
     },
     {
       "id": "13",

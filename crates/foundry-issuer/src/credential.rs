@@ -20,11 +20,102 @@ use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
 
+/// OpenID4VCI §Credential Request (L853–856): the wallet's parameters for
+/// encrypting the Credential Response.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CredentialResponseEncryptionParams {
+    /// L854: a single public key as a JWK. L1188 additionally requires an `alg`
+    /// member on it.
+    #[schema(value_type = Object)]
+    pub jwk: serde_json::Value,
+    /// L855: the JWE `enc` algorithm.
+    pub enc: String,
+    /// L856: compression before encryption. foundry advertises no
+    /// `zip_values_supported`, so a present value is rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zip: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct CredentialRequest {
     pub credential_configuration_id: Option<String>,
     pub format: Option<String>,
     pub proofs: Option<ProofsRequest>,
+    /// L853. Absent means the Credential Response is not encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_response_encryption: Option<CredentialResponseEncryptionParams>,
+}
+
+/// OpenID4VCI encryption policy for the Credential Endpoint.
+///
+/// Lives in the engine rather than in the HTTP extractor so no call site can
+/// reach issuance while skipping it.
+///
+/// * L1192 — an unencrypted request is rejected when encryption was required.
+/// * L960 — a request carrying `credential_response_encryption` MUST itself be
+///   encrypted, "to prevent it being substituted by an attacker".
+/// * L969 — the issuer MUST encrypt when asked. If the mechanism is not
+///   configured the request is refused rather than answered in plaintext.
+///   Deliberate deviation (root `AGENTS.md` §4.4): the specification does not
+///   contemplate this case, and silently downgrading would deliver the
+///   credential unencrypted to a wallet that asked for encryption.
+/// * L1188 / L855 / L856 — the wallet's JWK must carry `alg`, `enc` must be
+///   advertised, and `zip` must be absent.
+pub fn check_encryption_policy(
+    cfg: &Config,
+    req: &CredentialRequest,
+    request_was_encrypted: bool,
+) -> Result<(), IssuanceError> {
+    if let Some(re) = &cfg.issuer.request_encryption {
+        if re.encryption_required && !request_was_encrypted {
+            return Err(IssuanceError::InvalidCredentialRequest(
+                "this Credential Endpoint requires the Credential Request to be encrypted \
+                 (OpenID4VCI L1192)"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let Some(params) = &req.credential_response_encryption else {
+        return Ok(());
+    };
+
+    if !request_was_encrypted {
+        return Err(IssuanceError::InvalidCredentialRequest(
+            "credential_response_encryption requires the Credential Request itself to be \
+             encrypted (OpenID4VCI L960)"
+                .to_string(),
+        ));
+    }
+
+    let Some(rs) = &cfg.issuer.response_encryption else {
+        return Err(IssuanceError::InvalidCredentialRequest(
+            "Credential Response encryption is not supported by this deployment".to_string(),
+        ));
+    };
+
+    if params.jwk.get("alg").and_then(|v| v.as_str()).is_none() {
+        return Err(IssuanceError::InvalidCredentialRequest(
+            "credential_response_encryption.jwk must carry an `alg` member (OpenID4VCI L1188)"
+                .to_string(),
+        ));
+    }
+
+    if !rs.enc_values_supported.contains(&params.enc) {
+        return Err(IssuanceError::InvalidCredentialRequest(format!(
+            "credential_response_encryption.enc '{}' is not supported",
+            params.enc
+        )));
+    }
+
+    if let Some(zip) = &params.zip {
+        return Err(IssuanceError::InvalidCredentialRequest(format!(
+            "credential_response_encryption.zip '{zip}' is not supported; this Credential \
+             Endpoint advertises no zip_values_supported (OpenID4VCI L856)"
+        )));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -46,6 +137,7 @@ pub struct CredentialResponse {
     fields(
         credential_configuration_id = ?req.credential_configuration_id,
         format = ?req.format,
+        request_encrypted = request_was_encrypted,
     )
 )]
 pub async fn handle_credential_request(
@@ -56,7 +148,9 @@ pub async fn handle_credential_request(
     nonce_secret: &NonceSecret,
     dpop: &DpopPresentation<'_>,
     now_unix: i64,
+    request_was_encrypted: bool,
 ) -> Result<CredentialResponse, IssuanceError> {
+    check_encryption_policy(config, req, request_was_encrypted)?;
     tracing::info!("credential request received");
     let mut tx = load_transaction_by_access_token(storage, access_token)
         .await?
@@ -534,6 +628,7 @@ mod tests {
             proofs: Some(ProofsRequest {
                 jwt: vec![proof_jwt],
             }),
+            credential_response_encryption: None,
         };
 
         let res = handle_credential_request(
@@ -544,6 +639,7 @@ mod tests {
             &secret,
             &bearer_presentation(),
             1_700_000_010,
+            false,
         )
         .await
         .unwrap();
@@ -681,6 +777,7 @@ mod tests {
             proofs: Some(ProofsRequest {
                 jwt: vec![proof_jwt],
             }),
+            credential_response_encryption: None,
         };
 
         let res = handle_credential_request(
@@ -691,6 +788,7 @@ mod tests {
             &secret,
             &bearer_presentation(),
             now + 10,
+            false,
         )
         .await
         .unwrap();
@@ -777,6 +875,7 @@ mod tests {
             proofs: Some(ProofsRequest {
                 jwt: vec![proof_jwt],
             }),
+            credential_response_encryption: None,
         }
     }
 
@@ -847,6 +946,7 @@ mod tests {
             &secret,
             &bearer_presentation(),
             1_700_000_000,
+            false,
         )
         .await;
         assert!(
@@ -877,6 +977,7 @@ mod tests {
             &secret,
             &bearer_presentation(),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap_err();
@@ -903,6 +1004,7 @@ mod tests {
             &secret,
             &dpop_presentation(Some(&proof), &ath),
             1_700_000_000,
+            false,
         )
         .await;
         assert!(res.is_ok(), "a matching proof must be accepted: {res:?}");
@@ -936,6 +1038,7 @@ mod tests {
             &secret,
             &dpop_presentation(Some(&proof), &ath),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap_err();
@@ -963,6 +1066,7 @@ mod tests {
             &secret,
             &dpop_presentation(None, &ath),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap_err();
@@ -993,6 +1097,7 @@ mod tests {
             &secret,
             &dpop_presentation(Some(&proof), &ath),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap_err();
@@ -1023,6 +1128,7 @@ mod tests {
             &secret,
             &dpop_presentation(Some(&proof), &ath),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap();
@@ -1039,9 +1145,143 @@ mod tests {
             &secret,
             &dpop_presentation(Some(&proof), &ath),
             1_700_000_000,
+            false,
         )
         .await
         .unwrap_err();
         assert!(e.to_string().contains("jti"), "got: {e}");
+    }
+
+    // --- OpenID4VCI Credential Request/Response encryption policy ---
+
+    fn wallet_enc_jwk() -> serde_json::Value {
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        let signer = foundry_core::crypto::FileSigner::from_pem(
+            km.private_pem.as_bytes(),
+            SignatureAlgorithm::Es256,
+        )
+        .unwrap();
+        let mut jwk = foundry_core::crypto::Signer::public_jwk(&signer).unwrap();
+        if let Some(o) = jwk.as_object_mut() {
+            o.insert("alg".to_string(), serde_json::json!("ECDH-ES"));
+        }
+        jwk
+    }
+
+    fn req_with_response_encryption(
+        jwk: serde_json::Value,
+        enc: &str,
+        zip: Option<&str>,
+    ) -> CredentialRequest {
+        CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: None,
+            proofs: None,
+            credential_response_encryption: Some(CredentialResponseEncryptionParams {
+                jwk,
+                enc: enc.to_string(),
+                zip: zip.map(|z| z.to_string()),
+            }),
+        }
+    }
+
+    fn plain_req() -> CredentialRequest {
+        CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: None,
+            proofs: None,
+            credential_response_encryption: None,
+        }
+    }
+
+    /// A config with an issuer signing key on disk, optionally with both
+    /// encryption blocks enabled. The `TempDir` is returned so the caller keeps
+    /// the key file alive for the duration of the test.
+    fn cfg_with_encryption(enabled: bool, required: bool) -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+        let mut cfg = test_config(key_path.to_str().unwrap());
+        if enabled {
+            cfg.issuer.request_encryption = Some(foundry_core::config::RequestEncryptionConfig {
+                keys: vec!["enc".to_string()],
+                enc_values_supported: vec!["A128GCM".to_string(), "A256GCM".to_string()],
+                encryption_required: required,
+            });
+            cfg.issuer.response_encryption = Some(foundry_core::config::ResponseEncryptionConfig {
+                enc_values_supported: vec!["A128GCM".to_string(), "A256GCM".to_string()],
+                encryption_required: required,
+            });
+        }
+        (cfg, dir)
+    }
+
+    #[test]
+    fn plaintext_request_is_accepted_when_encryption_is_off() {
+        let (cfg, _dir) = cfg_with_encryption(false, false);
+        assert!(check_encryption_policy(&cfg, &plain_req(), false).is_ok());
+    }
+
+    #[test]
+    fn plaintext_request_is_rejected_when_request_encryption_is_required() {
+        let (cfg, _dir) = cfg_with_encryption(true, true);
+        let err = check_encryption_policy(&cfg, &plain_req(), false).unwrap_err();
+        assert!(
+            matches!(err, IssuanceError::InvalidCredentialRequest(_)),
+            "got: {err}"
+        );
+        assert!(err.to_string().contains("encrypted"), "got: {err}");
+    }
+
+    #[test]
+    fn response_encryption_over_a_plaintext_request_is_rejected() {
+        let (cfg, _dir) = cfg_with_encryption(true, false);
+        let req = req_with_response_encryption(wallet_enc_jwk(), "A128GCM", None);
+        let err = check_encryption_policy(&cfg, &req, false).unwrap_err();
+        assert!(err.to_string().contains("L960"), "got: {err}");
+    }
+
+    #[test]
+    fn response_encryption_is_rejected_when_the_feature_is_off() {
+        let (cfg, _dir) = cfg_with_encryption(false, false);
+        let req = req_with_response_encryption(wallet_enc_jwk(), "A128GCM", None);
+        let err = check_encryption_policy(&cfg, &req, true).unwrap_err();
+        assert!(err.to_string().contains("not supported"), "got: {err}");
+    }
+
+    #[test]
+    fn response_encryption_requires_an_alg_on_the_wallet_jwk() {
+        let (cfg, _dir) = cfg_with_encryption(true, false);
+        let mut jwk = wallet_enc_jwk();
+        if let Some(o) = jwk.as_object_mut() {
+            o.remove("alg");
+        }
+        let req = req_with_response_encryption(jwk, "A128GCM", None);
+        let err = check_encryption_policy(&cfg, &req, true).unwrap_err();
+        assert!(err.to_string().contains("alg"), "got: {err}");
+    }
+
+    #[test]
+    fn response_encryption_rejects_an_unadvertised_enc() {
+        let (cfg, _dir) = cfg_with_encryption(true, false);
+        let req = req_with_response_encryption(wallet_enc_jwk(), "A192GCM", None);
+        let err = check_encryption_policy(&cfg, &req, true).unwrap_err();
+        assert!(err.to_string().contains("A192GCM"), "got: {err}");
+    }
+
+    #[test]
+    fn response_encryption_rejects_zip() {
+        let (cfg, _dir) = cfg_with_encryption(true, false);
+        let req = req_with_response_encryption(wallet_enc_jwk(), "A128GCM", Some("DEF"));
+        let err = check_encryption_policy(&cfg, &req, true).unwrap_err();
+        assert!(err.to_string().contains("zip"), "got: {err}");
+    }
+
+    #[test]
+    fn a_well_formed_encrypted_pair_is_accepted() {
+        let (cfg, _dir) = cfg_with_encryption(true, true);
+        let req = req_with_response_encryption(wallet_enc_jwk(), "A256GCM", None);
+        assert!(check_encryption_policy(&cfg, &req, true).is_ok());
     }
 }

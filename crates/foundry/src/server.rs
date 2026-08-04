@@ -1054,6 +1054,8 @@ async fn credential_handler(
         state.nonce_secret.as_ref(),
         &dpop,
         now,
+        // Wired to the extractor's `was_encrypted` flag in the extractor task.
+        false,
     )
     .await
     .map_err(|e| credential_error_response(&state, now, &e))?;

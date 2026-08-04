@@ -19,7 +19,8 @@ pub use authorize::{
 pub use challenge::{issue_attestation_challenge, mint_dpop_nonce, ChallengeResponse, NonceSecret};
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{
-    handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
+    check_encryption_policy, handle_credential_request, CredentialRequest, CredentialResponse,
+    CredentialResponseEncryptionParams, IssuedCredential,
 };
 pub use dpop::{
     access_token_hash, verify_dpop_proof, DpopNoncePolicy, DpopPresentation, VerifiedDpopProof,
