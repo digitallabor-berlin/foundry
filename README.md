@@ -512,6 +512,15 @@ issuer:
   usable nonce for its next request, and never more than one `DPoP-Nonce`
   header is ever emitted on a single response.
 
+Under `optional` and `required` alike, a fresh `DPoP-Nonce` also rides the
+responses of the two unauthenticated freshness endpoints — `POST /nonce` and
+`POST /challenge` — so a wallet can obtain its first nonce before its first
+authenticated request instead of learning it from a rejection. No pinned
+specification requires this: it accommodates wallets that expect it, Google
+Wallet among them (`docs/specs/google-wallet-openid4vci-profile.md`).
+OpenID4VCI 1.1 WG draft §8.2-4 standardises the `/nonce` case; the
+`/challenge` case is standardised nowhere.
+
 > **`required` only binds a proof that is actually presented.** `nonce_mode`
 > strengthens a DPoP proof; it is not an independent authentication requirement.
 > Under `dpop.mode: optional`, a wallet that sends no `DPoP` header receives a

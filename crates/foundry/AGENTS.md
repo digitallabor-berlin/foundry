@@ -59,8 +59,8 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `/.well-known/openid-credential-issuer` | GET | `foundry_issuer::build_issuer_metadata` |
 | `/.well-known/oauth-authorization-server` | GET | `foundry_issuer::build_authorization_server_metadata` |
 | `/token` | POST | `foundry_issuer::handle_token_request` |
-| `/nonce` | POST | `foundry_issuer::issue_nonce` — **unauthenticated** (OpenID4VCI §7.1); responds with `Cache-Control: no-store` (§7.2) |
-| `/challenge` | POST | `foundry_issuer::issue_attestation_challenge` — **unauthenticated** (mirrors `/nonce`), **conditionally registered**: only mounted when `issuer.wallet_attestation.challenge_mode != Disabled` (ABCA §8); responds with `Cache-Control: no-store` |
+| `/nonce` | POST | `foundry_issuer::issue_nonce` — **unauthenticated** (OpenID4VCI §7.1); responds with `Cache-Control: no-store` (§7.2) and, when `issuer.dpop.nonce_mode != Disabled`, a fresh `DPoP-Nonce` (vendor-driven, see Gotchas) |
+| `/challenge` | POST | `foundry_issuer::issue_attestation_challenge` — **unauthenticated** (mirrors `/nonce`), **conditionally registered**: only mounted when `issuer.wallet_attestation.challenge_mode != Disabled` (ABCA §8); responds with `Cache-Control: no-store` and, when `issuer.dpop.nonce_mode != Disabled`, a fresh `DPoP-Nonce` (vendor-driven, see Gotchas) |
 | `/credential` | POST | `extract::MaybeEncrypted` extractor, then `foundry_issuer::handle_credential_request`; response is `extract::CredentialResponseBody` |
 | `/vp/request/:id` | GET | `foundry_verifier::build_signed_request_object` |
 | `/vp/response/:id` | POST | `foundry_verifier::verify_vp_response` |
@@ -228,14 +228,27 @@ cargo test -p foundry --test e2e_full_flow
   never disagree — see `metadata_and_route_availability_agree`
   (`conformance_http.rs`). `issuer.dpop.nonce_mode` follows the identical
   pattern one level down: it never changes the route table, but it gates
-  whether `DPoP-Nonce` is ever emitted at `/token`/`/credential`.
+  whether `DPoP-Nonce` is ever emitted — at `/token` and `/credential`, and
+  also at `/nonce` and `/challenge` (see the next entry).
+- **`/nonce` and `/challenge` emit `DPoP-Nonce` for a vendor reason, not a
+  specification one.** No pinned spec requires it: the Google Wallet profile
+  (`docs/specs/google-wallet-openid4vci-profile.md`) expects the nonce to be
+  retrieved from these two endpoints, OpenID4VCI 1.1 WG draft §8.2-4
+  standardises the `/nonce` case (this repository pins 1.0) and the
+  `/challenge` case is standardised nowhere — the profile says so of itself.
+  Both are gated on the same `issuer.dpop.nonce_mode`, so the `disabled`
+  default emits nothing and both responses stay byte-identical to their
+  pre-2026-08-04 form. Per root `AGENTS.md` §4.4's vendor-profile rule, each
+  insertion carries a code comment naming the profile; keep those comments if
+  you touch either handler.
 - **`attestation_challenge_header` and `dpop_nonce_header` are each a single
-  emission point, called from both the success and error tails of
-  `token_handler`/`credential_handler`.** Never construct either header
-  inline at a second call site — RFC 9449 §8's "MUST NOT be more than one
-  `DPoP-Nonce` header" and ABCA §6.2's mandatory-on-error / §8.1's
-  permitted-on-success shape both depend on there being exactly one place
-  that decides whether and how to attach them.
+  emission point.** `attestation_challenge_header` is called from the success
+  and error tails of `token_handler`; `dpop_nonce_header` from those plus
+  `credential_handler`'s and the `/nonce` and `/challenge` handlers. Never
+  construct either header inline at a second call site — RFC 9449 §8's "MUST
+  NOT be more than one `DPoP-Nonce` header" and ABCA §6.2's
+  mandatory-on-error / §8.1's permitted-on-success shape both depend on there
+  being exactly one place that decides whether and how to attach them.
 - **`assets/console.html` embeds a vendored QR library with a provenance
   comment.** Do not delete that comment, and do not reintroduce a CDN
   dependency (it exists for air-gapped deployment) or dynamic `innerHTML` (prior

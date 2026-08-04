@@ -223,6 +223,12 @@ struct IssuanceSecrets {
     /// RFC 9449 §8/§9 DPoP nonce -- empty unless produced by
     /// `drive_issuance_with_challenge_and_nonce`.
     dpop_nonce: String,
+    /// The `DPoP-Nonce` now riding the ABCA §8 challenge response -- empty
+    /// unless produced by `drive_issuance_with_challenge_and_nonce`.
+    challenge_endpoint_dpop_nonce: String,
+    /// The `DPoP-Nonce` now riding the OpenID4VCI §7 Nonce Endpoint response --
+    /// empty unless produced by `drive_issuance_with_challenge_and_nonce`.
+    nonce_endpoint_dpop_nonce: String,
 }
 
 /// Drive a complete issuance through the real routers.
@@ -327,6 +333,8 @@ async fn drive_issuance(state: &AppState) -> IssuanceSecrets {
         credential,
         attestation_challenge: String::new(),
         dpop_nonce: String::new(),
+        challenge_endpoint_dpop_nonce: String::new(),
+        nonce_endpoint_dpop_nonce: String::new(),
     }
 }
 
@@ -510,6 +518,13 @@ async fn drive_issuance_with_challenge_and_nonce(
         .await
         .expect("challenge response");
     assert_eq!(challenge_res.status(), StatusCode::OK);
+    // Read the header before `body_json`, which consumes the response.
+    let challenge_endpoint_dpop_nonce = challenge_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("nonce_mode: required must supply a DPoP-Nonce from /challenge")
+        .to_string();
     let attestation_challenge = body_json(challenge_res).await["attestation_challenge"]
         .as_str()
         .expect("attestation_challenge")
@@ -636,6 +651,13 @@ async fn drive_issuance_with_challenge_and_nonce(
         .await
         .expect("nonce response");
     assert_eq!(nonce_res.status(), StatusCode::OK);
+    // Read the header before `body_json`, which consumes the response.
+    let nonce_endpoint_dpop_nonce = nonce_res
+        .headers()
+        .get("DPoP-Nonce")
+        .and_then(|v| v.to_str().ok())
+        .expect("nonce_mode: required must supply a DPoP-Nonce from /nonce")
+        .to_string();
     let c_nonce = body_json(nonce_res).await["c_nonce"]
         .as_str()
         .expect("c_nonce")
@@ -684,11 +706,18 @@ async fn drive_issuance_with_challenge_and_nonce(
         credential,
         attestation_challenge,
         dpop_nonce,
+        challenge_endpoint_dpop_nonce,
+        nonce_endpoint_dpop_nonce,
     }
 }
 
-/// Both new freshness values are secrets: leaking one hands an attacker what it
-/// needs to complete a forged PoP or DPoP proof. Root `AGENTS.md` §4.5.
+/// Every freshness value in this flow is a secret: leaking one hands an attacker
+/// what it needs to complete a forged PoP or DPoP proof. Root `AGENTS.md` §4.5.
+///
+/// Four of them now, not two: since 2026-08-04 the two unauthenticated freshness
+/// endpoints supply a `DPoP-Nonce` of their own (`/challenge` and `/nonce`, per
+/// the Google Wallet profile), and those are secrets for exactly the same reason
+/// as the one `/token` supplies.
 #[tokio::test]
 async fn issuance_never_logs_challenges_or_dpop_nonces() {
     let _flag = lock_flag().await;
@@ -708,6 +737,14 @@ async fn issuance_never_logs_challenges_or_dpop_nonces() {
     for (label, secret) in [
         ("attestation_challenge", &secrets.attestation_challenge),
         ("dpop_nonce", &secrets.dpop_nonce),
+        (
+            "challenge_endpoint_dpop_nonce",
+            &secrets.challenge_endpoint_dpop_nonce,
+        ),
+        (
+            "nonce_endpoint_dpop_nonce",
+            &secrets.nonce_endpoint_dpop_nonce,
+        ),
     ] {
         assert!(
             !secret.is_empty(),

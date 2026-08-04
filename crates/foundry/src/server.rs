@@ -841,17 +841,16 @@ async fn token_handler(
 #[utoipa::path(
     post,
     path = "/nonce",
-    responses((status = 200, body = NonceResponse))
+    responses(
+        (status = 200, body = NonceResponse,
+         description = "Uncacheable per Section 7.2 (`Cache-Control: no-store`). \
+                        Also carries a fresh `DPoP-Nonce` header when \
+                        `issuer.dpop.nonce_mode` is `optional` or `required`."),
+    )
 )]
 async fn nonce_handler(
     State(state): State<AppState>,
-) -> Result<
-    (
-        [(axum::http::HeaderName, &'static str); 1],
-        Json<NonceResponse>,
-    ),
-    (StatusCode, Json<serde_json::Value>),
-> {
+) -> Result<(HeaderMap, Json<NonceResponse>), (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -860,9 +859,26 @@ async fn nonce_handler(
     let res = foundry_issuer::issue_nonce(state.nonce_secret.as_ref(), now)
         .map_err(|e| wallet_error_response(&e))?;
 
+    let mut out = HeaderMap::new();
     // Section 7.2: the Credential Issuer MUST make the response uncacheable
     // by adding a Cache-Control header field including the value `no-store`.
-    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
+    out.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    // Vendor accommodation, not conformance: the Google Wallet profile
+    // (docs/specs/google-wallet-openid4vci-profile.md, "Credential Endpoint")
+    // expects the DPoP nonce to be retrieved from this endpoint. OpenID4VCI 1.1
+    // WG draft §8.2-4 standardises it; this repository pins 1.0, which does not,
+    // so the profile is the only source. Gated on the same `nonce_mode` that
+    // governs whether a presented `nonce` is verified at all -- handing out a
+    // nonce the server will not check would advertise a freshness guarantee
+    // that does not exist. `insert`, not `append`: RFC 9449 §8 forbids a second
+    // DPoP-Nonce header.
+    if let Some((name, value)) = dpop_nonce_header(&state, now) {
+        out.insert(name, value);
+    }
+    Ok((out, Json(res)))
 }
 
 /// Challenge Endpoint (ABCA draft -07 §8).
@@ -879,18 +895,14 @@ async fn nonce_handler(
     path = "/challenge",
     responses(
         (status = 200, body = ChallengeResponse,
-         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`)."),
+         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`). \
+                        Also carries a fresh `DPoP-Nonce` header when \
+                        `issuer.dpop.nonce_mode` is `optional` or `required`."),
     )
 )]
 async fn challenge_handler(
     State(state): State<AppState>,
-) -> Result<
-    (
-        [(axum::http::HeaderName, &'static str); 1],
-        Json<ChallengeResponse>,
-    ),
-    (StatusCode, Json<serde_json::Value>),
-> {
+) -> Result<(HeaderMap, Json<ChallengeResponse>), (StatusCode, Json<serde_json::Value>)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -903,9 +915,25 @@ async fn challenge_handler(
     )
     .map_err(|e| wallet_error_response(&e))?;
 
+    let mut out = HeaderMap::new();
     // §8: "The Authorization Server MUST make the response uncacheable by
     // adding a Cache-Control header field including the value no-store."
-    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
+    out.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    // Vendor accommodation, not conformance: the Google Wallet profile
+    // (docs/specs/google-wallet-openid4vci-profile.md, "Token Endpoint")
+    // expects the DPoP nonce here and says so explicitly of itself -- "Note:
+    // this is not standardized." ABCA draft -07 §8, which defines this
+    // endpoint, mentions no DPoP interaction, and no other pinned
+    // specification does either, so the profile is the only source. Gated on
+    // `nonce_mode` for the same reason as at the Nonce Endpoint. `insert`, not
+    // `append`: RFC 9449 §8 forbids a second DPoP-Nonce header.
+    if let Some((name, value)) = dpop_nonce_header(&state, now) {
+        out.insert(name, value);
+    }
+    Ok((out, Json(res)))
 }
 
 /// Split an `Authorization` header into its scheme and credentials.
