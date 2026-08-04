@@ -59,6 +59,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `/.well-known/oauth-authorization-server` | GET | `foundry_issuer::build_authorization_server_metadata` |
 | `/token` | POST | `foundry_issuer::handle_token_request` |
 | `/nonce` | POST | `foundry_issuer::issue_nonce` — **unauthenticated** (OpenID4VCI §7.1); responds with `Cache-Control: no-store` (§7.2) |
+| `/challenge` | POST | `foundry_issuer::issue_attestation_challenge` — **unauthenticated** (mirrors `/nonce`), **conditionally registered**: only mounted when `issuer.wallet_attestation.challenge_mode != Disabled` (ABCA §8); responds with `Cache-Control: no-store` |
 | `/credential` | POST | `foundry_issuer::handle_credential_request` |
 | `/vp/request/:id` | GET | `foundry_verifier::build_signed_request_object` |
 | `/vp/response/:id` | POST | `foundry_verifier::verify_vp_response` |
@@ -211,6 +212,21 @@ cargo test -p foundry --test e2e_full_flow
   `admin.console_enabled` and `admin.swagger_ui_enabled` decide whether
   `/console` exists at all and whether `/api-docs/openapi.json` is served by
   Swagger UI or the plain handler. Tests must set these explicitly.
+- **`/challenge` is config-gated and changes the route table too.**
+  `issuer.wallet_attestation.challenge_mode != Disabled` is what mounts it on
+  `wallet_router`; the same condition also gates `challenge_endpoint` in
+  `AuthorizationServerMetadata`, so a route and an advertised capability can
+  never disagree — see `metadata_and_route_availability_agree`
+  (`conformance_http.rs`). `issuer.dpop.nonce_mode` follows the identical
+  pattern one level down: it never changes the route table, but it gates
+  whether `DPoP-Nonce` is ever emitted at `/token`/`/credential`.
+- **`attestation_challenge_header` and `dpop_nonce_header` are each a single
+  emission point, called from both the success and error tails of
+  `token_handler`/`credential_handler`.** Never construct either header
+  inline at a second call site — RFC 9449 §8's "MUST NOT be more than one
+  `DPoP-Nonce` header" and ABCA §6.2's mandatory-on-error / §8.1's
+  permitted-on-success shape both depend on there being exactly one place
+  that decides whether and how to attach them.
 - **`assets/console.html` embeds a vendored QR library with a provenance
   comment.** Do not delete that comment, and do not reintroduce a CDN
   dependency (it exists for air-gapped deployment) or dynamic `innerHTML` (prior

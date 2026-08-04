@@ -28,12 +28,13 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()`, `build_dc_api_offer()` |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
 | `token.rs` | `POST /token` logic (pre-authorized-code and authorization-code grants → access token) |
-| `dpop.rs` | RFC 9449 DPoP: proof JWT validation (§4.3 checks 2-9, 11-12), `htu` normalisation, RFC 7638 `jkt` computation, and `jti` replay claiming (§11.1) under KV namespace `dpop_jti` |
-| `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceSecret` / `NonceResponse` |
+| `challenge.rs` | The domain-separated MAC primitive shared by `nonce.rs`, `attestation.rs`, and `dpop.rs`: `NonceSecret` (moved here from `nonce.rs`), `Domain` (`CNonce` \| `AttestationChallenge` \| `DpopNonce`), `mint`/`verify`. Also the ABCA §8 challenge endpoint's own logic: `ChallengeResponse`, `issue_attestation_challenge`, and RFC 9449's `mint_dpop_nonce` |
+| `dpop.rs` | RFC 9449 DPoP: proof JWT validation (§4.3 checks 2-9, 11-12, plus check 10 — the server-provided `nonce`, gated on `issuer.dpop.nonce_mode` and implemented via `challenge.rs`'s `Domain::DpopNonce`), `htu` normalisation, RFC 7638 `jkt` computation, and `jti` replay claiming (§11.1) under KV namespace `dpop_jti` |
+| `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceResponse`. Delegates its MAC work to `challenge.rs`, which is also where `NonceSecret` now lives (re-exported here for source compatibility) |
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
 | `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
 | `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
-| `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt`, and owns anti-replay claiming of its `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
+| `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt` — including, since 2026-08-04, ABCA §9 rule 8's `challenge` claim (check 10), gated on `issuer.wallet_attestation.challenge_mode` and implemented via `challenge.rs`'s `Domain::AttestationChallenge` — and owns anti-replay claiming of the PoP's `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config` |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
@@ -46,8 +47,9 @@ Entry point → the endpoint that drives it (routes defined in
 | Entry point | Endpoint | Listener |
 |---|---|---|
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
-| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
+| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
+| `issue_attestation_challenge(&NonceSecret, ttl_secs, now_unix) -> ChallengeResponse` | `POST /challenge` | wallet-facing, **unauthenticated**, registered only when `challenge_mode != Disabled` |
 | `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix) -> CredentialResponse` | `POST /credential` | wallet-facing |
 | `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
 | `build_authorization_server_metadata(&Config) -> AuthorizationServerMetadata` | `GET /.well-known/oauth-authorization-server` | wallet-facing |
@@ -64,11 +66,14 @@ Other public surface:
 - **Metadata:** `CredentialConfigurationSupported`, `ProofTypeSupported`.
 - **Status:** `allocate_status_index(&dyn Storage, credential_type_id, list_size) -> Result<u64, IssuanceError>`.
 - **DPoP (RFC 9449):** `verify_dpop_proof`, `VerifiedDpopProof`, `DpopPresentation`,
-  `access_token_hash`.
+  `DpopNoncePolicy`, `access_token_hash`.
+- **Challenge (`challenge.rs`):** `NonceSecret`, `ChallengeResponse`,
+  `issue_attestation_challenge`, `mint_dpop_nonce`.
 - **Errors:** `IssuanceError` — `InvalidRequest`, `InvalidGrant`, `InvalidProof`,
   `UnknownCredentialType`, `ClaimValidation`, `StatusListExhausted`,
-  `InvalidDpopProof`, plus transparent wraps of `StorageError` / `CryptoError` /
-  `TrustError`, and `Serialization` / `Deserialization`.
+  `InvalidDpopProof`, `UseAttestationChallenge`, `UseDpopNonce`, plus transparent
+  wraps of `StorageError` / `CryptoError` / `TrustError`, and `Serialization` /
+  `Deserialization`.
 
 ## Binding Invariants
 
@@ -108,9 +113,9 @@ Other public surface:
 This crate has **no `tests/` directory**.
 
 - **Unit coverage:** inline `#[cfg(test)]` modules in every module —
-  `attestation.rs`, `create_offer.rs`, `credential.rs`, `error.rs`,
-  `metadata.rs`, `offer.rs`, `proof.rs`, `status_index.rs`, `token.rs`,
-  `transaction.rs`.
+  `attestation.rs`, `challenge.rs`, `create_offer.rs`, `credential.rs`,
+  `dpop.rs`, `error.rs`, `metadata.rs`, `nonce.rs`, `offer.rs`, `proof.rs`,
+  `status_index.rs`, `token.rs`, `transaction.rs`.
 - **Flow coverage** lives in `crates/foundry/tests/` — see
   [`../foundry/tests/AGENTS.md`](../foundry/tests/AGENTS.md). Most relevant:
   `issuer_offers.rs` (offer creation via the admin API), `wallet_issuance.rs`
@@ -241,7 +246,20 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   deliberate deviation.** RFC 9449 leaves the case undefined; accepting it
   would let a wallet believe it has sender-constraining when the token has no
   bound key. Fail-closed, approved in the design doc's §5.3.
-- **Two of §4.3's checks are not in `dpop.rs` and that is correct.** Check 1
+- **One of §4.3's checks is not in `dpop.rs` and that is correct.** Check 1
   (single `DPoP` header) needs the header map and lives in `server.rs`'s
-  `exactly_one_header`; check 10 (`nonce`) is vacuous because no §8/§9 nonce
-  is ever supplied, which also satisfies §11.3 by construction.
+  `exactly_one_header`. Check 10 (`nonce`) **is** implemented, as of
+  2026-08-04, gated on `issuer.dpop.nonce_mode` — it is only vacuous under the
+  default `Disabled`, where no nonce is ever supplied and §11.3 is satisfied
+  by construction; under `Optional`/`Required` it actively verifies the claim
+  via `challenge::verify(Domain::DpopNonce, ...)`.
+- **Every issuer-minted opaque freshness value shares one MAC secret, split
+  only by `challenge::Domain`.** `c_nonce` (`Domain::CNonce`), the ABCA
+  challenge (`Domain::AttestationChallenge`), and the DPoP nonce
+  (`Domain::DpopNonce`) are minted and verified by the same `mint`/`verify`
+  pair in `challenge.rs`, keyed off one `NonceSecret`. **Any new kind of
+  issuer-minted opaque value MUST add its own `Domain` variant** rather than
+  reusing an existing one — the domain label is mixed into the MAC input
+  specifically so a value minted for one purpose can never verify as another,
+  and reusing a variant silently defeats that guarantee. See `challenge.rs`'s
+  own cross-domain-rejection tests for the property this protects.
