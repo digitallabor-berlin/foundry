@@ -1,0 +1,137 @@
+{
+  "nextId": 13,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "Explore project context for admin console DC API support",
+      "description": "Read existing admin console code and the recent deeplink design spec to understand current architecture before brainstorming DC API support.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855006,
+      "updatedAt": 1785770686416
+    },
+    {
+      "id": "2",
+      "subject": "Ask clarifying questions about DC API feature",
+      "description": "One question at a time: which flows (issuance/presentation), which platforms/browsers, fallback behavior, how selection is presented in admin console UI.",
+      "status": "pending",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855008,
+      "updatedAt": 1785768855008
+    },
+    {
+      "id": "3",
+      "subject": "Propose approaches for DC API support",
+      "description": "Present 2-3 approaches with trade-offs and a recommendation.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855010,
+      "updatedAt": 1785769541244
+    },
+    {
+      "id": "4",
+      "subject": "Present design and get approval",
+      "description": "Present design in scaled sections, get user approval per section.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855011,
+      "updatedAt": 1785769886853
+    },
+    {
+      "id": "5",
+      "subject": "Write design doc and self-review",
+      "description": "Save to docs/superpowers/specs/2026-08-03-admin-console-dc-api-design.md, commit, self-review for placeholders/consistency/scope/ambiguity.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855013,
+      "updatedAt": 1785769901518
+    },
+    {
+      "id": "6",
+      "subject": "User review of spec, then hand off to writing-plans",
+      "description": "Ask user to review spec file, incorporate changes, then invoke writing-plans skill.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785768855015,
+      "updatedAt": 1785770071118
+    },
+    {
+      "id": "7",
+      "subject": "Task 1: Extract submit_vp_response, parameterize verifier_wallet_error_response by surface",
+      "description": "Pure refactor in crates/foundry/src/server.rs per docs/superpowers/plans/2026-08-03-admin-console-dc-api.md Task 1. No behavior change. Run scoped gate and commit.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678818,
+      "updatedAt": 1785771020727
+    },
+    {
+      "id": "8",
+      "subject": "Task 2: Add POST /admin/verification/requests/:id/dc-api-response endpoint",
+      "description": "Add AdminDcApiResponseBody type, post_admin_dc_api_response_handler, route registration, OpenAPI registration, regenerate openapi.json per plan Task 2.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678821,
+      "updatedAt": 1785771261963
+    },
+    {
+      "id": "9",
+      "subject": "Task 3: Integration tests for the new dc-api-response endpoint",
+      "description": "Add happy-path, 404, and resubmission-rejected tests to crates/foundry/tests/wallet_verification.rs per plan Task 3.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678823,
+      "updatedAt": 1785771341458
+    },
+    {
+      "id": "10",
+      "subject": "Task 4: Console UI - transport select, DC API button, JS wiring",
+      "description": "Modify crates/foundry/assets/console.html per plan Task 4: select element, button markup+CSS, JS helpers (hasDigitalCredentialSupport, supportsDcApi, isDcApiNotSupportedError, prepareDcApiRequest, invokeDc, initDcApiTrigger), wiring into initVerification().",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678825,
+      "updatedAt": 1785771573640
+    },
+    {
+      "id": "11",
+      "subject": "Task 5: Structural regression test for console markup",
+      "description": "Add console_has_digital_credentials_api_trigger_for_dc_api_transport test to crates/foundry/tests/console.rs per plan Task 5.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678827,
+      "updatedAt": 1785771630974
+    },
+    {
+      "id": "12",
+      "subject": "Task 6: Change record and final scoped verification",
+      "description": "Write docs/superpowers/changes/2026-08-03-admin-console-dc-api.md, run final scoped gate, commit per plan Task 6.",
+      "status": "completed",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785770678829,
+      "updatedAt": 1785771661557
+    }
+  ]
+}
