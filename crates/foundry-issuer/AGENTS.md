@@ -25,7 +25,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 |---|---|
 | `lib.rs` | Module declarations and the `pub use` surface (see below) |
-| `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()` |
+| `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()`, `build_dc_api_offer()` |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
 | `token.rs` | `POST /token` logic (pre-authorized-code and authorization-code grants → access token) |
 | `dpop.rs` | RFC 9449 DPoP: proof JWT validation (§4.3 checks 2-9, 11-12), `htu` normalisation, RFC 7638 `jkt` computation, and `jti` replay claiming (§11.1) under KV namespace `dpop_jti` |
@@ -55,8 +55,8 @@ Entry point → the endpoint that drives it (routes defined in
 Other public surface:
 
 - **Offer:** `CredentialOffer`, `CredentialOfferGrants`, `PreAuthorizedCodeGrant`,
-  `TxCodeDefinition`, `build_offer_uri`, `generate_pre_authorized_code`,
-  `generate_tx_code`.
+  `TxCodeDefinition`, `build_offer_uri`, `build_dc_api_offer`,
+  `generate_pre_authorized_code`, `generate_tx_code`.
 - **Transaction:** `IssuanceTransaction`, `IssuanceState` (`Offered` | `Issued`),
   `save_transaction`, `save_transaction_with_indices`, `load_transaction`,
   `load_transaction_by_pre_auth_code`, `load_transaction_by_access_token`.
@@ -124,6 +124,16 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 
 ## Gotchas
 
+- **`build_dc_api_offer` is the one place in this crate implemented against
+  vendor documentation rather than `docs/specs/`.** The `openid4vci-v1`
+  protocol identifier is a Chrome origin-trial identifier with no pinned
+  specification; the payload shape follows
+  <https://developer.chrome.com/blog/digital-credentials-api-143-issuance-ot>.
+  A documented deviation from root AGENTS.md §4.4 — see
+  `docs/superpowers/specs/2026-08-04-admin-console-dc-api-issuance-design.md`.
+  It narrows `credential_configurations_supported` to the offered ids, so it is
+  deliberately *not* byte-identical to `GET /.well-known/openid-credential-issuer`.
+  Its output embeds the `pre-authorized_code`: never log it.
 - **Offers are single-use, enforced by transaction state.**
   `handle_credential_request` rejects anything whose `IssuanceState` is not
   `Offered` with `InvalidGrant("credential offer has already been claimed")`.

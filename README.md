@@ -258,7 +258,11 @@ It lets you trigger the two admin flows from a browser instead of hand-rolling
 
 - **Issuance**: enter a `credential_type_id` and `claims` JSON, click
   "Create Offer" — get back the `credential_offer_uri` as copyable text and
-  as a QR code. Scan it with a real wallet to complete the flow.
+  as a QR code. Scan it with a real wallet, tap **Open in Wallet** on the same
+  device, or use **Add to Wallet (Digital Credentials API)** to hand the offer
+  to the platform's wallet picker (see below). The page polls the transaction
+  and shows `offered` → `issued`, plus the transaction code when
+  `tx_code_required` is set.
 - **Verification**: pick a named query (`named_query_ref`) or paste raw
   `dcql_query` JSON, click "Create Verification Request" — get back the
   `openid4vp_uri`/`request_uri` as copyable text and as a QR code. The page
@@ -271,6 +275,34 @@ page; it is remembered in the browser's `localStorage` for convenience,
 since the Admin listener is loopback-only by default. Disable it entirely
 with `server.admin.console_enabled: false` if you don't want it exposed;
 like Swagger UI, this only affects the Admin listener.
+
+##### Digital Credentials API prerequisites
+
+Both "Add to Wallet (Digital Credentials API)" (issuance,
+`navigator.credentials.create()`) and "Trigger via Digital Credentials API"
+(presentation, `navigator.credentials.get()`) invoke a browser API with
+platform requirements the console cannot satisfy on your behalf:
+
+- Chrome 143 or later, and Google Play services 24.0 or later on the Android
+  device.
+- `chrome://flags/#web-identity-digital-credentials-creation` enabled (issuance
+  is an origin trial; `foundry` embeds no origin-trial token, since the console
+  is a local testing tool rather than a deployed origin).
+- A supported wallet app installed on the Android device.
+- **`issuer.credential_issuer` must be reachable from the Android device.** A
+  `localhost` or `127.0.0.1` issuer URL fails the cross-device flow even though
+  the QR scans correctly and the handoff appears to succeed — the wallet
+  resolves `credential_issuer` itself when it calls `/token`. Use a
+  LAN-reachable host or a tunnel. This is the failure mode most likely to be
+  misread as a `foundry` bug.
+
+The console never gates the buttons on browser sniffing: it always offers them
+and reports an unsupported browser at the point of use.
+
+Note that the Digital Credentials API is a **platform handoff channel, not a
+protocol**. The payload handed to the wallet is the same OpenID4VCI Credential
+Offer the deep link carries, so `/token` and `/credential` behave identically
+regardless of which affordance you used.
 
 The console plus a real wallet app is the supported way to drive an issuance
 or presentation by hand — foundry ships no wallet client of its own. For a

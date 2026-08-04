@@ -22,8 +22,8 @@ cargo test --workspace                                 # full gate — end of cy
 | File | Covers | Exercises |
 |---|---|---|
 | `health.rs` | `/health` and `/ready` both return 200 | `server::health`, `server::ready` |
-| `console.rs` | `/console` returns HTML when enabled, 404 when disabled; QR SVG has explicit dimensions | `server::console_handler`, `admin.console_enabled` |
-| `issuer_offers.rs` | `POST /admin/issuance/offers` succeeds with a valid Bearer token, rejected without one | `server::create_offer_handler`, `require_api_key`, `foundry_issuer::create_offer` |
+| `console.rs` | `/console` returns HTML when enabled, 404 when disabled; QR SVG has explicit dimensions; the DC API trigger buttons and issuance status badge are present, and `.badge.offered` / `.badge.issued` are styled | `server::console_handler`, `admin.console_enabled` |
+| `issuer_offers.rs` | `POST /admin/issuance/offers` succeeds with a valid Bearer token, rejected without one; the response carries a `dc_api_offer` with inlined metadata; `GET /admin/issuance/offers/:id` reports `offered`, returns the `tx_code`, 404s on an unknown id, and **never** returns `pre_authorized_code` / `access_token` / `claims` | `server::create_offer_handler`, `server::get_issuance_offer_handler`, `require_api_key`, `foundry_issuer::create_offer` |
 | `wallet_metadata.rs` | Both `.well-known` metadata documents | `foundry_issuer::build_issuer_metadata`, `build_authorization_server_metadata` |
 | `wallet_issuance.rs` | Full `/token` → `/credential` flow with a holder proof; wrong pre-auth code rejected | `foundry_issuer::handle_token_request`, `handle_credential_request`, `verify_holder_proof` |
 | `wallet_verification.rs` | Full `/vp/request/:id` → `/vp/response/:id` flow, including a locally built signed Status List Token that marks an index revoked | `foundry_verifier::build_signed_request_object`, `verify_vp_response`, `check_status` |

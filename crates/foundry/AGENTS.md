@@ -47,6 +47,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `/api-docs`, `/api-docs/openapi.json` | GET | none | Swagger UI if `admin.swagger_ui_enabled`, else `openapi_json_handler` (`AdminApiDoc`) |
 | `/console` | GET | none | `console_handler` — **only mounted when `admin.console_enabled`** |
 | `/admin/issuance/offers` | POST | **Bearer** | `create_offer_handler` → `foundry_issuer::create_offer` |
+| `/admin/issuance/offers/:id` | GET | **Bearer** | `get_issuance_offer_handler` → `foundry_issuer::load_transaction`, projected to `AdminIssuanceStatus` |
 | `/admin/verification/requests` | POST | **Bearer** | `create_verification_handler` → `foundry_verifier::create_verification_request` |
 | `/admin/verification/requests/:id` | GET | **Bearer** | `get_verification_handler` → `foundry_verifier::load_verification_transaction` |
 
@@ -124,6 +125,16 @@ cargo test -p foundry --test e2e_full_flow
 
 ## Gotchas
 
+- **`AdminIssuanceStatus` is a deliberate narrowing, not laziness.**
+  `get_issuance_offer_handler` must never return `pre_authorized_code` or
+  `access_token`: both are live bearer credentials against the wallet-facing
+  listener, so echoing them would let an admin-key holder redeem an offer meant
+  for a wallet. `tx_code` *is* returned on purpose — it is surfaced nowhere else,
+  and out-of-band relay to the operator is its entire function. Enforced by
+  `offer_status_never_returns_bearer_credentials_or_claims` in
+  `tests/issuer_offers.rs`. Note the contrasting older precedent:
+  `get_verification_handler` still returns its whole `VerificationTransaction`,
+  `ephem_private_jwk` included — a known wart, not a pattern to copy.
 - **`POST /vp/response/:id` takes a form-encoded body, NOT a bare JWE.** The
   verifier advertises `response_mode: direct_post.jwt`, so per OpenID4VP 1.0
   §8.2/§8.3 the wallet sends `application/x-www-form-urlencoded` with the JWE in
