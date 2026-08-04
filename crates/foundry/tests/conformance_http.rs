@@ -2464,3 +2464,308 @@ async fn gap_vci_14_non_utf8_attestation_header_is_rejected_not_treated_as_absen
     let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
     assert_eq!(body_json["error"], "invalid_client");
 }
+
+// ---------------------------------------------------------------------------
+// OpenID4VCI Credential Request/Response encryption — the HTTP rejection
+// matrix. `setup_test_app` above stays untouched by this section; every helper
+// here is new and scoped to encryption.
+// ---------------------------------------------------------------------------
+
+/// As `setup_test_app`, plus a generated request-decryption key and both
+/// encryption blocks enabled with the given advertised `enc` lists and
+/// `encryption_required`.
+///
+/// Parameterized (rather than building one fixed `setup_with_encryption` and
+/// mutating its config afterward) because `DecryptionKey` is deliberately not
+/// `Clone` -- a clonable private key is a footgun -- so a config change that
+/// needs a fresh `AppState` cannot reuse a previously loaded key; it has to
+/// build the whole state, including a fresh key, from scratch.
+async fn setup_with_encryption_enc(
+    request_enc: Vec<String>,
+    response_enc: Vec<String>,
+    required: bool,
+) -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup_test_app().await;
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.request_encryption = Some(foundry_core::config::RequestEncryptionConfig {
+        keys: vec!["issuer_request_enc".to_string()],
+        enc_values_supported: request_enc,
+        encryption_required: required,
+    });
+    cfg.issuer.response_encryption = Some(foundry_core::config::ResponseEncryptionConfig {
+        enc_values_supported: response_enc,
+        encryption_required: required,
+    });
+    let km = foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+        .unwrap();
+    let key =
+        foundry_core::crypto::jwe::DecryptionKey::from_pem(km.private_pem.as_bytes()).unwrap();
+    let state =
+        AppState::new(state.storage.clone(), Arc::new(cfg)).with_request_decryption_keys(vec![key]);
+    (state, dir)
+}
+
+/// As `setup_with_encryption_enc`, with both `enc` lists at the full supported
+/// set and `encryption_required: false` -- the common case most tests below
+/// want.
+async fn setup_with_encryption() -> (AppState, tempfile::TempDir) {
+    setup_with_encryption_enc(
+        vec!["A128GCM".to_string(), "A256GCM".to_string()],
+        vec!["A128GCM".to_string(), "A256GCM".to_string()],
+        false,
+    )
+    .await
+}
+
+async fn body_json(res: axum::http::Response<Body>) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// POST a body to `/credential` with the given Content-Type.
+async fn post_credential(
+    state: &AppState,
+    access_token: &str,
+    content_type: &str,
+    body: impl Into<axum::body::Bytes>,
+) -> axum::http::Response<Body> {
+    wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credential")
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                .body(Body::from(body.into()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Encrypt `body` to the issuer's published request-encryption key.
+async fn encrypt_to_issuer(state: &AppState, body: &serde_json::Value, enc: &str) -> String {
+    let meta = foundry_issuer::build_issuer_metadata(&state.config, &state.request_decryption_keys);
+    let json = serde_json::to_value(meta).unwrap();
+    let jwk = json["credential_request_encryption"]["jwks"]["keys"][0].clone();
+    let kid = jwk["kid"].as_str().unwrap().to_string();
+    foundry_core::crypto::jwe::encrypt_compact_with_kid(body, &jwk, "ECDH-ES", enc, Some(&kid))
+        .unwrap()
+}
+
+fn wallet_enc_jwk_json() -> serde_json::Value {
+    let kp = EcKeyPair::generate(josekit::jwk::alg::ec::EcCurve::P256).unwrap();
+    let mut jwk = serde_json::to_value(kp.to_jwk_public_key()).unwrap();
+    if let Some(o) = jwk.as_object_mut() {
+        o.insert("alg".to_string(), serde_json::json!("ECDH-ES"));
+    }
+    jwk
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0098 — OpenID4VCI Encrypted Messages (L1186): the media type of an
+// encrypted message MUST be `application/jwt`. Anything else is refused before
+// parsing, which is also what keeps VCI-0062 true.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0098_text_plain_is_still_415_with_encryption_enabled() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let res = post_credential(&state, &token, "text/plain", "not json at all").await;
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0100 — Encrypted Messages (L1188): the JWE `alg` MUST equal the `alg` of
+// the chosen JWK, which is always ECDH-ES.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0100_a_non_ecdh_es_alg_is_rejected() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    // Hand-build a header claiming RSA-OAEP over an otherwise well-formed shape.
+    let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"RSA-OAEP","enc":"A128GCM","kid":"x"}"#);
+    let bogus = format!("{header_b64}.e.i.c.t");
+    let res = post_credential(&state, &token, "application/jwt", bogus).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = body_json(res).await;
+    assert_eq!(
+        body["error"],
+        serde_json::json!("invalid_credential_request")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0101 — Encrypted Messages (L1188): the JWE MUST carry the selected key's
+// `kid`. Every published key has one, so an absent or unknown `kid` is refused
+// rather than triggering trial decryption.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0101_a_missing_kid_is_rejected() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let meta = serde_json::to_value(foundry_issuer::build_issuer_metadata(
+        &state.config,
+        &state.request_decryption_keys,
+    ))
+    .unwrap();
+    let jwk = meta["credential_request_encryption"]["jwks"]["keys"][0].clone();
+    // The four-argument form deliberately writes no `kid`.
+    let jwe = foundry_core::crypto::jwe::encrypt_compact(
+        &serde_json::json!({ "credential_configuration_id": "pid" }),
+        &jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+    let res = post_credential(&state, &token, "application/jwt", jwe).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0135 — Credential Issuer Metadata (L1374): only advertised `enc` values
+// are accepted on the Credential Request.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0135_an_unadvertised_request_enc_is_rejected() {
+    let (state, _dir) =
+        setup_with_encryption_enc(vec!["A128GCM".into()], vec!["A128GCM".into()], false).await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let jwe = encrypt_to_issuer(
+        &state,
+        &serde_json::json!({ "credential_configuration_id": "pid" }),
+        "A256GCM",
+    )
+    .await;
+    let res = post_credential(&state, &token, "application/jwt", jwe).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0063 — Credential Request (L960): Credential Request encryption MUST be
+// used whenever `credential_response_encryption` is included, to prevent
+// substitution.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0063_response_encryption_over_plaintext_is_rejected() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "credential_response_encryption": { "jwk": wallet_enc_jwk_json(), "enc": "A128GCM" },
+    });
+    let res = post_credential(
+        &state,
+        &token,
+        "application/json",
+        serde_json::to_vec(&body).unwrap(),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = body_json(res).await;
+    assert_eq!(
+        body["error"],
+        serde_json::json!("invalid_credential_request")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0054 — Credential Request (L854): `credential_response_encryption.jwk` is
+// REQUIRED, and Encrypted Messages (L1188) requires an `alg` on it.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0054_a_response_jwk_without_alg_is_rejected() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let mut jwk = wallet_enc_jwk_json();
+    if let Some(o) = jwk.as_object_mut() {
+        o.remove("alg");
+    }
+    let jwe = encrypt_to_issuer(
+        &state,
+        &serde_json::json!({
+            "credential_configuration_id": "pid",
+            "credential_response_encryption": { "jwk": jwk, "enc": "A128GCM" },
+        }),
+        "A128GCM",
+    )
+    .await;
+    let res = post_credential(&state, &token, "application/jwt", jwe).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0055 — Credential Request (L855): `credential_response_encryption.enc` is
+// REQUIRED, and only advertised values are honoured (L1379).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0055_an_unadvertised_response_enc_is_rejected() {
+    let (state, _dir) =
+        setup_with_encryption_enc(vec!["A128GCM".into()], vec!["A128GCM".into()], false).await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let jwe = encrypt_to_issuer(
+        &state,
+        &serde_json::json!({
+            "credential_configuration_id": "pid",
+            "credential_response_encryption": { "jwk": wallet_enc_jwk_json(), "enc": "A256GCM" },
+        }),
+        "A128GCM",
+    )
+    .await;
+    let res = post_credential(&state, &token, "application/jwt", jwe).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// VCI-0056 — Credential Request (L856): if `zip` is absent, compression MUST
+// NOT be used. foundry advertises no `zip_values_supported`, so a present `zip`
+// is refused rather than silently ignored.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn vci_0056_a_present_zip_is_rejected() {
+    let (state, _dir) = setup_with_encryption().await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let jwe = encrypt_to_issuer(
+        &state,
+        &serde_json::json!({
+            "credential_configuration_id": "pid",
+            "credential_response_encryption": {
+                "jwk": wallet_enc_jwk_json(), "enc": "A128GCM", "zip": "DEF",
+            },
+        }),
+        "A128GCM",
+    )
+    .await;
+    let res = post_credential(&state, &token, "application/jwt", jwe).await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// OpenID4VCI Encrypted Messages (L1192): when encryption was required but the
+// received message is unencrypted, it is rejected.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn required_request_encryption_rejects_a_plaintext_request() {
+    let (state, _dir) = setup_with_encryption_enc(
+        vec!["A128GCM".into(), "A256GCM".into()],
+        vec!["A128GCM".into(), "A256GCM".into()],
+        true,
+    )
+    .await;
+    let token = issue_pre_auth_offer_and_get_access_token(&state).await;
+    let res = post_credential(
+        &state,
+        &token,
+        "application/json",
+        r#"{"credential_configuration_id":"pid"}"#,
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = body_json(res).await;
+    assert_eq!(
+        body["error"],
+        serde_json::json!("invalid_credential_request")
+    );
+}
