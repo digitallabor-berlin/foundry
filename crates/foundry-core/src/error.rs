@@ -58,6 +58,8 @@ pub enum TrustError {
     SelfSignedLeaf,
     #[error("certificate is outside its validity window")]
     Expired,
+    #[error("certificate signature verification failed")]
+    InvalidSignature,
     #[error("no configured trust anchor matches the certificate chain")]
     UntrustedChain,
     #[error("DNS SAN mismatch: certificate does not assert '{0}'")]

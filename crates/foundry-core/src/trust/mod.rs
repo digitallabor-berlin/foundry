@@ -3,6 +3,10 @@
 use crate::error::TrustError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL_NOPAD;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use openssl::stack::Stack;
+use openssl::x509::store::{X509Store, X509StoreBuilder};
+use openssl::x509::verify::{X509VerifyFlags, X509VerifyParam};
+use openssl::x509::{X509StoreContext, X509 as OsslX509};
 use sha2::{Digest, Sha256};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Decode, DecodePem, Encode};
@@ -10,6 +14,21 @@ use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::SubjectAltName;
 
 pub use x509_cert::Certificate;
+
+// OpenSSL verification result codes, from `include/openssl/x509_vfy.h`. These
+// are a stable part of OpenSSL's ABI. Declared locally rather than pulling in
+// `openssl-sys` as a second direct dependency; `X509VerifyResult::from_raw` is
+// `unsafe`, so classification reads `as_raw()` and compares integers instead.
+const X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT: i32 = 2;
+const X509_V_ERR_CERT_SIGNATURE_FAILURE: i32 = 7;
+const X509_V_ERR_CERT_NOT_YET_VALID: i32 = 9;
+const X509_V_ERR_CERT_HAS_EXPIRED: i32 = 10;
+const X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: i32 = 18;
+const X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: i32 = 19;
+const X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: i32 = 20;
+const X509_V_ERR_INVALID_CA: i32 = 24;
+const X509_V_ERR_PATH_LENGTH_EXCEEDED: i32 = 25;
+const X509_V_ERR_KEYUSAGE_NO_CERTSIGN: i32 = 32;
 
 /// Parse a single PEM-encoded certificate.
 pub fn parse_cert_pem(pem: &[u8]) -> Result<Certificate, TrustError> {
@@ -104,15 +123,34 @@ pub fn x5c_entry_to_pem(standard_b64: &str) -> Result<Vec<u8>, TrustError> {
 }
 
 /// A set of trust-anchor certificates.
+///
+/// Holds the raw anchor certificates rather than a single pre-built
+/// `openssl::x509::store::X509Store`: OpenSSL exposes no supported way to
+/// change a store's verification *time* per call (there is no
+/// `X509StoreContextRef::verify_param_mut`, and `X509_STORE_CTX_set_time` is
+/// not bound by the `openssl` crate at all -- only `X509_VERIFY_PARAM_set_time`,
+/// which applies to a `X509VerifyParam` set on the *store builder* before
+/// `.build()`). Since `validate_chain`'s `now_unix` must never be the system
+/// clock (callers pass synthetic times in tests), each call builds a fresh
+/// `X509Store` from these anchors with that call's time baked in.
+///
+/// `X509` is `Send + Sync` and `Clone` (both declared via
+/// `foreign_type_and_impl_send_sync!` / `impl Clone for X509` in
+/// `openssl::x509`), which this type relies on: `TrustStore` is held across
+/// `.await` points in `foundry-issuer`'s `token.rs` and `credential.rs`.
 pub struct TrustStore {
-    anchors: Vec<Certificate>,
+    anchors: Vec<OsslX509>,
 }
 
 impl TrustStore {
     pub fn from_pems(pems: &[Vec<u8>]) -> Result<Self, TrustError> {
         let mut anchors = Vec::with_capacity(pems.len());
         for pem in pems {
-            anchors.push(parse_cert_pem(pem)?);
+            // Parse with x509-cert first so malformed input yields the same
+            // TrustError::Parse it always has.
+            parse_cert_pem(pem)?;
+            let cert = OsslX509::from_pem(pem).map_err(|e| TrustError::Parse(e.to_string()))?;
+            anchors.push(cert);
         }
         Ok(Self { anchors })
     }
@@ -139,58 +177,110 @@ impl TrustStore {
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty()
     }
-}
 
-fn assert_in_window(cert: &Certificate, now_unix: u64) -> Result<(), TrustError> {
-    let (nb, na) = validity_window(cert);
-    if now_unix < nb || now_unix > na {
-        return Err(TrustError::Expired);
+    /// Build a fresh `X509Store` from this store's anchors, with `now_unix`
+    /// baked in as the verification time.
+    fn build_ossl_store(&self, now_unix: u64) -> Result<X509Store, TrustError> {
+        let mut param = X509VerifyParam::new().map_err(|e| TrustError::Parse(e.to_string()))?;
+        param.set_time(now_unix as i64);
+        // A configured anchor may be an intermediate rather than a self-signed
+        // root -- foundry has always allowed this. PARTIAL_CHAIN is what lets
+        // OpenSSL stop at such an anchor instead of insisting on reaching a
+        // self-signed certificate. Empirically required: pinning the P-384
+        // Android TEE intermediate as the sole anchor fails without this flag.
+        param
+            .set_flags(X509VerifyFlags::PARTIAL_CHAIN)
+            .map_err(|e| TrustError::Parse(e.to_string()))?;
+
+        let mut builder = X509StoreBuilder::new().map_err(|e| TrustError::Parse(e.to_string()))?;
+        builder
+            .set_param(&param)
+            .map_err(|e| TrustError::Parse(e.to_string()))?;
+        for anchor in &self.anchors {
+            builder
+                .add_cert(anchor.clone())
+                .map_err(|e| TrustError::Parse(e.to_string()))?;
+        }
+        Ok(builder.build())
     }
-    Ok(())
 }
 
 /// Validate a leaf (+ optional intermediates) against the trust store.
 ///
-/// v1 scope: reject self-signed leaf, check validity windows, and build a
-/// DN-based path from the leaf up to a configured anchor.
-/// TODO(trust-hardening): x509-cert 0.3 cannot verify signatures. A later pass
-/// MUST cryptographically verify each link (issuer SPKI over tbs_certificate)
-/// via rustls-webpki or p256/ecdsa. This function's signature will not change.
+/// Every link's signature is verified and RFC 5280 CA constraints are enforced
+/// by OpenSSL: `basicConstraints: CA:TRUE` and `keyUsage: keyCertSign` on every
+/// non-leaf, `pathLenConstraint`, validity windows, and Authority/Subject Key
+/// Identifier path building.
+///
+/// Verification purpose is deliberately **not** set. Setting one enables
+/// Extended Key Usage checks, and Android key-attestation certificates carry no
+/// EKU at all -- setting a purpose here would reject every Google Wallet chain.
 pub fn validate_chain(
     leaf_pem: &[u8],
     intermediates: &[Vec<u8>],
     store: &TrustStore,
     now_unix: u64,
 ) -> Result<(), TrustError> {
+    // Retained ahead of OpenSSL: HAIP-0040/0080/0085 assert this specific
+    // variant, and OpenSSL reports the case with a less specific code.
     let leaf = parse_cert_pem(leaf_pem)?;
     if is_self_signed(&leaf) {
         return Err(TrustError::SelfSignedLeaf);
     }
-    assert_in_window(&leaf, now_unix)?;
 
-    let mut inter_parsed = Vec::with_capacity(intermediates.len());
+    let leaf_ossl = OsslX509::from_pem(leaf_pem).map_err(|e| TrustError::Parse(e.to_string()))?;
+
+    let mut chain: Stack<OsslX509> = Stack::new().map_err(|e| TrustError::Parse(e.to_string()))?;
     for pem in intermediates {
-        inter_parsed.push(parse_cert_pem(pem)?);
-    }
-
-    // Walk from the leaf's issuer DN upward through intermediates.
-    let mut current_issuer = leaf.tbs_certificate().issuer().clone();
-    for inter in &inter_parsed {
-        if inter.tbs_certificate().subject() == &current_issuer {
-            assert_in_window(inter, now_unix)?;
-            current_issuer = inter.tbs_certificate().issuer().clone();
+        let parsed = parse_cert_pem(pem)?;
+        // A presented root is never trusted: the anchor must come from
+        // configuration. This is defence-in-depth -- OpenSSL already refuses to
+        // bootstrap trust from a self-signed certificate in the untrusted set
+        // (X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN) -- but dropping it here makes
+        // the intent explicit and yields a more accurate error when no anchor is
+        // configured. Google Wallet transmits the Android root inside the chain.
+        if is_self_signed(&parsed) {
+            continue;
         }
+        let cert = OsslX509::from_pem(pem).map_err(|e| TrustError::Parse(e.to_string()))?;
+        chain
+            .push(cert)
+            .map_err(|e| TrustError::Parse(e.to_string()))?;
     }
 
-    // The remaining issuer DN must match a trust anchor's subject.
-    for anchor in &store.anchors {
-        if anchor.tbs_certificate().subject() == &current_issuer {
-            assert_in_window(anchor, now_unix)?;
-            return Ok(());
-        }
-    }
+    // Validity is evaluated at the caller's instant, never the system clock:
+    // callers pass synthetic times (see `expired_leaf_is_rejected`). Baked into
+    // a freshly built store -- see `TrustStore::build_ossl_store` for why.
+    let ossl_store = store.build_ossl_store(now_unix)?;
 
-    Err(TrustError::UntrustedChain)
+    let mut ctx = X509StoreContext::new().map_err(|e| TrustError::Parse(e.to_string()))?;
+    let verified = ctx
+        .init(&ossl_store, &leaf_ossl, &chain, |ctx| {
+            let ok = ctx.verify_cert()?;
+            Ok((ok, ctx.error().as_raw()))
+        })
+        .map_err(|e| TrustError::Parse(e.to_string()))?;
+
+    match verified {
+        (true, _) => Ok(()),
+        (false, code) => Err(map_verify_error(code)),
+    }
+}
+
+/// Translate an OpenSSL verification result code into a `TrustError`.
+fn map_verify_error(code: i32) -> TrustError {
+    match code {
+        X509_V_ERR_CERT_HAS_EXPIRED | X509_V_ERR_CERT_NOT_YET_VALID => TrustError::Expired,
+        X509_V_ERR_CERT_SIGNATURE_FAILURE => TrustError::InvalidSignature,
+        X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT
+        | X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+        | X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT
+        | X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN
+        | X509_V_ERR_INVALID_CA
+        | X509_V_ERR_PATH_LENGTH_EXCEEDED
+        | X509_V_ERR_KEYUSAGE_NO_CERTSIGN => TrustError::UntrustedChain,
+        _ => TrustError::UntrustedChain,
+    }
 }
 
 /// Whether the leaf certificate asserts `expected_dns` as a dNSName SAN.

@@ -113,12 +113,27 @@ cargo test -p foundry-core
 
 ## Gotchas
 
-- **`validate_chain` performs NO cryptographic signature verification.** There
-  is an explicit `TODO(trust-hardening)` in `trust/mod.rs`: `x509-cert` 0.3
-  cannot verify signatures, so the function only (a) rejects a self-signed leaf,
-  (b) checks validity windows, and (c) builds a **DN-based** path from the leaf's
-  issuer up to an anchor's subject. A forged certificate with matching DNs passes.
-  Do not describe this as full X.509 validation, and do not weaken it further.
+- **`validate_chain` cryptographically verifies every link's signature, via
+  OpenSSL `X509_STORE_CTX`.** As of 2026-08-04 this replaced an earlier
+  implementation that only walked Distinguished-Name strings, under which a
+  forged certificate with matching DNs would pass; see
+  `docs/superpowers/specs/2026-08-04-trust-chain-signature-verification-design.md`.
+  `basicConstraints: CA:TRUE`, `keyUsage: keyCertSign` and `pathLenConstraint`
+  are enforced by OpenSSL on every non-leaf certificate. Do not weaken this back
+  to a DN comparison.
+- **`trust/` uses two X.509 libraries on purpose.** `x509-cert` *inspects*
+  (parsing, DNs, validity windows, SANs, SPKI coordinates, `x5c` encoding);
+  OpenSSL *validates* (`validate_chain` path validation). Do not migrate one to
+  the other — `x509-cert` is needed for Android key-attestation extension
+  parsing, and OpenSSL is needed for multi-algorithm path validation.
+- **`validate_chain` deliberately sets no verification purpose.** Setting one
+  enables Extended Key Usage checks, and Android key-attestation certificates
+  carry no EKU — setting a purpose would reject every Google Wallet chain.
+  Covered by
+  `real_android_attestation_chain_validates_against_the_configured_google_root`.
+- **`X509VerifyFlags::PARTIAL_CHAIN` is required,** not optional: a configured
+  trust anchor may be an intermediate rather than a self-signed root. Covered by
+  `an_intermediate_pinned_as_the_anchor_validates_the_leaf`.
 - **`get_kv` does not filter expired rows.** Expiry is enforced only by an
   explicit `purge_expired(now_unix)` sweep; between sweeps an expired row is
   still readable. Callers that care about freshness MUST check the expiry
