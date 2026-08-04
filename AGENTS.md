@@ -277,6 +277,34 @@ e.g. "scoped: `cargo test -p foundry-verifier -p foundry` green" — so the read
 knows what was and was not covered. Claiming a full gate you did not run is
 worse than running none.
 
+### 5.6 Avoid Truncated Output on Large Runs (agent-harness note)
+
+The agent harness's shell tool truncates command output to roughly the last
+2000 lines / 50KB. `cargo test --workspace` routinely exceeds both — a plain
+`cargo test --workspace 2>&1 | tail -N` can silently drop an earlier binary's
+result, including a `FAILED`, off the top of what you actually see. This has
+happened in this repository. Never rely on a bare `tail` of a full-workspace
+run as your only evidence of green.
+
+Instead, capture the whole run to disk and then grep it, so nothing is lost
+to the harness's truncation even if a single terminal view would be:
+
+```bash
+cargo test --workspace 2>&1 | tee /tmp/test-output.log
+grep -c "FAILED" /tmp/test-output.log        # 0 (or no output) means none found
+grep "^test result:" /tmp/test-output.log    # one short line per binary — always fits
+```
+
+`tee` preserves the complete log on disk even when the tool's own display of
+it is truncated. `grep "^test result:"` is the cheap, complete summary: one
+line per test binary (`ok`/failed/ignored counts), reliably short enough to
+read in full, so every binary's outcome is visible even when the raw stdout
+is not. Apply the same pattern to `cargo clippy --workspace --all-targets`
+and any other command whose output can plausibly exceed the truncation
+limit. This is what "seen it pass" in §5.5 actually requires for a
+full-workspace run — every binary's result line, not just whatever the last
+N lines happened to contain.
+
 ---
 
 ## 6. OpenAPI Specification
