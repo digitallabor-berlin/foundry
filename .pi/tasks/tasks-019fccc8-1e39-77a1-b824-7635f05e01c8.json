@@ -82,23 +82,23 @@
       "id": "16",
       "subject": "Task 8: Real-subprocess E2E coverage",
       "description": "crates/foundry/tests/e2e_full_flow.rs — #[ignore]d encrypted request/response round trip through real binary. See plan Task 8.",
-      "status": "in_progress",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217653,
-      "updatedAt": 1785855753065
+      "updatedAt": 1785856087237
     },
     {
       "id": "17",
       "subject": "Task 9: OpenAPI, conformance report, docs, full gate",
       "description": "Regenerate openapi-wallet.json, flip 16 conformance rows, update README/AGENTS.md files, change record, full workspace gate + ignored E2E + clippy --workspace. See plan Task 9.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217655,
-      "updatedAt": 1785851217655
+      "updatedAt": 1785856087240
     }
   ]
 }

@@ -26,12 +26,12 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 |---|---|
 | `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
-| `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model` |
-| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat` |
+| `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
+| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`) |
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
 | `crypto/signer.rs` | `FileSigner` — PEM-file-backed `Signer` implementation |
-| `crypto/jwe.rs` | `encrypt_compact(payload, recipient_public_jwk, alg, enc)` — ECDH-ES JWE compact serialization over `josekit`, the encrypt counterpart to `foundry-verifier`'s decrypt path. Rejects any `alg` other than `ECDH-ES` rather than emitting a header that misdescribes the ciphertext |
+| `crypto/jwe.rs` | `encrypt_compact(payload, recipient_public_jwk, alg, enc)` — ECDH-ES JWE compact serialization over `josekit`, the encrypt counterpart to `foundry-verifier`'s decrypt path. `encrypt_compact_with_kid(payload, recipient_public_jwk, alg, enc, kid)` is the `kid`-echoing sibling `foundry-issuer` uses for the Credential Response, kept separate so `encrypt_compact`'s OpenID4VP wire shape never gains an accidental `kid`. `DecryptionKey` (`from_pem`/`from_pem_file`, `kid()`, `published_jwk()`) and `decrypt_compact(jwe, keys, allowed_enc)` are the Credential Request decrypt path: pre-decryption checks require `alg == ECDH-ES`, `enc` in the caller's allow-list, and a `kid` matching a loaded key. Rejects any `alg` other than `ECDH-ES` rather than emitting a header that misdescribes the ciphertext |
 | `error.rs` | All error enums plus the `CoreError` umbrella and `CoreResult<T>` alias |
 | `obs.rs` | Observability support shared by both engines and the binary: the process-global sensitive-payload flag (`set_sensitive` / `sensitive_enabled`) and the redaction helpers `truncate` and `thumbprint` (RFC 7638). **Contains no log statements** |
 | `pki/mod.rs` | **Dev-only** PKI: `KeyMaterial`, `CertMaterial`, `generate_ec_key`, `new_ca`, `issue_leaf` |
@@ -174,3 +174,10 @@ cargo test -p foundry-core
   GAP-VCI-09) — "a simple string comparison with no normalization", so a
   trailing slash or case difference is a mismatch, not a benign variant. Do not
   add trimming or case-folding to make this check more lenient.
+- **`validate_key_material` parses *every* `keys:` entry's `alg` as a
+  `SignatureAlgorithm`, with no exception for an `issuer.request_encryption`
+  key.** Such a key's config entry therefore names the *key material* as
+  `alg: ES256` — the only thing `SignatureAlgorithm::from_str` accepts — even
+  though its *published* JWK (`DecryptionKey::published_jwk`) always carries
+  `alg: "ECDH-ES"`. Writing `alg: ECDH-ES` in the `keys:` entry itself fails
+  startup validation; it belongs only on the wire, never in this config field.

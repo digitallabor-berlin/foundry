@@ -32,6 +32,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `cli.rs` | Clap definitions: `Cli`, `LogFormat` (+ `From` into the core `LogFormat`), `Command::config_path`, and the sub-action enums `ConfigAction`, `KeysAction`, `CertAction`, `StatusListCommands` |
 | `commands.rs` | Non-serve command implementations: `keys_generate`, `cert_new_ca`, `cert_issue`, `quickstart`, `status_list_get`, `status_list_set`, `status_list_token` |
 | `server.rs` | `AppState`, both routers, every handler, all four error mappers, `spawn_sweeper`, and `serve` |
+| `extract.rs` | `MaybeEncrypted<T>` — the `application/json`-or-`application/jwt` extractor for `POST /credential`, decrypting via `foundry_core::crypto::jwe::decrypt_compact` and setting `was_encrypted` — plus its `MaybeEncryptedRejection` (owns its own error mapping, see Gotchas) and `CredentialResponseBody` (`Json` \| `Jwt`, the latter serialising as a raw compact JWE body with `Content-Type: application/jwt`) |
 | `admin_auth.rs` | `AdminApiKey` (resolved from config literal or env var) and the `require_api_key` middleware |
 | `openapi.rs` | `AdminApiDoc` / `WalletApiDoc` (`utoipa::OpenApi`) and `generate_admin_openapi_spec` / `generate_wallet_openapi_spec` |
 | `logging.rs` | `resolve_level` / `resolve_format` / `resolve_sensitive` (precedence `RUST_LOG` > CLI > config > default), `build_filter`, and `init` |
@@ -60,7 +61,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `/token` | POST | `foundry_issuer::handle_token_request` |
 | `/nonce` | POST | `foundry_issuer::issue_nonce` — **unauthenticated** (OpenID4VCI §7.1); responds with `Cache-Control: no-store` (§7.2) |
 | `/challenge` | POST | `foundry_issuer::issue_attestation_challenge` — **unauthenticated** (mirrors `/nonce`), **conditionally registered**: only mounted when `issuer.wallet_attestation.challenge_mode != Disabled` (ABCA §8); responds with `Cache-Control: no-store` |
-| `/credential` | POST | `foundry_issuer::handle_credential_request` |
+| `/credential` | POST | `extract::MaybeEncrypted` extractor, then `foundry_issuer::handle_credential_request`; response is `extract::CredentialResponseBody` |
 | `/vp/request/:id` | GET | `foundry_verifier::build_signed_request_object` |
 | `/vp/response/:id` | POST | `foundry_verifier::verify_vp_response` |
 | `/statuslists/:id` | GET | `foundry_core::status_list` (signed Status List Token) |
@@ -70,11 +71,15 @@ No admin route is mounted on the wallet router, and vice versa.
 
 ## Key Public Types & Entry Points
 
-- **`server::serve(cfg: Config) -> anyhow::Result<()>`** — the real server entry
-  point: writes both OpenAPI specs, connects storage, spawns the sweeper,
-  resolves the admin key, builds both routers, binds both listeners, and
-  `tokio::try_join!`s them.
-- `server::AppState { storage: Arc<dyn Storage>, config: Arc<Config> }`
+- **`server::serve(cfg: Config, request_decryption_keys: Vec<foundry_core::crypto::jwe::DecryptionKey>) -> anyhow::Result<()>`** —
+  the real server entry point: writes both OpenAPI specs, connects storage,
+  spawns the sweeper, resolves the admin key, builds both routers, binds both
+  listeners, and `tokio::try_join!`s them. `main.rs`'s `Command::Serve` arm
+  calls `cfg.load_request_decryption_keys(base_dir)` to produce the second
+  argument; every other caller (tests) passes `Vec::new()` or builds
+  `AppState` directly via `with_request_decryption_keys`.
+- `server::AppState { storage: Arc<dyn Storage>, config: Arc<Config>, request_decryption_keys: Arc<Vec<foundry_core::crypto::jwe::DecryptionKey>> }`,
+  with builder method `with_request_decryption_keys(keys) -> Self`
 - `server::admin_router(state, api_key) -> Router`, `server::wallet_router(state) -> Router`
 - `server::spawn_sweeper(storage, interval_secs) -> JoinHandle<()>`
 - `admin_auth::AdminApiKey(pub Option<String>)` + `AdminApiKey::resolve(&AdminConfig)`,
@@ -83,7 +88,11 @@ No admin route is mounted on the wallet router, and vice versa.
 - `cli::{Cli, Command, LogFormat, ConfigAction, KeysAction, CertAction, StatusListCommands}`
 - `logging::init(level: &str, format: LogFormat)`
 - Error mappers in `server.rs`: `admin_error_response`, `wallet_error_response`,
-  `verifier_admin_error_response`, `verifier_wallet_error_response`
+  `token_error_response`, `credential_error_response`,
+  `verifier_admin_error_response`, `verifier_wallet_error_response`. `extract.rs`
+  owns a further, separate mapper (`MaybeEncryptedRejection::into_response`) for
+  the one path where a rejection short-circuits before any of the above run —
+  see Gotchas
 
 ## Binding Invariants
 
@@ -235,3 +244,26 @@ cargo test -p foundry --test e2e_full_flow
   and propagates a bind error via `?`, so a port clash on either one aborts
   startup with an error (it does not panic, and it does not fall back to a
   single listener).
+- **`MaybeEncrypted<T>` consumes the request body and therefore MUST be
+  `credential_handler`'s only body-consuming extractor.** Axum extractors run
+  in argument order and a body-consuming extractor can only run once per
+  request; the `AppState`-derived pieces `credential_handler` also needs
+  (bearer token, `DpopPresentation`) must come from other, non-body
+  extractors ahead of it.
+- **`extract.rs` owns a second, independent error mapper, not a gap in
+  coverage.** A `FromRequest` rejection short-circuits before the handler
+  body runs, so `credential_error_response` never sees it — root `AGENTS.md`
+  §4.5's "exactly one log record per typed error" rule is instead satisfied by
+  `MaybeEncryptedRejection::into_response` in `extract.rs`. Its `Issuance`
+  arm deliberately delegates to `wallet_error_response` rather than logging
+  again itself, so the body and log shape match what the engine's own path
+  produces; its `UnsupportedMediaType` arm is the one place this crate logs
+  directly outside the four `server.rs` mappers. Do not add error handling for
+  `MaybeEncrypted` rejections at the `credential_handler` call site — there is
+  none to add; the extractor's `Rejection` type is the only place it can be
+  handled.
+- **`serve()`'s second parameter is the *already-loaded* decryption keys, not
+  a path.** `main.rs` calls `Config::load_request_decryption_keys` before
+  `serve`, so a bad key file fails startup with a typed `ConfigError` before
+  any listener binds, rather than surfacing later as a 415 on every
+  `application/jwt` request.

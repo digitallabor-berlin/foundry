@@ -24,7 +24,7 @@ cargo test --workspace                                 # full gate — end of cy
 | `health.rs` | `/health` and `/ready` both return 200 | `server::health`, `server::ready` |
 | `console.rs` | `/console` returns HTML when enabled, 404 when disabled; QR SVG has explicit dimensions; the DC API trigger buttons and issuance status badge are present, and `.badge.offered` / `.badge.issued` are styled | `server::console_handler`, `admin.console_enabled` |
 | `issuer_offers.rs` | `POST /admin/issuance/offers` succeeds with a valid Bearer token, rejected without one; the response carries a `dc_api_offer` with inlined metadata; `GET /admin/issuance/offers/:id` reports `offered`, returns the `tx_code`, 404s on an unknown id, and **never** returns `pre_authorized_code` / `access_token` / `claims` | `server::create_offer_handler`, `server::get_issuance_offer_handler`, `require_api_key`, `foundry_issuer::create_offer` |
-| `wallet_metadata.rs` | Both `.well-known` metadata documents | `foundry_issuer::build_issuer_metadata`, `build_authorization_server_metadata` |
+| `wallet_metadata.rs` | Both `.well-known` metadata documents, including that `credential_request_encryption`/`credential_response_encryption` are omitted entirely when unconfigured | `foundry_issuer::build_issuer_metadata`, `build_authorization_server_metadata` |
 | `wallet_issuance.rs` | Full `/token` → `/credential` flow with a holder proof; wrong pre-auth code rejected | `foundry_issuer::handle_token_request`, `handle_credential_request`, `verify_holder_proof` |
 | `wallet_verification.rs` | Full `/vp/request/:id` → `/vp/response/:id` flow, including a locally built signed Status List Token that marks an index revoked | `foundry_verifier::build_signed_request_object`, `verify_vp_response`, `check_status` |
 | `wallet_status_list_route.rs` | `GET /statuslists/:id` returns a signed token; 404 for unknown id and when status lists are disabled | `server::status_list_handler`, `foundry_core::status_list` |
@@ -33,17 +33,25 @@ cargo test --workspace                                 # full gate — end of cy
 | `cli_openapi.rs` | `foundry openapi --out` writes a valid spec | `Command::Openapi` |
 | `cli_pki.rs` | `keys generate` produces a loadable key; `cert new-ca` then `cert issue` chain | `commands::keys_generate`, `cert_new_ca`, `cert_issue` |
 | `cli_status_list.rs` | `status-list set` → `get` → `token` round-trip | `commands::status_list_{set,get,token}` |
-| `quickstart.rs` | `quickstart` emits a valid dev PKI and a loadable config | `commands::quickstart` |
-| `e2e_full_flow.rs` | Boots the real binary (`quickstart`, then `serve`) and drives it over HTTP as a wallet: issue → verify → revoke → re-verify | the whole stack |
-| `conformance_http.rs` | HTTP-layer OpenID4VCI/HAIP conformance evidence, including the ABCA `/challenge` endpoint and `challenge_endpoint` metadata (Task 5), `use_attestation_challenge` + `OAuth-Client-Attestation-Challenge` at `/token` (Task 6), and RFC 9449 `DPoP-Nonce` + `use_dpop_nonce` at both `/token` (400) and `/credential` (401) (Task 8) — see `docs/conformance/openid4vc-conformance.md`'s ABCA section and `RFC-9449-0008`/`0014`-`0019` | `server::challenge_handler`, `attestation_challenge_header`, `dpop_nonce_header`, `token_error_response`, `credential_error_response`, `foundry_issuer::validate_client_attestation_pop_jwt`'s check 10, `verify_dpop_proof`'s check 10 |
-| `logging_redaction.rs` | Drives real issuance and presentation flows with planted secrets and asserts none reaches the log at any level; includes the positive control proving `sensitive_payloads` actually unlocks payloads, that one `tx_id` threads a whole flow, and — since 2026-08-04 — that an ABCA `attestation_challenge` and an RFC 9449 DPoP `nonce` are equally never logged, with their own positive control | `http_log`, the four error mappers, `foundry_core::obs`, engine instrumentation |
+| `quickstart.rs` | `quickstart` emits a valid dev PKI and a loadable config; also generates `keys/issuer_request_enc.pem` and ships both encryption config blocks commented out (parses and validates once uncommented) | `commands::quickstart` |
+| `e2e_full_flow.rs` | Boots the real binary (`quickstart`, then `serve`) and drives it over HTTP as a wallet: issue → verify → revoke → re-verify. A second, `#[ignore]`d case boots with both encryption blocks uncommented and drives an encrypted `/credential` round trip using the `kid` the server actually loaded from disk | the whole stack |
+| `conformance_http.rs` | HTTP-layer OpenID4VCI/HAIP conformance evidence, including the ABCA `/challenge` endpoint and `challenge_endpoint` metadata (Task 5), `use_attestation_challenge` + `OAuth-Client-Attestation-Challenge` at `/token` (Task 6), RFC 9449 `DPoP-Nonce` + `use_dpop_nonce` at both `/token` (400) and `/credential` (401) (Task 8), and the Credential Request/Response encryption HTTP rejection matrix — unsupported media type, non-`ECDH-ES` `alg`, missing/unknown `kid`, unadvertised `enc` on either side, response encryption over a plaintext request, an absent `alg`/present `zip` on the wallet's response JWK, and `encryption_required` rejecting a plaintext request — see `docs/conformance/openid4vc-conformance.md`'s ABCA section and `RFC-9449-0008`/`0014`-`0019`, and VCI-0054…0139 for the encryption rows | `server::challenge_handler`, `attestation_challenge_header`, `dpop_nonce_header`, `token_error_response`, `credential_error_response`, `foundry_issuer::validate_client_attestation_pop_jwt`'s check 10, `verify_dpop_proof`'s check 10, `foundry_issuer::check_encryption_policy`, `foundry_core::crypto::jwe::decrypt_compact` |
+| `logging_redaction.rs` | Drives real issuance and presentation flows with planted secrets and asserts none reaches the log at any level; includes the positive control proving `sensitive_payloads` actually unlocks payloads, that one `tx_id` threads a whole flow, that an ABCA `attestation_challenge` and an RFC 9449 DPoP `nonce` are equally never logged (with their own positive control), and that an encrypted issuance never logs the wallet's ephemeral response-encryption JWK or the decrypted credential — including with `sensitive_payloads` enabled, since key material is never unlocked by that flag | `http_log`, the four error mappers, `foundry_core::obs`, engine instrumentation |
 | `instrumentation_hygiene.rs` | Structural guards: every `#[tracing::instrument]` carries `skip_all`, the documented field names are still emitted, payload fields are gated on `obs::sensitive_enabled()` | all instrumented crates |
+| `credential_encryption.rs` | The Credential Endpoint's encrypted request/response path end-to-end over the real routers (not a real subprocess): a wallet reads the issuer's published JWKS from metadata, builds the request JWE itself, and decrypts the response with its own key; also that a plaintext request still gets a plaintext response with encryption enabled, and that `application/jwt` is 415 when the feature is off | `extract::MaybeEncrypted`, `extract::CredentialResponseBody`, `foundry_core::crypto::jwe::{decrypt_compact, encrypt_compact_with_kid}` |
 
 ## Shared Setup Patterns
 
-There is **no shared `support/` module** — each file defines its own local
-helpers (commonly `fn test_config()`, `async fn test_app()` / `setup_test_app()`).
-Two distinct styles are in use:
+**Almost no file shares setup with another** — each defines its own local
+helpers (commonly `fn test_config()`, `async fn test_app()` / `setup_test_app()`),
+deliberately duplicated rather than factored into a common crate-API module.
+The one exception is `support/mod.rs`, used only by `credential_encryption.rs`
+(`mod support;`) — it exists because that file alone needed four
+non-trivial fixture helpers (`setup_without_encryption`, `setup_with_encryption`,
+`issue_pre_auth_offer_and_get_access_token`, `mint_c_nonce`/`create_proof`) and
+splitting them out kept the test file itself readable; it is not a general
+invitation to add more shared helpers here — it still uses the router-injection
+style below, just with its fixtures factored out. Two distinct styles are in use:
 
 1. **Router injection (most files).** Build an `AppState` over a real SQLite
    database in a `tempfile::tempdir()` via

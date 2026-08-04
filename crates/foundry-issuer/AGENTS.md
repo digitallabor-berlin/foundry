@@ -32,10 +32,10 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `dpop.rs` | RFC 9449 DPoP: proof JWT validation (§4.3 checks 2-9, 11-12, plus check 10 — the server-provided `nonce`, gated on `issuer.dpop.nonce_mode` and implemented via `challenge.rs`'s `Domain::DpopNonce`), `htu` normalisation, RFC 7638 `jkt` computation, and `jti` replay claiming (§11.1) under KV namespace `dpop_jti` |
 | `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceResponse`. Delegates its MAC work to `challenge.rs`, which is also where `NonceSecret` now lives (re-exported here for source compatibility) |
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
-| `credential.rs` | `POST /credential` logic: access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc` |
+| `credential.rs` | `POST /credential` logic: `check_encryption_policy` gate, access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc`. Also defines `CredentialResponseEncryptionParams` (the wallet's `credential_response_encryption` request field) |
 | `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
 | `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt` — including, since 2026-08-04, ABCA §9 rule 8's `challenge` claim (check 10), gated on `issuer.wallet_attestation.challenge_mode` and implemented via `challenge.rs`'s `Domain::AttestationChallenge` — and owns anti-replay claiming of the PoP's `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
-| `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config` |
+| `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config`; `build_issuer_metadata` also takes the loaded request-decryption keys and populates `credential_request_encryption`/`credential_response_encryption` (both `Option`, omitted entirely when their config block is absent) |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
 
@@ -50,8 +50,8 @@ Entry point → the endpoint that drives it (routes defined in
 | `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
 | `issue_attestation_challenge(&NonceSecret, ttl_secs, now_unix) -> ChallengeResponse` | `POST /challenge` | wallet-facing, **unauthenticated**, registered only when `challenge_mode != Disabled` |
-| `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix) -> CredentialResponse` | `POST /credential` | wallet-facing |
-| `build_issuer_metadata(&Config) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
+| `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix, request_was_encrypted: bool) -> CredentialResponse` | `POST /credential` | wallet-facing |
+| `build_issuer_metadata(&Config, request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey]) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
 | `build_authorization_server_metadata(&Config) -> AuthorizationServerMetadata` | `GET /.well-known/oauth-authorization-server` | wallet-facing |
 
 Other public surface:
@@ -63,7 +63,11 @@ Other public surface:
   `save_transaction`, `save_transaction_with_indices`, `load_transaction`,
   `load_transaction_by_pre_auth_code`, `load_transaction_by_access_token`.
 - **Proof:** `verify_holder_proof`, `ProofObject`, `VerifiedProof`.
-- **Metadata:** `CredentialConfigurationSupported`, `ProofTypeSupported`.
+- **Metadata:** `CredentialConfigurationSupported`, `ProofTypeSupported`,
+  `CredentialRequestEncryption`, `CredentialResponseEncryption`.
+- **Encryption policy:** `check_encryption_policy(&Config, &CredentialRequest,
+  request_was_encrypted: bool) -> Result<(), IssuanceError>`,
+  `CredentialResponseEncryptionParams`.
 - **Status:** `allocate_status_index(&dyn Storage, credential_type_id, list_size) -> Result<u64, IssuanceError>`.
 - **DPoP (RFC 9449):** `verify_dpop_proof`, `VerifiedDpopProof`, `DpopPresentation`,
   `DpopNoncePolicy`, `access_token_hash`.
@@ -253,6 +257,19 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   default `Disabled`, where no nonce is ever supplied and §11.3 is satisfied
   by construction; under `Optional`/`Required` it actively verifies the claim
   via `challenge::verify(Domain::DpopNonce, ...)`.
+- **`check_encryption_policy` (credential.rs) is the single gate for all three
+  Credential Request/Response encryption rules** — OpenID4VCI L960 (a
+  `credential_response_encryption` request must itself have arrived
+  encrypted), L969/§5.3's stricter-than-spec check (response encryption may
+  not be requested when `issuer.response_encryption` is unconfigured), and
+  L1192 (reject an unencrypted request when `encryption_required` is `true`).
+  It also enforces L1188's per-field checks on the wallet's
+  `credential_response_encryption.jwk`/`enc`/`zip`. Do not duplicate any of
+  these checks at a second call site; `handle_credential_request` calls it
+  exactly once, at the top, before any other request handling, driven by the
+  `request_was_encrypted` flag its caller (`crates/foundry`'s `MaybeEncrypted`
+  extractor) supplies — that flag cannot be spoofed by the request body
+  itself, only by the transport the wallet actually used.
 - **Every issuer-minted opaque freshness value shares one MAC secret, split
   only by `challenge::Domain`.** `c_nonce` (`Domain::CNonce`), the ABCA
   challenge (`Domain::AttestationChallenge`), and the DPoP nonce
