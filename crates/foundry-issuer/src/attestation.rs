@@ -27,6 +27,8 @@ pub trait WalletAttestationVerifier: Send + Sync {
         expected_aud: &str,
         now_unix: i64,
         max_age_secs: u64,
+        challenge_mode: Mode,
+        nonce_secret: &crate::challenge::NonceSecret,
     ) -> Result<Option<PopClaims>, IssuanceError>;
 }
 
@@ -267,6 +269,7 @@ const POP_CLOCK_SKEW_SECS: i64 = 60;
 /// for the full table this mirrors. `skip_all` is mandatory: the argument is
 /// the PoP JWT itself.
 ///
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 fn validate_client_attestation_pop_jwt(
     pop_jwt: &str,
@@ -274,6 +277,8 @@ fn validate_client_attestation_pop_jwt(
     expected_aud: &str,
     now_unix: i64,
     max_age_secs: u64,
+    challenge_mode: Mode,
+    nonce_secret: &crate::challenge::NonceSecret,
 ) -> Result<PopClaims, IssuanceError> {
     // Check 1 (ABCA §5.2 / RFC 7519): exactly three dot-separated parts,
     // base64url-decodable header and payload.
@@ -447,6 +452,65 @@ fn validate_client_attestation_pop_jwt(
     // "The JWT MAY contain other claims. All claims that are not understood
     // by implementations MUST be ignored" -- an exp claim, even an expired
     // one, is simply unrecognised and ignored.
+
+    // Check 10 (ABCA §9 rule 8, §5.2, §8): the `challenge` claim.
+    //
+    // §5.2 makes the claim OPTIONAL at the *format* level. What makes it
+    // mandatory is §8: "If the Authorization Server offers a challenge
+    // endpoint, the Client MUST retrieve a challenge and MUST use this
+    // challenge in the OAuth-Attestation-PoP." `challenge_mode` is exactly that
+    // condition -- see the design doc §4.1.
+    //
+    // §9 rule 9 ("creation time ... as determined by either the iat claim or a
+    // server managed timestamp via the challenge claim") is satisfied on both
+    // paths at once: Check 8's iat window still applies, and a verified
+    // challenge additionally carries a server-minted expiry.
+    match (challenge_mode, payload.get("challenge")) {
+        // No challenge endpoint is offered, so §9 rule 8's precondition ("If
+        // the server provided a challenge value to the client") is false. Per
+        // §5.2 rule 1, a claim we did not ask for "MUST be ignored".
+        (Mode::Disabled, _) => {}
+
+        // Advertised but not yet mandatory: a wallet mid-migration is accepted.
+        (Mode::Optional, None) => {}
+
+        // §6.2: "use_attestation_challenge MUST be used when the Client
+        // Attestation PoP JWT is not using an expected server-provided
+        // challenge."
+        (Mode::Required, None) => {
+            tracing::warn!("client attestation pop carried no challenge claim");
+            return Err(IssuanceError::UseAttestationChallenge(
+                "client attestation pop: a server-provided challenge claim is required".into(),
+            ));
+        }
+
+        (Mode::Optional | Mode::Required, Some(value)) => {
+            // §5.2: the claim "MUST specify a String value", so a non-string is
+            // a rejection, not an ignore.
+            let challenge = value.as_str().ok_or_else(|| {
+                IssuanceError::UseAttestationChallenge(
+                    "client attestation pop: challenge claim is not a string".into(),
+                )
+            })?;
+            crate::challenge::verify(
+                nonce_secret,
+                crate::challenge::Domain::AttestationChallenge,
+                challenge,
+                now_unix,
+            )
+            .map_err(|_| {
+                // Never echoes the presented value: a challenge is a freshness
+                // secret (root `AGENTS.md` §4.5). The distinct failure reasons
+                // are collapsed deliberately too -- telling a client which one
+                // applied would be an oracle.
+                tracing::warn!("client attestation pop carried an unusable challenge");
+                IssuanceError::UseAttestationChallenge(
+                    "client attestation pop: challenge is malformed, expired, or was not issued by this issuer"
+                        .into(),
+                )
+            })?;
+        }
+    }
 
     Ok(PopClaims {
         iss: iss.to_string(),
@@ -682,6 +746,8 @@ impl WalletAttestationVerifier for DefaultAttestationVerifier {
         expected_aud: &str,
         now_unix: i64,
         max_age_secs: u64,
+        challenge_mode: Mode,
+        nonce_secret: &crate::challenge::NonceSecret,
     ) -> Result<Option<PopClaims>, IssuanceError> {
         // Disabled skips validation entirely, even if either header happens
         // to be present and structurally invalid.
@@ -728,6 +794,8 @@ impl WalletAttestationVerifier for DefaultAttestationVerifier {
             expected_aud,
             now_unix,
             max_age_secs,
+            challenge_mode,
+            nonce_secret,
         )?;
         Ok(Some(claims))
     }
@@ -998,6 +1066,8 @@ mod tests {
             "https://issuer.example.com",
             now,
             300,
+            Mode::Disabled,
+            &challenge_secret(),
         )
         .expect_err("a P-384 cnf.jwk cannot verify an ES256 PoP");
         assert!(
@@ -1023,6 +1093,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1044,6 +1116,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::Trust(_)));
@@ -1072,6 +1146,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1100,6 +1176,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1128,6 +1206,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1156,6 +1236,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1176,6 +1258,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1199,6 +1283,8 @@ mod tests {
                 POP_TEST_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1260,6 +1346,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .expect("Disabled must skip all validation, even with structurally invalid inputs");
         assert!(result.is_none());
@@ -1271,7 +1359,17 @@ mod tests {
         let store = TrustStore::from_pems(&[]).unwrap();
 
         let err = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Required, None, None, &store, MATRIX_AUD, now, 300)
+            .verify_wallet_attestation(
+                Mode::Required,
+                None,
+                None,
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+                Mode::Disabled,
+                &test_secret(),
+            )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
@@ -1290,6 +1388,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1311,6 +1411,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1331,6 +1433,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .expect("both attestation and a matching PoP present must be accepted");
         let claims = result.expect("must return Some(claims)");
@@ -1343,7 +1447,17 @@ mod tests {
         let store = TrustStore::from_pems(&[]).unwrap();
 
         let result = DefaultAttestationVerifier
-            .verify_wallet_attestation(Mode::Optional, None, None, &store, MATRIX_AUD, now, 300)
+            .verify_wallet_attestation(
+                Mode::Optional,
+                None,
+                None,
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+                Mode::Disabled,
+                &test_secret(),
+            )
             .expect("Optional with both absent must be Ok(None)");
         assert!(result.is_none());
     }
@@ -1364,6 +1478,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1386,6 +1502,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1406,6 +1524,8 @@ mod tests {
                 MATRIX_AUD,
                 now,
                 300,
+                Mode::Disabled,
+                &test_secret(),
             )
             .expect("both present and matching under Optional must be accepted");
         assert!(result.is_some());
@@ -1624,6 +1744,322 @@ mod tests {
         serde_json::json!({ "iss": iss, "aud": aud, "jti": jti, "iat": iat })
     }
 
+    // -- ABCA §8 challenge claim (check 9) --
+
+    fn challenge_secret() -> crate::challenge::NonceSecret {
+        crate::challenge::NonceSecret::from_bytes([3u8; 32])
+    }
+
+    /// A challenge minted the way `POST /challenge` mints one.
+    fn fresh_challenge(now: i64) -> String {
+        crate::challenge::mint(
+            &challenge_secret(),
+            crate::challenge::Domain::AttestationChallenge,
+            300,
+            now,
+        )
+        .expect("mint challenge")
+    }
+
+    #[test]
+    fn disabled_challenge_mode_accepts_a_pop_without_a_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("Disabled mode with no challenge claim must be accepted");
+    }
+
+    /// ABCA §5.2 rule 1: a claim we never asked for "MUST be ignored".
+    #[test]
+    fn disabled_challenge_mode_ignores_a_garbage_challenge_claim() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!("not-a-real-challenge");
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("Disabled mode must ignore any challenge claim, garbage or not");
+    }
+
+    #[test]
+    fn optional_challenge_mode_accepts_a_pop_without_a_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Optional,
+            &challenge_secret(),
+        )
+        .expect("Optional mode must accept an absent challenge claim");
+    }
+
+    #[test]
+    fn optional_challenge_mode_verifies_a_present_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(fresh_challenge(now));
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Optional,
+            &challenge_secret(),
+        )
+        .expect("Optional mode must accept a valid, present challenge");
+    }
+
+    #[test]
+    fn optional_challenge_mode_rejects_a_bad_present_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!("garbage");
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Optional,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+    }
+
+    #[test]
+    fn required_challenge_mode_rejects_a_pop_without_a_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+        assert_eq!(err.kind(), "use_attestation_challenge");
+    }
+
+    #[test]
+    fn required_challenge_mode_accepts_a_fresh_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(fresh_challenge(now));
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .expect("Required mode must accept a fresh, valid challenge");
+    }
+
+    /// Isolates the *challenge's own* expiry from Check 8's `iat` staleness
+    /// window: the challenge is minted well in the past (long expired by
+    /// `now`), but `iat` is fresh at `now`, so Check 8 passes and this test
+    /// actually exercises Check 10's expiry path rather than tripping Check 8
+    /// first.
+    #[test]
+    fn an_expired_challenge_is_rejected() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let stale_challenge = crate::challenge::mint(
+            &challenge_secret(),
+            crate::challenge::Domain::AttestationChallenge,
+            300,
+            now - 1_000,
+        )
+        .expect("mint stale challenge");
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(stale_challenge);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+    }
+
+    #[test]
+    fn a_challenge_from_another_issuer_is_rejected() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let other_secret = crate::challenge::NonceSecret::from_bytes([4u8; 32]);
+        let other_challenge = crate::challenge::mint(
+            &other_secret,
+            crate::challenge::Domain::AttestationChallenge,
+            300,
+            now,
+        )
+        .unwrap();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(other_challenge);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+    }
+
+    /// The domain-separation guard at this layer: a `c_nonce` is a structurally
+    /// valid MAC under the very same process secret, and must still be refused
+    /// here. Without `challenge.rs`'s domain label this test would fail.
+    #[test]
+    fn a_c_nonce_is_not_accepted_as_an_attestation_challenge() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let c_nonce = crate::challenge::mint(
+            &challenge_secret(),
+            crate::challenge::Domain::CNonce,
+            300,
+            now,
+        )
+        .expect("mint c_nonce");
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(c_nonce);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+    }
+
+    /// ABCA §5.2: the claim "MUST specify a String value".
+    #[test]
+    fn a_non_string_challenge_claim_is_rejected() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
+        payload["challenge"] = serde_json::json!(12345);
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, IssuanceError::UseAttestationChallenge(_)));
+    }
+
+    /// Check 8 (`iat`) must run before Check 9: a stale PoP is reported as
+    /// stale, not as a challenge problem.
+    #[test]
+    fn a_stale_iat_is_reported_as_stale_not_as_a_challenge_problem() {
+        let (attestation, signer) = pop_attestation_and_signer();
+        let now = now_secs();
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let mut payload = pop_payload(
+            POP_TEST_SUB,
+            serde_json::json!(POP_TEST_AUD),
+            "jti-1",
+            now - 10_000,
+        );
+        payload["challenge"] = serde_json::json!(fresh_challenge(now));
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Required,
+            &challenge_secret(),
+        )
+        .unwrap_err();
+        assert!(
+            !matches!(err, IssuanceError::UseAttestationChallenge(_)),
+            "a stale iat must be reported as stale (Check 8), not as a challenge problem: {err:?}"
+        );
+    }
+
     #[test]
     fn accepts_a_valid_pop_jwt_and_returns_its_claims() {
         let (attestation, signer) = pop_attestation_and_signer();
@@ -1632,9 +2068,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let claims =
-            validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-                .expect("a valid PoP must be accepted");
+        let claims = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("a valid PoP must be accepted");
         assert_eq!(claims.iss, POP_TEST_SUB);
         assert_eq!(claims.jti, "jti-1");
         assert_eq!(claims.iat, now);
@@ -1644,9 +2087,16 @@ mod tests {
     fn rejects_pop_that_is_not_three_dot_separated_parts() {
         let (attestation, _signer) = pop_attestation_and_signer();
         let now = now_secs();
-        let err =
-            validate_client_attestation_pop_jwt("only.two", &attestation, POP_TEST_AUD, now, 300)
-                .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            "only.two",
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1660,6 +2110,8 @@ mod tests {
             POP_TEST_AUD,
             now,
             300,
+            Mode::Disabled,
+            &challenge_secret(),
         )
         .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1678,6 +2130,8 @@ mod tests {
             POP_TEST_AUD,
             now,
             300,
+            Mode::Disabled,
+            &challenge_secret(),
         )
         .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
@@ -1691,8 +2145,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1704,8 +2166,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1717,8 +2187,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1736,8 +2214,16 @@ mod tests {
             .unwrap();
         let jwt = sign_pop(&header, &payload, &hmac_signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1750,8 +2236,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "jti-1", now);
         let jwt = sign_pop(&header, &payload, &other_signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1763,8 +2257,16 @@ mod tests {
         let payload = serde_json::json!({ "aud": POP_TEST_AUD, "jti": "jti-1", "iat": now });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1781,8 +2283,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1794,8 +2304,16 @@ mod tests {
         let payload = serde_json::json!({ "iss": POP_TEST_SUB, "jti": "jti-1", "iat": now });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1812,8 +2330,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1830,8 +2356,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .expect("an aud array containing expected_aud must be accepted");
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("an aud array containing expected_aud must be accepted");
     }
 
     #[test]
@@ -1850,8 +2384,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1870,9 +2412,16 @@ mod tests {
             now,
         );
         let prefix_jwt = sign_pop(&header, &prefix_payload, &signer);
-        let err =
-            validate_client_attestation_pop_jwt(&prefix_jwt, &attestation, POP_TEST_AUD, now, 300)
-                .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &prefix_jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
 
         let upper_payload = pop_payload(
@@ -1882,9 +2431,16 @@ mod tests {
             now,
         );
         let upper_jwt = sign_pop(&header, &upper_payload, &signer);
-        let err =
-            validate_client_attestation_pop_jwt(&upper_jwt, &attestation, POP_TEST_AUD, now, 300)
-                .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &upper_jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1896,8 +2452,16 @@ mod tests {
         let payload = serde_json::json!({ "iss": POP_TEST_SUB, "aud": POP_TEST_AUD, "iat": now });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1909,8 +2473,16 @@ mod tests {
         let payload = pop_payload(POP_TEST_SUB, serde_json::json!(POP_TEST_AUD), "", now);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1924,8 +2496,16 @@ mod tests {
         });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1938,8 +2518,16 @@ mod tests {
             serde_json::json!({ "iss": POP_TEST_SUB, "aud": POP_TEST_AUD, "jti": "jti-1" });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1953,8 +2541,16 @@ mod tests {
         });
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1971,8 +2567,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -1989,8 +2593,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -2037,9 +2649,16 @@ mod tests {
             );
             let jwt = sign_pop(&header, &payload, &signer);
 
-            let err =
-                validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-                    .expect_err("a boundary iat must be rejected, not accepted or panicked on");
+            let err = validate_client_attestation_pop_jwt(
+                &jwt,
+                &attestation,
+                POP_TEST_AUD,
+                now,
+                300,
+                Mode::Disabled,
+                &challenge_secret(),
+            )
+            .expect_err("a boundary iat must be rejected, not accepted or panicked on");
             assert!(
                 matches!(err, IssuanceError::InvalidClient(_)),
                 "iat = {label}: expected InvalidClient, got {err:?}"
@@ -2074,8 +2693,16 @@ mod tests {
         );
         let jwt = sign_pop(&header, &payload, &signer);
 
-        validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .expect("an iat slightly in the future, within skew, must be accepted");
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("an iat slightly in the future, within skew, must be accepted");
     }
 
     #[test]
@@ -2087,8 +2714,16 @@ mod tests {
         payload["nbf"] = serde_json::json!(now + 61);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        let err = validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .unwrap_err();
+        let err = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
     }
 
@@ -2103,8 +2738,16 @@ mod tests {
         payload["some_future_extension_claim"] = serde_json::json!("unrecognised-value");
         let jwt = sign_pop(&header, &payload, &signer);
 
-        validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .expect("an unrecognised extra claim must be ignored, not rejected");
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("an unrecognised extra claim must be ignored, not rejected");
     }
 
     /// ABCA removed `exp` from the PoP JWT in draft -06; this pins the
@@ -2120,8 +2763,16 @@ mod tests {
         payload["exp"] = serde_json::json!(now - 1_000_000);
         let jwt = sign_pop(&header, &payload, &signer);
 
-        validate_client_attestation_pop_jwt(&jwt, &attestation, POP_TEST_AUD, now, 300)
-            .expect("an exp claim, even an already-past one, must be ignored, not rejected");
+        validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("an exp claim, even an already-past one, must be ignored, not rejected");
     }
 
     // -- claim_pop_jti: atomic replay detection (GAP-VCI-14) --

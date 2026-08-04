@@ -669,6 +669,7 @@ async fn token_handler(
         pop_hdr,
         &state.config.issuer.dpop,
         &dpop_presentation,
+        state.nonce_secret.as_ref(),
         &issuer_identifier,
         now,
     )
