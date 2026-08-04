@@ -248,3 +248,84 @@ fn a_non_ca_certificate_cannot_act_as_an_intermediate() {
     validate_chain(legitimate.cert_pem.as_bytes(), &[], &store, now_secs())
         .expect("a leaf signed by the real CA must validate");
 }
+
+#[test]
+fn an_intermediate_pinned_as_the_anchor_validates_the_leaf() {
+    // foundry has always allowed a configured anchor to be a non-self-signed
+    // certificate. This is what X509VerifyFlags::PARTIAL_CHAIN buys; without it
+    // OpenSSL insists on reaching a self-signed root and this test fails.
+    //
+    // The real Android chain provides a ready-made three-level path: pin the
+    // P-384 TEE intermediate as the sole anchor and present only the P-256 one.
+    let store = TrustStore::from_pems(&[ANDROID_INT_P384.to_vec()]).expect("store");
+    validate_chain(
+        ANDROID_LEAF,
+        &[ANDROID_INT_P256.to_vec()],
+        &store,
+        ANDROID_PINNED_NOW,
+    )
+    .expect("an intermediate pinned as the anchor must validate the leaf");
+}
+
+/// Build a self-signed CA and a leaf it signs, both keyed on `alg`.
+///
+/// Driven through `rcgen` directly rather than `foundry_core::pki`, because
+/// `pki::new_ca`/`issue_leaf` call `KeyPair::generate()`, which is hardcoded to
+/// `PKCS_ECDSA_P256_SHA256`. Returns `(ca_pem, leaf_pem)`.
+fn ca_and_leaf_on(alg: &'static rcgen::SignatureAlgorithm, cn: &str) -> (String, String) {
+    use rcgen::{
+        BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+        KeyUsagePurpose,
+    };
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::now_utc();
+
+    let ca_key = KeyPair::generate_for(alg).expect("generate CA key");
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let mut ca_dn = DistinguishedName::new();
+    ca_dn.push(DnType::CommonName, format!("{cn} Root CA"));
+    ca_params.distinguished_name = ca_dn;
+    ca_params.not_before = now - Duration::days(1);
+    ca_params.not_after = now + Duration::days(3650);
+    let ca_pem = ca_params.self_signed(&ca_key).expect("self-sign CA").pem();
+
+    // `Issuer::from_ca_cert_pem` takes the signing key by value.
+    let issuer = Issuer::from_ca_cert_pem(&ca_pem, ca_key).expect("build issuer");
+    let leaf_key = KeyPair::generate_for(alg).expect("generate leaf key");
+    let mut leaf_params = CertificateParams::new(vec![cn.to_string()]).expect("leaf params");
+    let mut leaf_dn = DistinguishedName::new();
+    leaf_dn.push(DnType::CommonName, cn);
+    leaf_params.distinguished_name = leaf_dn;
+    leaf_params.is_ca = IsCa::NoCa;
+    leaf_params.use_authority_key_identifier_extension = true;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.not_before = now - Duration::days(1);
+    leaf_params.not_after = now + Duration::days(365);
+    let leaf_pem = leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .expect("sign leaf")
+        .pem();
+
+    (ca_pem, leaf_pem)
+}
+
+#[test]
+fn chains_on_p256_and_p384_validate() {
+    // P-521 is intentionally absent: rcgen's PKCS_ECDSA_P521_SHA512 requires the
+    // aws_lc_rs backend and foundry builds rcgen with default features (ring).
+    // OpenSSL verifies P-521 natively, so this is a fixture limitation only.
+    for (label, alg) in [
+        ("p256", &rcgen::PKCS_ECDSA_P256_SHA256),
+        ("p384", &rcgen::PKCS_ECDSA_P384_SHA384),
+    ] {
+        let cn = format!("{label}.curve.test.local");
+        let (ca_pem, leaf_pem) = ca_and_leaf_on(alg, &cn);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()])
+            .unwrap_or_else(|e| panic!("build store for {label}: {e}"));
+        validate_chain(leaf_pem.as_bytes(), &[], &store, now_secs())
+            .unwrap_or_else(|e| panic!("{label} chain must validate: {e}"));
+    }
+}
