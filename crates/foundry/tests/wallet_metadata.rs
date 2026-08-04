@@ -141,3 +141,26 @@ async fn serves_authorization_server_metadata() {
         serde_json::json!(["ES256"])
     );
 }
+
+#[tokio::test]
+async fn metadata_omits_encryption_objects_when_unconfigured() {
+    let app = test_app().await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/openid-credential-issuer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // The zero-blast-radius guarantee: an unconfigured deployment's document is
+    // exactly what it was before encryption existed.
+    assert!(json.get("credential_request_encryption").is_none());
+    assert!(json.get("credential_response_encryption").is_none());
+}

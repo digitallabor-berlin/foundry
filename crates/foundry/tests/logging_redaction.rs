@@ -1286,3 +1286,231 @@ async fn one_tx_id_threads_the_whole_verification_flow() {
          creation and the response"
     );
 }
+
+// ---------------------------------------------------------------------------
+// OpenID4VCI Credential Request/Response encryption: the decrypted request
+// body and the wallet's ephemeral response-encryption key are new secrets
+// introduced by this change. Root AGENTS.md sect-4.5 makes their redaction a
+// *behavioural* requirement, so it is asserted here, not only reviewed.
+// ---------------------------------------------------------------------------
+
+/// `setup()` plus both encryption blocks and one generated decryption key.
+async fn setup_with_encryption() -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup().await;
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.request_encryption = Some(foundry_core::config::RequestEncryptionConfig {
+        keys: vec!["issuer_request_enc".to_string()],
+        enc_values_supported: vec!["A128GCM".to_string(), "A256GCM".to_string()],
+        encryption_required: false,
+    });
+    cfg.issuer.response_encryption = Some(foundry_core::config::ResponseEncryptionConfig {
+        enc_values_supported: vec!["A128GCM".to_string(), "A256GCM".to_string()],
+        encryption_required: false,
+    });
+    let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).expect("enc key");
+    let key = foundry_core::crypto::jwe::DecryptionKey::from_pem(km.private_pem.as_bytes())
+        .expect("decryption key");
+    let state =
+        AppState::new(state.storage.clone(), Arc::new(cfg)).with_request_decryption_keys(vec![key]);
+    (state, dir)
+}
+
+/// Drive an encrypted issuance and return the uniquely identifiable secrets that
+/// must not appear in the log: the wallet's ephemeral encryption JWK `x`
+/// coordinate, and the issued credential string.
+///
+/// Mirrors `crates/foundry/tests/credential_encryption.rs`'s
+/// `an_encrypted_request_yields_an_encrypted_response` -- same key generation,
+/// same metadata read, same decrypt -- but returns the two values instead of
+/// asserting on them.
+async fn drive_encrypted_issuance(state: &AppState) -> (String, String) {
+    let admin = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+    let offer_res = admin
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_type_id": "pid",
+                        "claims": { "given_name": PLANTED_CLAIM },
+                        "tx_code_required": false
+                    })
+                    .to_string(),
+                ))
+                .expect("offer request"),
+        )
+        .await
+        .expect("offer response");
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer = body_json(offer_res).await;
+    let pre_auth_code = offer["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized code")
+        .to_string();
+
+    let token_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .expect("token request"),
+        )
+        .await
+        .expect("token response");
+    assert_eq!(token_res.status(), StatusCode::OK);
+    let access_token = body_json(token_res).await["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_string();
+
+    let nonce_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nonce")
+                .body(Body::empty())
+                .expect("nonce request"),
+        )
+        .await
+        .expect("nonce response");
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    let c_nonce = body_json(nonce_res).await["c_nonce"]
+        .as_str()
+        .expect("c_nonce")
+        .to_string();
+    let proof_jwt = create_proof(&c_nonce);
+
+    let meta_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/openid-credential-issuer")
+                .body(Body::empty())
+                .expect("metadata request"),
+        )
+        .await
+        .expect("metadata response");
+    assert_eq!(meta_res.status(), StatusCode::OK);
+    let meta = body_json(meta_res).await;
+    let issuer_jwk = meta["credential_request_encryption"]["jwks"]["keys"][0].clone();
+    let issuer_kid = issuer_jwk["kid"].as_str().expect("kid").to_string();
+
+    let kp = EcKeyPair::generate(EcCurve::P256).expect("wallet enc keypair");
+    let mut wallet_public = serde_json::to_value(kp.to_jwk_public_key()).expect("public jwk");
+    if let Some(o) = wallet_public.as_object_mut() {
+        o.insert("alg".to_string(), serde_json::json!("ECDH-ES"));
+    }
+    let wallet_jwk_x = wallet_public["x"]
+        .as_str()
+        .expect("x coordinate")
+        .to_string();
+    let wallet_private = serde_json::to_value(kp.to_jwk_private_key()).expect("private jwk");
+
+    let body = serde_json::json!({
+        "credential_configuration_id": "pid",
+        "format": "dc+sd-jwt",
+        "proofs": { "jwt": [proof_jwt] },
+        "credential_response_encryption": { "jwk": wallet_public, "enc": "A128GCM" },
+    });
+    let jwe = foundry_core::crypto::jwe::encrypt_compact_with_kid(
+        &body,
+        &issuer_jwk,
+        "ECDH-ES",
+        "A256GCM",
+        Some(&issuer_kid),
+    )
+    .expect("encrypt request");
+
+    let cred_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credential")
+                .header(header::CONTENT_TYPE, "application/jwt")
+                .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                .body(Body::from(jwe))
+                .expect("credential request"),
+        )
+        .await
+        .expect("credential response");
+    assert_eq!(cred_res.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let compact = String::from_utf8(bytes.to_vec()).expect("utf8");
+    let jwk = josekit::jwk::Jwk::from_bytes(
+        serde_json::to_string(&wallet_private)
+            .expect("jwk json")
+            .as_bytes(),
+    )
+    .expect("jwk");
+    let decrypter = josekit::jwe::ECDH_ES
+        .decrypter_from_jwk(&jwk)
+        .expect("decrypter");
+    let (payload, _jwe_header) =
+        josekit::jwt::decode_with_decrypter(&compact, &decrypter).expect("decrypt");
+    let decrypted = serde_json::to_value(payload.claims_set()).expect("claims");
+    let credential = decrypted["credentials"][0]["credential"]
+        .as_str()
+        .expect("credential")
+        .to_string();
+
+    (wallet_jwk_x, credential)
+}
+
+#[tokio::test]
+async fn encrypted_issuance_never_logs_the_decrypted_request_or_the_wallet_jwk() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir) = setup_with_encryption().await;
+    let (guard, log) = capture_at_trace();
+    let (wallet_jwk_x, credential) = drive_encrypted_issuance(&state).await;
+    drop(guard);
+
+    assert!(
+        !log.events().is_empty(),
+        "captured nothing; the negative assertions below would be vacuous"
+    );
+
+    for (label, secret) in [
+        ("wallet jwk x coordinate", &wallet_jwk_x),
+        ("issued credential", &credential),
+    ] {
+        assert!(
+            !secret.is_empty(),
+            "{label} was empty, so its assertion would be vacuous"
+        );
+        assert!(!log.contains_value(secret), "{label} leaked into the log");
+    }
+}
+
+#[tokio::test]
+async fn encrypted_issuance_leaks_nothing_even_with_sensitive_payloads_enabled() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(true);
+
+    let (state, _dir) = setup_with_encryption().await;
+    let (guard, log) = capture_at_trace();
+    let (wallet_jwk_x, _credential) = drive_encrypted_issuance(&state).await;
+    drop(guard);
+    foundry_core::obs::set_sensitive(false);
+
+    assert!(!log.events().is_empty(), "captured nothing");
+    assert!(
+        !wallet_jwk_x.is_empty(),
+        "wallet jwk x coordinate was empty, so its assertion would be vacuous"
+    );
+    assert!(
+        !log.contains_value(&wallet_jwk_x),
+        "key material is never unlocked by the sensitive-payloads flag"
+    );
+}

@@ -49,34 +49,34 @@
       "id": "13",
       "subject": "Task 5: MaybeEncrypted extractor and encrypted response body",
       "description": "crates/foundry/src/extract.rs (new), AppState/serve/main.rs wiring, credential_handler rewrite, tests/credential_encryption.rs + tests/support/mod.rs. See plan Task 5.",
-      "status": "in_progress",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217649,
-      "updatedAt": 1785853564852
+      "updatedAt": 1785854657279
     },
     {
       "id": "14",
       "subject": "Task 6: HTTP rejection matrix",
       "description": "crates/foundry/tests/conformance_http.rs — one test per conformance row (VCI-0054,0055,0056,0063,0098,0100,0101,0135, required-encryption). See plan Task 6.",
-      "status": "pending",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217651,
-      "updatedAt": 1785851217651
+      "updatedAt": 1785854853488
     },
     {
       "id": "15",
       "subject": "Task 7: quickstart, metadata absence, redaction gate",
       "description": "crates/foundry/src/commands.rs quickstart key gen + config template; tests/quickstart.rs, tests/wallet_metadata.rs, tests/logging_redaction.rs. See plan Task 7.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217652,
-      "updatedAt": 1785851217652
+      "updatedAt": 1785854853489
     },
     {
       "id": "16",

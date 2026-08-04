@@ -66,3 +66,26 @@ fn quickstart_emits_valid_pki_and_config() {
     // caught it until an operator referenced the query.
     assert_named_queries_are_valid_dcql(&cfg, "quickstart scaffold");
 }
+
+#[test]
+fn quickstart_generates_a_request_encryption_key_but_leaves_it_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.yaml");
+    commands::quickstart(dir.path(), &cfg_path).unwrap();
+
+    assert!(
+        dir.path().join("keys/issuer_request_enc.pem").exists(),
+        "an operator enabling request encryption must not have to generate a key by hand"
+    );
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(
+        text.contains("# request_encryption:"),
+        "the block must ship commented out so quickstart stays default-off"
+    );
+
+    // The emitted config must still parse and validate with encryption absent.
+    let cfg = Config::load(&cfg_path).unwrap();
+    cfg.validate().unwrap();
+    assert!(cfg.issuer.request_encryption.is_none());
+    assert!(cfg.issuer.response_encryption.is_none());
+}

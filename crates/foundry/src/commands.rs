@@ -101,6 +101,19 @@ pub fn quickstart(dir: &Path, out_config: &Path) -> anyhow::Result<()> {
         )?;
     }
 
+    // The Credential Request decryption key is an ECDH-ES key agreement key, not
+    // a signing key, so it gets no x5c leaf: OpenID4VCI L1373 publishes it as a
+    // bare JWK in `credential_request_encryption.jwks`. Generated unconditionally
+    // so enabling the (commented-out) config block needs no extra step; the
+    // `keys:` entry's `alg: ES256` names the key material, since
+    // `validate_key_material` parses every entry's `alg` as a signature
+    // algorithm.
+    let enc = generate_ec_key(SignatureAlgorithm::Es256)?;
+    std::fs::write(
+        keys_dir.join("issuer_request_enc.pem"),
+        enc.private_pem.as_bytes(),
+    )?;
+
     std::fs::write(out_config, QUICKSTART_CONFIG.as_bytes())?;
 
     tracing::warn!("quickstart PKI is DEV/TEST ONLY — do not use in production");
@@ -269,6 +282,9 @@ keys:
     private_key: ./keys/statuslist_signer.pem
     x5c: ./keys/statuslist_signer-chain.pem
     alg: ES256
+  issuer_request_enc:
+    private_key: ./keys/issuer_request_enc.pem
+    alg: ES256
 trust_anchors:
   - name: foundry-dev-root
     certs: ./trust/root.pem
@@ -281,6 +297,18 @@ issuer:
     signing_key: statuslist_signer
     list_size: 1048576
     public_base_url: https://localhost:8443/statuslists
+  # OpenID4VCI Credential Request / Response encryption on top of TLS
+  # (§Credential Request L848, §Credential Response L960, §Encrypted Messages
+  # L1183). Both default to OFF; uncomment to enable. `request_encryption` must
+  # be enabled for `response_encryption` to be usable, because L960 requires a
+  # request carrying `credential_response_encryption` to itself be encrypted.
+  # request_encryption:
+  #   keys: [issuer_request_enc]
+  #   enc_values_supported: [A128GCM, A256GCM]
+  #   encryption_required: false
+  # response_encryption:
+  #   enc_values_supported: [A128GCM, A256GCM]
+  #   encryption_required: false
 credential_types:
   - id: pid
     format: dc+sd-jwt
