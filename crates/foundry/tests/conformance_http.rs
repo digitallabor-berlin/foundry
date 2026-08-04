@@ -612,6 +612,145 @@ async fn vci_0117_0119_issuer_metadata_endpoint_returns_http_200_and_json_conten
     );
 }
 
+/// Same shape as `setup_test_app`, but with `issuer.wallet_attestation.challenge_mode`
+/// overridden. `Config` derives `Clone`, so the fixture is rebuilt rather than
+/// mutated in place -- `AppState.config` is an `Arc<Config>`.
+async fn setup_test_app_with_challenge_mode(mode: Mode) -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup_test_app().await;
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.wallet_attestation.challenge_mode = mode;
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    (state, dir)
+}
+
+// ---------------------------------------------------------------------------
+// ABCA draft -07 §8: the Challenge Endpoint. Task 5 of the ABCA
+// challenge-retrieval / DPoP-nonce plan
+// (docs/superpowers/plans/2026-08-04-abca-challenge-and-dpop-nonce-plan.md).
+// ---------------------------------------------------------------------------
+
+/// ABCA §8: "The Authorization Server MUST make the response uncacheable by
+/// adding a Cache-Control header field including the value no-store."
+#[tokio::test]
+async fn challenge_endpoint_mints_a_challenge_when_enabled() {
+    let (state, _dir) = setup_test_app_with_challenge_mode(Mode::Optional).await;
+    let wallet_app = wallet_router(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/challenge")
+        .body(Body::empty())
+        .unwrap();
+    let res = wallet_app.oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        res.headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok()),
+        Some("no-store")
+    );
+    let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(!body["attestation_challenge"]
+        .as_str()
+        .expect("attestation_challenge")
+        .is_empty());
+}
+
+/// The route is not registered when the mechanism is disabled, so a wallet
+/// cannot be misled into thinking ABCA §8 is supported.
+#[tokio::test]
+async fn challenge_endpoint_is_absent_when_disabled() {
+    let (state, _dir) = setup_test_app().await; // challenge_mode: Mode::Disabled (the default)
+    let wallet_app = wallet_router(state.clone());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/challenge")
+        .body(Body::empty())
+        .unwrap();
+    let res = wallet_app.oneshot(req).await.unwrap();
+
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+/// ABCA §8 unpredictability, exercised at the HTTP layer.
+#[tokio::test]
+async fn successive_challenges_differ() {
+    let (state, _dir) = setup_test_app_with_challenge_mode(Mode::Optional).await;
+
+    let fetch = || {
+        let wallet_app = wallet_router(state.clone());
+        async move {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/challenge")
+                .body(Body::empty())
+                .unwrap();
+            let res = wallet_app.oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body_bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+            body["attestation_challenge"].as_str().unwrap().to_string()
+        }
+    };
+
+    let a = fetch().await;
+    let b = fetch().await;
+    assert_ne!(a, b);
+}
+
+/// The route's registration and the metadata field's presence must never
+/// disagree -- either both signal support, or neither does.
+#[tokio::test]
+async fn metadata_and_route_availability_agree() {
+    for mode in [Mode::Optional, Mode::Disabled] {
+        let (state, _dir) = setup_test_app_with_challenge_mode(mode.clone()).await;
+        let wallet_app = wallet_router(state.clone());
+
+        let meta_req = Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-authorization-server")
+            .body(Body::empty())
+            .unwrap();
+        let meta_res = wallet_app.oneshot(meta_req).await.unwrap();
+        assert_eq!(meta_res.status(), StatusCode::OK);
+        let meta_bytes = axum::body::to_bytes(meta_res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let meta_json: serde_json::Value = serde_json::from_slice(&meta_bytes).unwrap();
+        let metadata_advertises = meta_json.get("challenge_endpoint").is_some();
+
+        let wallet_app = wallet_router(state.clone());
+        let challenge_req = Request::builder()
+            .method("POST")
+            .uri("/challenge")
+            .body(Body::empty())
+            .unwrap();
+        let challenge_res = wallet_app.oneshot(challenge_req).await.unwrap();
+        let route_exists = challenge_res.status() == StatusCode::OK;
+
+        assert_eq!(
+            metadata_advertises, route_exists,
+            "metadata and route availability disagree for {mode:?}: \
+             advertises={metadata_advertises}, route_exists={route_exists}"
+        );
+        match mode {
+            Mode::Optional => assert!(route_exists, "expected the route to exist under Optional"),
+            Mode::Disabled => assert!(
+                !route_exists,
+                "expected the route to be absent under Disabled"
+            ),
+            Mode::Required => unreachable!("not exercised by this test"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // GAP-VCI-11 — OpenID4VCI Credential Issuer Metadata (L1312): Issuers
 // publishing metadata MUST make it available at the path formed by inserting

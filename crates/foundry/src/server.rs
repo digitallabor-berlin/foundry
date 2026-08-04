@@ -10,9 +10,9 @@ use axum::{
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
 use foundry_issuer::{
-    AuthorizationServerMetadata, CreateOfferRequest, CreateOfferResponse, CredentialIssuerMetadata,
-    CredentialRequest, CredentialResponse, IssuanceState, NonceResponse, TokenRequest,
-    TokenResponse,
+    AuthorizationServerMetadata, ChallengeResponse, CreateOfferRequest, CreateOfferResponse,
+    CredentialIssuerMetadata, CredentialRequest, CredentialResponse, IssuanceState, NonceResponse,
+    TokenRequest, TokenResponse,
 };
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
@@ -90,7 +90,7 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
 }
 
 pub fn wallet_router(state: AppState) -> Router {
-    let router = Router::new()
+    let mut router = Router::new()
         .route(
             "/.well-known/openid-credential-issuer",
             get(issuer_metadata),
@@ -106,6 +106,13 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/vp/request/:id", get(get_request_object_handler))
         .route("/vp/response/:id", post(post_response_handler))
         .route("/statuslists/:id", get(status_list_handler));
+
+    // ABCA §8: the route exists only when the mechanism is enabled, so its
+    // absence and the absent `challenge_endpoint` metadata entry always agree.
+    if state.config.issuer.wallet_attestation.challenge_mode != foundry_core::config::Mode::Disabled
+    {
+        router = router.route("/challenge", post(challenge_handler));
+    }
 
     let router = if state.config.server.wallet_facing.swagger_ui_enabled {
         router.merge(utoipa_swagger_ui::SwaggerUi::new("/api-docs").url(
@@ -711,6 +718,49 @@ async fn nonce_handler(
 
     // Section 7.2: the Credential Issuer MUST make the response uncacheable
     // by adding a Cache-Control header field including the value `no-store`.
+    Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
+}
+
+/// Challenge Endpoint (ABCA draft -07 §8).
+///
+/// Registered only when `issuer.wallet_attestation.challenge_mode` is
+/// `optional` or `required`; under `disabled` the route does not exist, so a
+/// wallet cannot mistake foundry for a server that supports §8.
+///
+/// Deliberately **unauthenticated**, like `/nonce`: §8's request example carries
+/// no credentials, and a client needs a challenge *before* it can authenticate.
+/// Minting is stateless, so an anonymous caller cannot grow storage.
+#[utoipa::path(
+    post,
+    path = "/challenge",
+    responses(
+        (status = 200, body = ChallengeResponse,
+         description = "ABCA §8 challenge. Uncacheable per §8 (`Cache-Control: no-store`)."),
+    )
+)]
+async fn challenge_handler(
+    State(state): State<AppState>,
+) -> Result<
+    (
+        [(axum::http::HeaderName, &'static str); 1],
+        Json<ChallengeResponse>,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let res = foundry_issuer::issue_attestation_challenge(
+        state.nonce_secret.as_ref(),
+        state.config.issuer.wallet_attestation.pop_max_age_secs,
+        now,
+    )
+    .map_err(|e| wallet_error_response(&e))?;
+
+    // §8: "The Authorization Server MUST make the response uncacheable by
+    // adding a Cache-Control header field including the value no-store."
     Ok(([(axum::http::header::CACHE_CONTROL, "no-store")], Json(res)))
 }
 

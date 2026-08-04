@@ -16,6 +16,7 @@ pub mod transaction;
 pub use authorize::{
     handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
 };
+pub use challenge::{issue_attestation_challenge, ChallengeResponse, NonceSecret};
 pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
 pub use credential::{
     handle_credential_request, CredentialRequest, CredentialResponse, IssuedCredential,
@@ -26,7 +27,7 @@ pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,
     CredentialConfigurationSupported, CredentialIssuerMetadata, ProofTypeSupported,
 };
-pub use nonce::{issue_nonce, verify_nonce, NonceResponse, NonceSecret, C_NONCE_TTL_SECS};
+pub use nonce::{issue_nonce, verify_nonce, NonceResponse, C_NONCE_TTL_SECS};
 pub use offer::{
     build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,

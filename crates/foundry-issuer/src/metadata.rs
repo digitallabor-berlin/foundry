@@ -79,6 +79,17 @@ pub struct AuthorizationServerMetadata {
     /// RFC 9207 §2.3 wants present-and-true unconditionally.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dpop_signing_alg_values_supported: Vec<String>,
+    /// ABCA draft -07 §10.1: "URL of the authorization servers challenge
+    /// endpoint which is used to obtain a fresh challenge for usage in the
+    /// Client Attestation PoP JWT."
+    ///
+    /// Omitted entirely when `issuer.wallet_attestation.challenge_mode` is
+    /// `Disabled`. Per §8, publishing this field is what obliges a client to
+    /// fetch and use a challenge -- so advertising it while ignoring every
+    /// challenge would be actively misleading. Same reasoning as
+    /// `dpop_signing_alg_values_supported` above.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_endpoint: Option<String>,
 }
 
 /// Build the Credential Issuer Metadata document, fully derived from
@@ -163,6 +174,11 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
             // throughout this crate, and HAIP's crypto-suites section mandates
             // it for every JWS in this profile.
             vec!["ES256".to_string()]
+        },
+        challenge_endpoint: if cfg.issuer.wallet_attestation.challenge_mode == Mode::Disabled {
+            None
+        } else {
+            Some(format!("{base}/challenge"))
         },
     }
 }
@@ -458,6 +474,46 @@ mod tests {
         assert!(
             json.get("dpop_signing_alg_values_supported").is_none(),
             "an empty list MUST be omitted, not serialized as []"
+        );
+    }
+
+    /// ABCA §8: the metadata entry's *presence* is the support signal, and its
+    /// presence is what makes the `challenge` claim mandatory for clients.
+    /// Advertising it while ignoring every challenge would tell a wallet something
+    /// false -- the same reasoning already recorded for
+    /// `dpop_signing_alg_values_supported`.
+    #[test]
+    fn advertises_challenge_endpoint_when_challenge_mode_is_enabled() {
+        let mut cfg = test_config();
+        cfg.issuer.wallet_attestation.challenge_mode = Mode::Optional;
+        let base = cfg
+            .issuer
+            .credential_issuer
+            .trim_end_matches('/')
+            .to_string();
+        let meta = build_authorization_server_metadata(&cfg);
+        assert_eq!(
+            meta.challenge_endpoint.as_deref(),
+            Some(format!("{base}/challenge").as_str())
+        );
+
+        cfg.issuer.wallet_attestation.challenge_mode = Mode::Required;
+        assert!(build_authorization_server_metadata(&cfg)
+            .challenge_endpoint
+            .is_some());
+    }
+
+    #[test]
+    fn omits_challenge_endpoint_when_challenge_mode_is_disabled() {
+        let mut cfg = test_config();
+        cfg.issuer.wallet_attestation.challenge_mode = Mode::Disabled;
+        let meta = build_authorization_server_metadata(&cfg);
+        assert!(meta.challenge_endpoint.is_none());
+
+        let json = serde_json::to_value(&meta).expect("serialize");
+        assert!(
+            json.get("challenge_endpoint").is_none(),
+            "the field must be absent from the wire form, not null"
         );
     }
 }

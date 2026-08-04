@@ -30,6 +30,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -209,6 +210,38 @@ pub(crate) fn verify(
     }
 
     Ok(())
+}
+
+/// Wire shape of the ABCA §8 challenge endpoint response.
+///
+/// §8 defines exactly one member: "attestation_challenge: REQUIRED if the
+/// authorization server supports Client Attestations and server provided
+/// challenges as described in this document." §8 also permits the server to
+/// "add additional challenges or data"; foundry adds none, so a wallet sees a
+/// minimal, unambiguous document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct ChallengeResponse {
+    pub attestation_challenge: String,
+}
+
+/// Mint an ABCA §8 `attestation_challenge`.
+///
+/// `ttl_secs` is the caller's `issuer.wallet_attestation.pop_max_age_secs`: a
+/// challenge outliving the window in which its PoP would be accepted anyway is
+/// useless, so the two are deliberately the same number rather than two knobs
+/// an operator must keep aligned.
+///
+/// `skip_all` is mandatory: the argument is the process MAC secret and the
+/// result is a freshness secret (root `AGENTS.md` §4.5).
+#[tracing::instrument(skip_all)]
+pub fn issue_attestation_challenge(
+    secret: &NonceSecret,
+    ttl_secs: u64,
+    now_unix: i64,
+) -> Result<ChallengeResponse, IssuanceError> {
+    Ok(ChallengeResponse {
+        attestation_challenge: mint(secret, Domain::AttestationChallenge, ttl_secs, now_unix)?,
+    })
 }
 
 #[cfg(test)]
