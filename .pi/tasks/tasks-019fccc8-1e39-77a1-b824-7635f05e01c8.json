@@ -16,23 +16,23 @@
       "id": "10",
       "subject": "Task 2: Config blocks, key loading, startup validation",
       "description": "crates/foundry-core/src/config/{model.rs,validate.rs,mod.rs}: RequestEncryptionConfig, ResponseEncryptionConfig, IssuerConfig fields, SUPPORTED_ENC_VALUES, Config::load_request_decryption_keys, 4 validation rules, fix all IssuerConfig literals. See plan Task 2.",
-      "status": "in_progress",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217645,
-      "updatedAt": 1785851222814
+      "updatedAt": 1785852415903
     },
     {
       "id": "11",
       "subject": "Task 3: Metadata objects",
       "description": "crates/foundry-issuer/src/metadata.rs: CredentialRequestEncryption, CredentialResponseEncryption, build_issuer_metadata signature change to take &[DecryptionKey], fix ~20 call sites. See plan Task 3.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217647,
-      "updatedAt": 1785851217647
+      "updatedAt": 1785852415905
     },
     {
       "id": "12",

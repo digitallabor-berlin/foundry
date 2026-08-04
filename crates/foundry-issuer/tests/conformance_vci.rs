@@ -281,7 +281,7 @@ async fn vci_0007_credential_configuration_ids_are_nonempty_and_resolve_against_
     let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
         .await
         .unwrap();
-    let metadata = build_issuer_metadata(&cfg);
+    let metadata = build_issuer_metadata(&cfg, &[]);
 
     assert!(!resp
         .credential_offer
@@ -519,7 +519,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
 #[tokio::test]
 async fn haip_0023_credential_configuration_metadata_carries_a_scope_value() {
     let cfg = test_config();
-    let metadata = build_issuer_metadata(&cfg);
+    let metadata = build_issuer_metadata(&cfg, &[]);
     let pid = metadata
         .credential_configurations_supported
         .get("pid")
@@ -2215,7 +2215,7 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
 #[test]
 fn vci_0118_metadata_round_trips_as_plain_json() {
     let cfg = test_config();
-    let meta = build_issuer_metadata(&cfg);
+    let meta = build_issuer_metadata(&cfg, &[]);
 
     // metadata.rs never signs or wraps the document; it is a plain `Serialize`
     // struct that always round-trips as ordinary JSON, which is exactly what
@@ -2245,7 +2245,7 @@ fn vci_0118_metadata_round_trips_as_plain_json() {
 #[test]
 fn vci_0129_authorization_servers_omitted_when_empty() {
     let cfg = test_config();
-    let meta = build_issuer_metadata(&cfg);
+    let meta = build_issuer_metadata(&cfg, &[]);
     let value = serde_json::to_value(&meta).unwrap();
 
     assert!(
@@ -2263,7 +2263,7 @@ fn vci_0129_authorization_servers_omitted_when_empty() {
 #[test]
 fn vci_0155_credential_configuration_claims_reveal_disclosed_paths() {
     let cfg = test_config();
-    let meta = build_issuer_metadata(&cfg);
+    let meta = build_issuer_metadata(&cfg, &[]);
     let pid = meta.credential_configurations_supported.get("pid").unwrap();
 
     assert_eq!(pid.claims.len(), 1);
@@ -2365,7 +2365,7 @@ fn vci_0146_0147_metadata_omits_binding_and_proof_fields_when_key_binding_not_re
     let mut cfg = test_config();
     cfg.credential_types[0].cryptographic_holder_binding = false;
 
-    let meta = build_issuer_metadata(&cfg);
+    let meta = build_issuer_metadata(&cfg, &[]);
     let value = serde_json::to_value(&meta).unwrap();
     let pid = &value["credential_configurations_supported"]["pid"];
 
@@ -2474,7 +2474,7 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
     // And yet the metadata for this very configuration never advertises
     // batch support at all (VCI-0140, not-implemented) — the field does not
     // exist as a struct member, so it can never be serialized.
-    let meta = build_issuer_metadata(&cfg);
+    let meta = build_issuer_metadata(&cfg, &[]);
     let value = serde_json::to_value(&meta).unwrap();
     assert!(
         value.get("batch_credential_issuance").is_none(),

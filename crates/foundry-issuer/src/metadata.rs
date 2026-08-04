@@ -18,6 +18,12 @@ pub struct CredentialIssuerMetadata {
     #[schema(value_type = Vec<Object>)]
     pub display: Vec<serde_json::Value>,
     pub credential_configurations_supported: BTreeMap<String, CredentialConfigurationSupported>,
+    /// `skip_serializing_if` is load-bearing: with the feature off the
+    /// serialised document must stay byte-identical to the pre-encryption one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_request_encryption: Option<CredentialRequestEncryption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_response_encryption: Option<CredentialResponseEncryption>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -48,6 +54,27 @@ pub struct ProofTypeSupported {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<Object>)]
     pub key_attestations_required: Option<serde_json::Value>,
+}
+
+/// OpenID4VCI Credential Issuer Metadata `credential_request_encryption`
+/// (L1373–L1377). `zip_values_supported` is deliberately absent: L1375 makes it
+/// optional and its absence means no compression algorithm is supported.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CredentialRequestEncryption {
+    /// L1373: a JWK Set whose every member carries a unique `kid`.
+    #[schema(value_type = Object)]
+    pub jwks: serde_json::Value,
+    pub enc_values_supported: Vec<String>,
+    pub encryption_required: bool,
+}
+
+/// OpenID4VCI Credential Issuer Metadata `credential_response_encryption`
+/// (L1378–L1381). `zip_values_supported` is deliberately absent (L1380).
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CredentialResponseEncryption {
+    pub alg_values_supported: Vec<String>,
+    pub enc_values_supported: Vec<String>,
+    pub encryption_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -94,7 +121,15 @@ pub struct AuthorizationServerMetadata {
 
 /// Build the Credential Issuer Metadata document, fully derived from
 /// `cfg.credential_types` and `cfg.issuer` — nothing hard-coded per credential type.
-pub fn build_issuer_metadata(cfg: &Config) -> CredentialIssuerMetadata {
+///
+/// `request_decryption_keys` are the already-loaded keys from
+/// `Config::load_request_decryption_keys`. They are passed in rather than read
+/// from disk here because metadata is served on every wallet request and must not
+/// do filesystem I/O.
+pub fn build_issuer_metadata(
+    cfg: &Config,
+    request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey],
+) -> CredentialIssuerMetadata {
     let base = cfg.issuer.credential_issuer.trim_end_matches('/');
     let mut configs = BTreeMap::new();
     for ct in &cfg.credential_types {
@@ -148,6 +183,27 @@ pub fn build_issuer_metadata(cfg: &Config) -> CredentialIssuerMetadata {
         nonce_endpoint: Some(format!("{base}/nonce")),
         display: Vec::new(),
         credential_configurations_supported: configs,
+        credential_request_encryption: cfg.issuer.request_encryption.as_ref().map(|re| {
+            CredentialRequestEncryption {
+                jwks: serde_json::json!({
+                    "keys": request_decryption_keys
+                        .iter()
+                        .map(|k| k.published_jwk())
+                        .collect::<Vec<_>>(),
+                }),
+                enc_values_supported: re.enc_values_supported.clone(),
+                encryption_required: re.encryption_required,
+            }
+        }),
+        credential_response_encryption: cfg.issuer.response_encryption.as_ref().map(|rs| {
+            CredentialResponseEncryption {
+                // Fixed, not configurable: `encrypt_compact_with_kid` supports no
+                // other key-management algorithm.
+                alg_values_supported: vec!["ECDH-ES".to_string()],
+                enc_values_supported: rs.enc_values_supported.clone(),
+                encryption_required: rs.encryption_required,
+            }
+        }),
     }
 }
 
@@ -268,7 +324,7 @@ mod tests {
     #[test]
     fn builds_issuer_metadata_from_credential_types() {
         let cfg = test_config();
-        let meta = build_issuer_metadata(&cfg);
+        let meta = build_issuer_metadata(&cfg, &[]);
         assert_eq!(meta.credential_issuer, "https://issuer.example.com");
         assert_eq!(
             meta.credential_endpoint,
@@ -295,7 +351,7 @@ mod tests {
     fn key_attestations_required_present_when_mode_required() {
         let mut cfg = test_config();
         cfg.issuer.key_attestation.mode = Mode::Required;
-        let meta = build_issuer_metadata(&cfg);
+        let meta = build_issuer_metadata(&cfg, &[]);
         let pid = meta.credential_configurations_supported.get("pid").unwrap();
         let jwt_proof = pid.proof_types_supported.get("jwt").unwrap();
         assert_eq!(
@@ -308,7 +364,7 @@ mod tests {
     fn key_attestations_required_absent_when_mode_optional_or_disabled() {
         let mut cfg = test_config();
         cfg.issuer.key_attestation.mode = Mode::Optional;
-        let meta = build_issuer_metadata(&cfg);
+        let meta = build_issuer_metadata(&cfg, &[]);
         let pid = meta.credential_configurations_supported.get("pid").unwrap();
         assert_eq!(
             pid.proof_types_supported
@@ -319,7 +375,7 @@ mod tests {
         );
 
         cfg.issuer.key_attestation.mode = Mode::Disabled;
-        let meta = build_issuer_metadata(&cfg);
+        let meta = build_issuer_metadata(&cfg, &[]);
         let pid = meta.credential_configurations_supported.get("pid").unwrap();
         assert_eq!(
             pid.proof_types_supported
@@ -334,7 +390,7 @@ mod tests {
     fn trims_trailing_slash_from_credential_issuer() {
         let mut cfg = test_config();
         cfg.issuer.credential_issuer = "https://issuer.example.com/".to_string();
-        let meta = build_issuer_metadata(&cfg);
+        let meta = build_issuer_metadata(&cfg, &[]);
         assert_eq!(
             meta.credential_endpoint,
             "https://issuer.example.com/credential"
@@ -373,7 +429,7 @@ mod tests {
         // HAIP OpenID4VCI L186: the Credential Issuer metadata MUST include a scope
         // for every Credential Configuration it supports.
         let cfg = test_config();
-        let metadata = build_issuer_metadata(&cfg);
+        let metadata = build_issuer_metadata(&cfg, &[]);
         assert!(!metadata.credential_configurations_supported.is_empty());
         for (id, config) in &metadata.credential_configurations_supported {
             let json = serde_json::to_value(config).unwrap();
@@ -401,7 +457,7 @@ mod tests {
             claims: vec![],
         });
 
-        let metadata = build_issuer_metadata(&cfg);
+        let metadata = build_issuer_metadata(&cfg, &[]);
         assert_eq!(
             metadata.credential_configurations_supported[&default_id].scope,
             default_id
@@ -517,5 +573,64 @@ mod tests {
             json.get("challenge_endpoint").is_none(),
             "the field must be absent from the wire form, not null"
         );
+    }
+
+    #[test]
+    fn omits_both_encryption_objects_when_unconfigured() {
+        let cfg = test_config();
+        let json = serde_json::to_value(build_issuer_metadata(&cfg, &[])).unwrap();
+        assert!(
+            json.get("credential_request_encryption").is_none(),
+            "unconfigured metadata must stay byte-identical to pre-encryption output"
+        );
+        assert!(json.get("credential_response_encryption").is_none());
+    }
+
+    #[test]
+    fn publishes_the_request_jwks_with_annotated_kids() {
+        let mut cfg = test_config();
+        cfg.issuer.request_encryption = Some(foundry_core::config::RequestEncryptionConfig {
+            keys: vec!["issuer_request_enc".to_string()],
+            enc_values_supported: vec!["A128GCM".to_string(), "A256GCM".to_string()],
+            encryption_required: false,
+        });
+        let km =
+            foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+                .unwrap();
+        let key =
+            foundry_core::crypto::jwe::DecryptionKey::from_pem(km.private_pem.as_bytes()).unwrap();
+        let expected_kid = key.kid().to_string();
+
+        let json =
+            serde_json::to_value(build_issuer_metadata(&cfg, std::slice::from_ref(&key))).unwrap();
+        let obj = &json["credential_request_encryption"];
+        assert_eq!(
+            obj["jwks"]["keys"][0]["kid"],
+            serde_json::json!(expected_kid)
+        );
+        assert_eq!(obj["jwks"]["keys"][0]["alg"], serde_json::json!("ECDH-ES"));
+        assert_eq!(obj["jwks"]["keys"][0]["use"], serde_json::json!("enc"));
+        assert_eq!(obj["encryption_required"], serde_json::json!(false));
+        assert_eq!(
+            obj["enc_values_supported"],
+            serde_json::json!(["A128GCM", "A256GCM"])
+        );
+        // OpenID4VCI L1375: absence means compression MUST NOT be used.
+        assert!(obj.get("zip_values_supported").is_none());
+    }
+
+    #[test]
+    fn publishes_response_encryption_with_ecdh_es_only() {
+        let mut cfg = test_config();
+        cfg.issuer.response_encryption = Some(foundry_core::config::ResponseEncryptionConfig {
+            enc_values_supported: vec!["A256GCM".to_string()],
+            encryption_required: true,
+        });
+        let json = serde_json::to_value(build_issuer_metadata(&cfg, &[])).unwrap();
+        let obj = &json["credential_response_encryption"];
+        assert_eq!(obj["alg_values_supported"], serde_json::json!(["ECDH-ES"]));
+        assert_eq!(obj["enc_values_supported"], serde_json::json!(["A256GCM"]));
+        assert_eq!(obj["encryption_required"], serde_json::json!(true));
+        assert!(obj.get("zip_values_supported").is_none());
     }
 }

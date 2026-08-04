@@ -140,7 +140,8 @@ pub(crate) async fn wallet_openapi_json_handler(
     responses((status = 200, body = CredentialIssuerMetadata))
 )]
 async fn issuer_metadata(State(state): State<AppState>) -> Json<CredentialIssuerMetadata> {
-    Json(foundry_issuer::build_issuer_metadata(&state.config))
+    // Encryption keys are wired in alongside AppState in the extractor task.
+    Json(foundry_issuer::build_issuer_metadata(&state.config, &[]))
 }
 
 #[utoipa::path(

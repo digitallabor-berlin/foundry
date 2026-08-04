@@ -27,7 +27,8 @@ pub use dpop::{
 pub use error::IssuanceError;
 pub use metadata::{
     build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,
-    CredentialConfigurationSupported, CredentialIssuerMetadata, ProofTypeSupported,
+    CredentialConfigurationSupported, CredentialIssuerMetadata, CredentialRequestEncryption,
+    CredentialResponseEncryption, ProofTypeSupported,
 };
 pub use nonce::{issue_nonce, verify_nonce, NonceResponse, C_NONCE_TTL_SECS};
 pub use offer::{

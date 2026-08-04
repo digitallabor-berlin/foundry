@@ -117,7 +117,9 @@ pub fn build_dc_api_offer(
     let mut root =
         serde_json::to_value(offer).map_err(|e| IssuanceError::Serialization(e.to_string()))?;
 
-    let mut issuer_metadata = build_issuer_metadata(cfg);
+    // Credential offers carry no encryption metadata; wallets read it from the
+    // well-known document.
+    let mut issuer_metadata = build_issuer_metadata(cfg, &[]);
     issuer_metadata
         .credential_configurations_supported
         .retain(|id, _| offer.credential_configuration_ids.contains(id));

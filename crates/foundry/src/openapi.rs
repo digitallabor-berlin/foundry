@@ -57,6 +57,8 @@ pub fn generate_admin_openapi_spec() -> String {
         foundry_issuer::CredentialIssuerMetadata,
         foundry_issuer::CredentialConfigurationSupported,
         foundry_issuer::ProofTypeSupported,
+        foundry_issuer::CredentialRequestEncryption,
+        foundry_issuer::CredentialResponseEncryption,
         foundry_issuer::AuthorizationServerMetadata,
         foundry_issuer::TokenRequest,
         foundry_issuer::TokenResponse,
