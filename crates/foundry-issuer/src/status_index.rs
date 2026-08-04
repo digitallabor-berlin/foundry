@@ -2,9 +2,8 @@
 //!
 //! TODO(concurrency): the get-then-put pair below is not atomic; concurrent
 //! allocators racing on the same index could both succeed. Acceptable for
-//! this phase's single-process dev deployment (consistent with
-//! `foundry_core::trust`'s existing `TODO(trust-hardening)` pattern); a
-//! later phase should add an atomic compare-and-swap primitive to `Storage`.
+//! this phase's single-process dev deployment; a later phase should add an
+//! atomic compare-and-swap primitive to `Storage`.
 
 use crate::error::IssuanceError;
 use foundry_core::storage::Storage;
