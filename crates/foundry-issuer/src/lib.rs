@@ -1,5 +1,6 @@
 pub mod attestation;
 pub mod authorize;
+pub mod challenge;
 pub mod create_offer;
 pub mod credential;
 pub mod dpop;
