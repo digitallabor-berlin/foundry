@@ -71,23 +71,23 @@
       "id": "15",
       "subject": "Task 7: quickstart, metadata absence, redaction gate",
       "description": "crates/foundry/src/commands.rs quickstart key gen + config template; tests/quickstart.rs, tests/wallet_metadata.rs, tests/logging_redaction.rs. See plan Task 7.",
-      "status": "in_progress",
+      "status": "completed",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217652,
-      "updatedAt": 1785854853489
+      "updatedAt": 1785855753064
     },
     {
       "id": "16",
       "subject": "Task 8: Real-subprocess E2E coverage",
       "description": "crates/foundry/tests/e2e_full_flow.rs — #[ignore]d encrypted request/response round trip through real binary. See plan Task 8.",
-      "status": "pending",
+      "status": "in_progress",
       "metadata": {},
       "blocks": [],
       "blockedBy": [],
       "createdAt": 1785851217653,
-      "updatedAt": 1785851217653
+      "updatedAt": 1785855753065
     },
     {
       "id": "17",
