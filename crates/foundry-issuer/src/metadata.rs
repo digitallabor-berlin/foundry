@@ -158,19 +158,58 @@ pub fn build_issuer_metadata(
                 doctype: ct.doctype.clone(),
                 cryptographic_binding_methods_supported,
                 credential_signing_alg_values_supported: vec!["ES256".to_string()],
-                proof_types_supported: BTreeMap::from([(
-                    "jwt".to_string(),
-                    ProofTypeSupported {
-                        proof_signing_alg_values_supported: vec!["ES256".to_string()],
-                        key_attestations_required: if cfg.issuer.key_attestation.mode
-                            == foundry_core::config::Mode::Required
-                        {
-                            Some(serde_json::json!({}))
-                        } else {
-                            None
+                proof_types_supported: {
+                    let mut types = BTreeMap::from([(
+                        "jwt".to_string(),
+                        ProofTypeSupported {
+                            proof_signing_alg_values_supported: vec!["ES256".to_string()],
+                            key_attestations_required: if cfg.issuer.key_attestation.mode
+                                == foundry_core::config::Mode::Required
+                            {
+                                Some(serde_json::json!({}))
+                            } else {
+                                None
+                            },
                         },
-                    },
-                )]),
+                    )]);
+                    // Google Wallet's proof type, advertised only when enabled.
+                    // Vendor profile: docs/specs/google-wallet-openid4vci-profile.md.
+                    //
+                    // Two vendor readings, both deliberate:
+                    //
+                    // * `proof_signing_alg_values_supported` is REQUIRED by
+                    //   Google's schema even though nothing in this proof type
+                    //   is signed by the attested key. It is read as
+                    //   constraining the *attested key's* algorithm, which is
+                    //   what `keystore_proof.rs` enforces (P-256 only).
+                    // * `key_attestations_required` here carries Google's field
+                    //   names (`key_mint_security_level`), not OpenID4VCI's own
+                    //   `key_storage`/`user_authentication` shape. The name
+                    //   collision with the spec parameter is the vendor's.
+                    //
+                    // Unlike the `jwt` entry, this one is unconditional when the
+                    // proof type is enabled: a minimum security level is always
+                    // enforced, so a key attestation requirement always exists.
+                    if cfg.issuer.key_attestation.android.mode
+                        != foundry_core::config::Mode::Disabled
+                    {
+                        types.insert(
+                            "android_keystore_attestation".to_string(),
+                            ProofTypeSupported {
+                                proof_signing_alg_values_supported: vec!["ES256".to_string()],
+                                key_attestations_required: Some(serde_json::json!({
+                                    "key_mint_security_level": cfg
+                                        .issuer
+                                        .key_attestation
+                                        .android
+                                        .key_mint_security_level
+                                        .as_str(),
+                                })),
+                            },
+                        );
+                    }
+                    types
+                },
                 display: ct.display.clone(),
                 claims,
             },
@@ -386,6 +425,42 @@ mod tests {
                 .key_attestations_required,
             None
         );
+    }
+
+    #[test]
+    fn android_proof_type_is_absent_when_disabled() {
+        let cfg = test_config();
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        assert!(pid.proof_types_supported.contains_key("jwt"));
+        assert!(
+            !pid.proof_types_supported
+                .contains_key("android_keystore_attestation"),
+            "a disabled proof type must not be advertised"
+        );
+    }
+
+    #[test]
+    fn android_proof_type_is_advertised_with_the_configured_level() {
+        let mut cfg = test_config();
+        cfg.issuer.key_attestation.android.mode = Mode::Optional;
+        cfg.issuer.key_attestation.android.key_mint_security_level =
+            foundry_core::trust::android_attestation::SecurityLevel::StrongBox;
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        let entry = pid
+            .proof_types_supported
+            .get("android_keystore_attestation")
+            .expect("advertised when enabled");
+        assert_eq!(entry.proof_signing_alg_values_supported, vec!["ES256"]);
+        let required = entry
+            .key_attestations_required
+            .as_ref()
+            .expect("key_attestations_required is always present for this proof type");
+        assert_eq!(required["key_mint_security_level"], "StrongBox");
+        // user_auth_types is deliberately absent: advertising a requirement
+        // foundry does not enforce is the failure mode the design rejects.
+        assert!(required.get("user_auth_types").is_none());
     }
 
     #[test]
