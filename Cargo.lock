@@ -775,6 +775,7 @@ dependencies = [
  "josekit",
  "percent-encoding",
  "rand 0.8.7",
+ "rcgen",
  "serde",
  "serde_json",
  "sha2 0.10.9",

@@ -5,6 +5,7 @@ pub mod create_offer;
 pub mod credential;
 pub mod dpop;
 pub mod error;
+pub mod keystore_proof;
 pub mod metadata;
 pub mod nonce;
 pub mod offer;
