@@ -31,13 +31,13 @@
   h1 { font-size: 22px; margin: 0 0 4px; }
   header p.sub { margin: 0 0 20px; color: var(--muted); font-size: 14px; }
   .key-bar {
-    display: flex; gap: 8px; align-items: center;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
     background: var(--panel); border: 1px solid var(--panel-border);
     border-radius: 10px; padding: 12px 16px;
   }
   .key-bar label { font-size: 13px; color: var(--muted); white-space: nowrap; }
   .key-bar input {
-    flex: 1; background: #0c101a; border: 1px solid var(--panel-border);
+    flex: 1 1 220px; background: #0c101a; border: 1px solid var(--panel-border);
     border-radius: 6px; padding: 8px 10px; color: var(--text); font-family: var(--mono); font-size: 13px;
   }
   .key-bar .remembered { font-size: 12px; color: var(--green); white-space: nowrap; }
@@ -61,7 +61,7 @@
   .field textarea { min-height: 90px; resize: vertical; }
   .field.checkbox { display: flex; align-items: center; gap: 8px; }
   .field.checkbox label { margin: 0; }
-  .radio-group { display: flex; gap: 16px; margin-bottom: 10px; font-size: 13px; }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; font-size: 13px; }
   .radio-group label { display: flex; align-items: center; gap: 6px; color: var(--text); }
   button.primary {
     background: var(--accent); color: #fff; border: none; border-radius: 8px;
@@ -85,7 +85,7 @@
   .open-btn.hidden { display: none; }
   .result { margin-top: 18px; border-top: 1px solid var(--panel-border); padding-top: 16px; }
   .result.hidden { display: none; }
-  .uri-row { display: flex; align-items: center; gap: 6px; margin-bottom: 12px; }
+  .uri-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 12px; }
   .uri-text {
     flex: 1; font-family: var(--mono); font-size: 12px; word-break: break-all;
     background: #0c101a; border: 1px solid var(--panel-border); border-radius: 6px; padding: 8px 10px;
