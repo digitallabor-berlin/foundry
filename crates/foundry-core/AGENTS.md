@@ -37,6 +37,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `pki/mod.rs` | **Dev-only** PKI: `KeyMaterial`, `CertMaterial`, `generate_ec_key`, `new_ca`, `issue_leaf` |
 | `status_list/mod.rs` | Token Status List (IETF `draft-ietf-oauth-status-list-14`): status packing, zlib compression, `StatusList`, signed Status List Token build/sign/verify, and `Storage`-backed persistence |
 | `storage/mod.rs` | The async `Storage` trait; re-exports `SqliteStorage` |
+| `trust/android_attestation.rs` | Android Key Attestation extension (`1.3.6.1.4.1.11129.2.1.17`) `KeyDescription` parsing: `parse_key_description`, `find_attestation_cert`, `SecurityLevel`, `AuthorizationList`, `RootOfTrust`. Parsing only, no policy — enforcement lives in `foundry-issuer`'s `keystore_proof.rs` |
 | `storage/sqlite.rs` | `SqliteStorage` — single `kv` table, connects with `create_if_missing`, runs `migrations/` on connect |
 | `migrations/` | SQL schema migrations (`0001_init.sql`), embedded via `sqlx::migrate!` |
 | `url.rs` | `dns_host_only(base_url) -> String` — strips a `https://`/`http://` scheme and truncates at the first `/` or `:`, leaving a bare DNS host. Shared by `Config::validate()` and `foundry-verifier`'s Request Object signing; the workspace deliberately carries no URL-parsing crate |
@@ -181,3 +182,18 @@ cargo test -p foundry-core
   though its *published* JWK (`DecryptionKey::published_jwk`) always carries
   `alg: "ECDH-ES"`. Writing `alg: ECDH-ES` in the `keys:` entry itself fails
   startup validation; it belongs only on the wire, never in this config field.
+- **`find_attestation_cert` (`trust/android_attestation.rs`) selects the
+  attesting certificate nearest the root, not `chain[0]`** — it walks the
+  chain reversed and returns the first certificate (from the root end) bearing
+  the extension. This is deliberate: Google's own guidance warns an attacker
+  can append extra certificates *below* a genuine hardware-attested leaf, so
+  trusting `chain[0]` unconditionally would let a forged leaf ride on a real
+  device's attestation. Do not simplify this to `chain[0]`.
+- **The `KeyDescription` outer `SEQUENCE` is version-stable; `AuthorizationList`
+  is not.** The parser is therefore strict on the outer sequence (`read_one`/
+  `expect_tag` fail loudly on shape mismatch) but tag-driven and permissive on
+  `AuthorizationList` — an unrecognised tag is skipped, not rejected, because
+  Google adds tags across KeyMint versions. An unrecognised `SecurityLevel`
+  enumeration value, by contrast, **is** a hard parse error: unlike an unread
+  authorization tag, a security level foundry cannot rank is not safe to treat
+  as `Software` (weakest) or ignore.

@@ -36,6 +36,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
 | `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt` — including, since 2026-08-04, ABCA §9 rule 8's `challenge` claim (check 10), gated on `issuer.wallet_attestation.challenge_mode` and implemented via `challenge.rs`'s `Domain::AttestationChallenge` — and owns anti-replay claiming of the PoP's `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config`; `build_issuer_metadata` also takes the loaded request-decryption keys and populates `credential_request_encryption`/`credential_response_encryption` (both `Option`, omitted entirely when their config block is absent) |
+| `keystore_proof.rs` | Google Wallet `android_keystore_attestation` proof type: chain validation, `attestationChallenge` ↔ `c_nonce` binding, security-level policy, holder-key derivation |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
 
@@ -165,18 +166,46 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   IssuanceError>`. Under both `Mode::Required` and `Mode::Optional`, a present
   attestation without a PoP is rejected (ABCA §6.2 rule 2) — see the 9-row mode
   matrix in `attestation.rs`'s own tests.
-- **Three similarly-named things in `attestation.rs`; only two are live.** Do not
-  reason about one and change another:
+- **Four similarly-named attestation things in this crate; three are live.** Do
+  not reason about one and change another:
   - `WalletAttestationVerifier::verify_wallet_attestation` — **live**, called by
     `handle_token_request`. Full crypto + PoP verification, as above.
-  - `verify_key_attestation_jwt` (free function) — **live**, called from
-    `proof.rs` for OpenID4VCI Appendix D credential-key attestation. Genuinely
-    verifies the key attestation JWT. Unrelated to OAuth client authentication.
+  - `verify_key_attestation_jwt` (free function, `attestation.rs`) — **live**,
+    called from `proof.rs` for OpenID4VCI Appendix D credential-key
+    attestation. Genuinely verifies the key attestation JWT. Unrelated to OAuth
+    client authentication.
+  - `keystore_proof::verify_android_keystore_proofs` — **live**, called from
+    `credential.rs`'s `ResolvedProofs::AndroidKeystoreAttestation` arm. This is
+    Google Wallet's `android_keystore_attestation` proof type: an array of
+    X.509 certificate chains carrying an Android Keystore hardware attestation.
+    It is **not** OpenID4VCI Appendix D key attestation and shares no wire
+    format with `verify_key_attestation_jwt` — there is no JWT anywhere in this
+    path.
   - `KeyAttestationVerifier::verify_key_attestation` (trait method) — **dead**:
     no caller anywhere in the workspace. Still only checks presence and still
     returns `InvalidRequest` rather than `InvalidClient`. Deliberately left
     untouched by GAP-VCI-14; do not cite it as evidence of what key attestation
     does, and do not "fix" its error type without first giving it a caller.
+- **`verify_android_keystore_proofs`'s `validate_chain` failures MUST be
+  wrapped into `InvalidProof`, never propagated as `IssuanceError::Trust`.**
+  `Trust` has no HTTP mapping in `wallet_error_response` and falls through to
+  a 500 — an untrusted or malformed Android attestation chain is a client
+  fault (root AGENTS.md §4.3), not a server error. Covered by
+  `an_unanchored_chain_is_invalid_proof_not_trust`.
+- **`issuer.key_attestation.android.mode: Required` rejects the `jwt` proof
+  type entirely**, checked in `credential.rs`'s `ResolvedProofs::Jwt` arm. The
+  parent `key_attestation.mode` continues to govern only the `jwt` path's own
+  Appendix D key-attestation-JWT support (`verify_key_attestation_jwt`); the
+  two `mode` fields are independent knobs over independent proof types that
+  happen to share one `trusted_anchors` list.
+- **`android_keystore_attestation` has no audience binding and no proof of
+  possession of the attested key.** There is no `aud`-equivalent field in the
+  `KeyDescription` extension, and the wallet is never asked to sign anything
+  with the attested key — the hardware attestation statement substitutes for a
+  PoP entirely, the same posture OpenID4VCI's own `attestation` proof type
+  documents (L2612). The `c_nonce`-as-`attestationChallenge` check is
+  therefore never optional: it is the only replay/binding control this proof
+  type has. See VCI-0057 in the conformance report for the full accounting.
 - **`claim_pop_jti` is the sole anti-replay mechanism for the PoP's `jti`.** It
   is keyed on a hash of `(iss, jti)`, not bare `jti` — a bare-`jti` namespace
   would let one wallet pre-claim `jti` values and deny service to another.
