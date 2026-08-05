@@ -1540,7 +1540,7 @@ fn signed_wallet_attestation_no_pop(exp: i64) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// VCI-0232 / GAP-VCI-15 (closed) — OpenID4VCI Wallet Attestation (L2600): the
+// VCI-0232 / GAP-VCI-14 (closed) — OpenID4VCI Wallet Attestation (L2600): the
 // Wallet MUST generate, and per draft-ietf-oauth-attestation-based-client-auth
 // Sec5.2 (which OpenID4VCI Appendix E incorporates) the Authorization Server
 // MUST verify, a Client Attestation PoP JWT proving possession of the key the
@@ -2543,46 +2543,91 @@ async fn gap_haip_06_status_index_can_collide_across_credential_types_sharing_on
 }
 
 // ---------------------------------------------------------------------------
-// GAP-VCI-15 — OpenID4VCI Credential Issuer Metadata (L1395): each name in
+// VCI-0233 — OpenID4VCI Credential Issuer Metadata (L1395): each name in
 // `proof_types_supported` is "a unique identifier of the supported proof
 // type(s)", and the Wallet uses that identifier in the Credential Request.
+// Credential Request (L864): `proofs` MUST be present whenever
+// `proof_types_supported` is.
 //
-// Under `key_attestation.android.mode: required`, `handle_credential_request`
-// (credential.rs) rejects a `jwt` proofs member unconditionally -- but
-// `build_issuer_metadata` still advertises `jwt`, so the advertised set is
-// strictly larger than the accepted set.
-//
-// Note the asymmetry this test pins down: `android.mode: disabled` DOES remove
-// `android_keystore_attestation` from the metadata (metadata.rs gates that
-// entry on the mode), so the generator already knows how to reflect a mode in
-// the advertised set. It simply never applies the converse to `jwt`.
+// Closed 2026-08-05 (GAP-VCI-15). The advertised set must mirror what
+// `handle_credential_request` (credential.rs) accepts, in all three
+// `key_attestation.android.mode` states -- otherwise a wallet implementing only
+// the advertised-but-refused type complies with the metadata exactly and is
+// still rejected with `invalid_proof`.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "GAP-VCI-15: OpenID4VCI Credential Issuer Metadata (L1395) — with key_attestation.android.mode: required, build_issuer_metadata still advertises the `jwt` proof type that handle_credential_request rejects unconditionally, so a wallet implementing only `jwt` complies with the metadata and is refused"]
-fn gap_vci_15_metadata_advertises_jwt_proof_type_that_credential_endpoint_rejects() {
+fn vci_0233_advertised_proof_types_mirror_what_the_credential_endpoint_accepts() {
+    // `required` — android_keystore_attestation only; credential.rs rejects a
+    // `jwt` proofs member outright, so `jwt` must not be advertised.
     let mut cfg = test_config();
-    // The Google-Wallet-only posture: android_keystore_attestation is the only
-    // proof type the Credential Endpoint will accept.
     cfg.issuer.key_attestation.android.mode = Mode::Required;
-
     let metadata = build_issuer_metadata(&cfg, &[]);
-    let config = metadata
+    let types = &metadata
         .credential_configurations_supported
         .get("pid")
-        .expect("the `pid` credential configuration must be present");
-
+        .expect("the `pid` credential configuration must be present")
+        .proof_types_supported;
     assert!(
-        config
-            .proof_types_supported
-            .contains_key("android_keystore_attestation"),
+        types.contains_key("android_keystore_attestation"),
         "android_keystore_attestation must be advertised when android.mode is required"
     );
     assert!(
-        !config.proof_types_supported.contains_key("jwt"),
+        !types.contains_key("jwt"),
         "`jwt` must NOT be advertised when android.mode: required makes the \
-         Credential Endpoint reject it: advertising a proof type the issuer \
-         refuses misrepresents the supported set (L1395) and strands any wallet \
-         that implements only `jwt`. Advertised: {:?}",
-        config.proof_types_supported.keys().collect::<Vec<_>>()
+         Credential Endpoint reject it. Advertised: {:?}",
+        types.keys().collect::<Vec<_>>()
     );
+
+    // `optional` — both are accepted, so both are advertised.
+    let mut cfg = test_config();
+    cfg.issuer.key_attestation.android.mode = Mode::Optional;
+    let metadata = build_issuer_metadata(&cfg, &[]);
+    let types = &metadata
+        .credential_configurations_supported
+        .get("pid")
+        .unwrap()
+        .proof_types_supported;
+    assert!(
+        types.contains_key("jwt") && types.contains_key("android_keystore_attestation"),
+        "android.mode: optional accepts both proof types, so both must be \
+         advertised. Advertised: {:?}",
+        types.keys().collect::<Vec<_>>()
+    );
+
+    // `disabled` — an android_keystore_attestation member is rejected, so only
+    // `jwt` is advertised. This direction was already correct; asserted here so
+    // the mirror property is pinned in all three states rather than one.
+    let mut cfg = test_config();
+    cfg.issuer.key_attestation.android.mode = Mode::Disabled;
+    let metadata = build_issuer_metadata(&cfg, &[]);
+    let types = &metadata
+        .credential_configurations_supported
+        .get("pid")
+        .unwrap()
+        .proof_types_supported;
+    assert!(
+        types.contains_key("jwt"),
+        "`jwt` must be advertised when android.mode is disabled"
+    );
+    assert!(
+        !types.contains_key("android_keystore_attestation"),
+        "android_keystore_attestation must NOT be advertised when disabled"
+    );
+
+    // No mode may leave the set empty: an empty `proof_types_supported` is
+    // itself a misrepresentation, and L864 would still demand `proofs`.
+    for mode in [Mode::Required, Mode::Optional, Mode::Disabled] {
+        let mut cfg = test_config();
+        cfg.issuer.key_attestation.android.mode = mode.clone();
+        let metadata = build_issuer_metadata(&cfg, &[]);
+        assert!(
+            !metadata
+                .credential_configurations_supported
+                .get("pid")
+                .unwrap()
+                .proof_types_supported
+                .is_empty(),
+            "proof_types_supported must never be empty (android.mode: {mode:?})"
+        );
+    }
 }

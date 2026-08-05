@@ -159,19 +159,43 @@ pub fn build_issuer_metadata(
                 cryptographic_binding_methods_supported,
                 credential_signing_alg_values_supported: vec!["ES256".to_string()],
                 proof_types_supported: {
-                    let mut types = BTreeMap::from([(
-                        "jwt".to_string(),
-                        ProofTypeSupported {
-                            proof_signing_alg_values_supported: vec!["ES256".to_string()],
-                            key_attestations_required: if cfg.issuer.key_attestation.mode
-                                == foundry_core::config::Mode::Required
-                            {
-                                Some(serde_json::json!({}))
-                            } else {
-                                None
+                    // OpenID4VCI L1395: each name here identifies a proof type
+                    // this issuer *supports*, and the Wallet picks from this set
+                    // for its Credential Request. L864 then makes `proofs`
+                    // mandatory whenever this object is present. So the
+                    // advertised set MUST mirror what `handle_credential_request`
+                    // (credential.rs) actually accepts: advertising a type the
+                    // Credential Endpoint refuses strands any wallet that
+                    // implements only that type -- it complies with the metadata
+                    // exactly and still gets `invalid_proof`.
+                    let android_mode = cfg.issuer.key_attestation.android.mode.clone();
+                    let mut types = BTreeMap::new();
+
+                    // Withheld under `android.mode: required`, where
+                    // `handle_credential_request` rejects a `jwt` proofs member
+                    // outright -- before verifying anything -- because
+                    // android_keystore_attestation is then the only accepted
+                    // proof type. Closes GAP-VCI-15.
+                    //
+                    // The two conditions cannot both exclude: `required` keeps
+                    // the android entry, `disabled` keeps this one, `optional`
+                    // keeps both. So `proof_types_supported` is never emitted
+                    // empty, which would be its own misrepresentation.
+                    if android_mode != Mode::Required {
+                        types.insert(
+                            "jwt".to_string(),
+                            ProofTypeSupported {
+                                proof_signing_alg_values_supported: vec!["ES256".to_string()],
+                                key_attestations_required: if cfg.issuer.key_attestation.mode
+                                    == Mode::Required
+                                {
+                                    Some(serde_json::json!({}))
+                                } else {
+                                    None
+                                },
                             },
-                        },
-                    )]);
+                        );
+                    }
                     // Google Wallet's proof type, advertised only when enabled.
                     // Vendor profile: docs/specs/google-wallet-openid4vci-profile.md.
                     //
@@ -187,12 +211,12 @@ pub fn build_issuer_metadata(
                     //   `key_storage`/`user_authentication` shape. The name
                     //   collision with the spec parameter is the vendor's.
                     //
-                    // Unlike the `jwt` entry, this one is unconditional when the
+                    // Its `key_attestations_required` is unconditional when the
                     // proof type is enabled: a minimum security level is always
                     // enforced, so a key attestation requirement always exists.
-                    if cfg.issuer.key_attestation.android.mode
-                        != foundry_core::config::Mode::Disabled
-                    {
+                    // (The `jwt` entry above varies that field with
+                    // `key_attestation.mode`.)
+                    if android_mode != Mode::Disabled {
                         types.insert(
                             "android_keystore_attestation".to_string(),
                             ProofTypeSupported {
