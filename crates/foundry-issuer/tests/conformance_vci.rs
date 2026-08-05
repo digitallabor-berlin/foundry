@@ -191,6 +191,7 @@ fn test_config() -> Config {
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -568,6 +569,7 @@ fn credential_test_config(key_path: &str) -> Config {
             selectively_disclosable: true,
             display: vec![],
         }],
+        validity_seconds: None,
     });
     cfg
 }

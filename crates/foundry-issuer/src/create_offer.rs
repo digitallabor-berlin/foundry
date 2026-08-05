@@ -293,6 +293,7 @@ mod tests {
                         display: vec![],
                     },
                 ],
+                validity_seconds: None,
             }],
             verifier: VerifierConfig {
                 signing_key: "verifier_signing".to_string(),
@@ -334,6 +335,7 @@ mod tests {
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         });
         cfg
     }

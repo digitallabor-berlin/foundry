@@ -548,6 +548,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
             CredentialType {
                 id: "other".to_string(),
@@ -559,6 +560,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ];
         let err = cfg.validate().unwrap_err();
@@ -581,6 +583,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
             CredentialType {
                 id: "mdl".to_string(),
@@ -591,6 +594,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ];
         cfg.validate().unwrap();
@@ -608,6 +612,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         }];
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err}").contains("scope"), "{err}");
@@ -624,6 +629,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         };
         assert_eq!(ct.resolved_scope(), "pid");
         let with_scope = CredentialType {

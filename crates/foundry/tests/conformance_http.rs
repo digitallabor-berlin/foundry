@@ -138,6 +138,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -982,6 +983,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -1466,6 +1468,7 @@ async fn setup_pop_test_app_with_modes(
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

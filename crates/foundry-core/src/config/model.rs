@@ -423,6 +423,15 @@ pub struct CredentialType {
     pub display: Vec<serde_json::Value>,
     #[serde(default)]
     pub claims: Vec<ClaimDef>,
+    /// Credential lifetime in seconds: the issued credential's `exp` is its
+    /// `iat` plus this value.
+    ///
+    /// Absent resolves to 365 days, the value the Credential Endpoint hardcoded
+    /// before this field existed. A credential's lifecycle is independent of the
+    /// lifecycle of whatever it attests, so ecosystems with short-lived
+    /// credentials set this explicitly.
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
 }
 
 impl CredentialType {
@@ -430,6 +439,12 @@ impl CredentialType {
     /// HAIP OpenID4VCI L186/L199/L209 — see the `scope` field.
     pub fn resolved_scope(&self) -> &str {
         self.scope.as_deref().unwrap_or(&self.id)
+    }
+
+    /// The configured credential lifetime, or the 365-day default.
+    /// See the `validity_seconds` field.
+    pub fn resolved_validity_seconds(&self) -> u64 {
+        self.validity_seconds.unwrap_or(31_536_000)
     }
 }
 
@@ -719,6 +734,30 @@ verifier:
             display: vec![],
         };
         assert!(!optional_and_always_disclosed.is_required());
+    }
+
+    /// Absent must reproduce the value the Credential Endpoint hardcoded before
+    /// this field existed: 365 days.
+    #[test]
+    fn credential_validity_defaults_to_one_year() {
+        let yaml = format!(
+            "{MINIMAL}\ncredential_types:\n  - id: pid\n    format: dc+sd-jwt\n    vct: https://example.test/vct/pid\n"
+        );
+        let cfg = parse(&yaml);
+        assert_eq!(cfg.credential_types[0].validity_seconds, None);
+        assert_eq!(
+            cfg.credential_types[0].resolved_validity_seconds(),
+            31_536_000
+        );
+    }
+
+    #[test]
+    fn credential_validity_is_settable() {
+        let yaml = format!(
+            "{MINIMAL}\ncredential_types:\n  - id: dpc\n    format: dc+sd-jwt\n    vct: com.emvco.dpc.card\n    validity_seconds: 43200\n"
+        );
+        let cfg = parse(&yaml);
+        assert_eq!(cfg.credential_types[0].resolved_validity_seconds(), 43_200);
     }
 
     /// An omitted `required` key must deserialize, so existing config files

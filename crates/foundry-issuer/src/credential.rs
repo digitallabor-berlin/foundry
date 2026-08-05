@@ -401,7 +401,9 @@ pub async fn handle_credential_request(
                     // See docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md §1.2(a).
                     sub: None,
                     iat: now_unix,
-                    exp: now_unix + 86400 * 365,
+                    // Lifetime is per credential type; see
+                    // CredentialType::resolved_validity_seconds.
+                    exp: now_unix + cred_type.resolved_validity_seconds() as i64,
                     vct,
                     cnf_jwk: holder_jwk_json,
                     status_list_index,
@@ -433,7 +435,10 @@ pub async fn handle_credential_request(
                     namespaces: ns_map,
                     device_key_jwk: holder_jwk_json,
                     signed_at: now_unix,
-                    valid_until: now_unix + 86400 * 365,
+                    // Same per-credential-type lifetime as the SD-JWT VC branch
+                    // above: a config knob that applied to only one of the two
+                    // formats would be a defect, not a feature.
+                    valid_until: now_unix + cred_type.resolved_validity_seconds() as i64,
                 };
 
                 let cbor_bytes = build_mdoc(mdoc_claims, &signer, x5c.clone()).map_err(|e| {
@@ -565,6 +570,7 @@ mod tests {
                     selectively_disclosable: true,
                     display: vec![],
                 }],
+                validity_seconds: None,
             }],
             verifier: VerifierConfig {
                 signing_key: "verifier_signing".to_string(),
@@ -1375,5 +1381,101 @@ mod tests {
         let (cfg, _dir) = cfg_with_encryption(true, true);
         let req = req_with_response_encryption(wallet_enc_jwk(), "A256GCM", None);
         assert!(check_encryption_policy(&cfg, &req, true).is_ok());
+    }
+
+    /// Run one full `handle_credential_request` and return the issued SD-JWT VC
+    /// compact presentation, so lifetime and claim-shape tests share one setup.
+    async fn issue_for_test_with_claims(
+        config: &Config,
+        credential_type_id: &str,
+        claims: serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let storage = test_storage().await;
+
+        let tx = IssuanceTransaction {
+            transaction_id: "tx-cred-1".to_string(),
+            credential_type_id: credential_type_id.to_string(),
+            claims,
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some("at_secret_123".to_string()),
+            state: IssuanceState::Offered,
+            created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            dpop_jkt: None,
+        };
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, 1_700_000_000);
+        let (proof_jwt, _) = generate_proof(&nonce, "https://issuer.example.com");
+
+        let req = CredentialRequest {
+            credential_configuration_id: Some(credential_type_id.to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
+            credential_response_encryption: None,
+        };
+
+        let res = handle_credential_request(
+            config,
+            &storage,
+            "at_secret_123",
+            &req,
+            &secret,
+            &bearer_presentation(),
+            1_700_000_010,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.credentials.len(), 1);
+        res.credentials[0].credential.clone()
+    }
+
+    /// The issuer JWT payload of an SD-JWT VC issuer presentation.
+    fn payload_of(presentation: &str) -> serde_json::Map<String, serde_json::Value> {
+        let jwt = presentation.split('~').next().unwrap();
+        let b64 = jwt.split('.').nth(1).unwrap();
+        let bytes = B64URL.decode(b64).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `exp` must follow the credential type's configured lifetime rather than
+    /// a hardcoded year.
+    #[tokio::test]
+    async fn credential_exp_follows_the_configured_validity() {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let mut config = test_config(key_path.to_str().unwrap());
+        config.credential_types[0].validity_seconds = Some(43_200);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let credential = issue_for_test_with_claims(&config, "pid", claims).await;
+        let payload = payload_of(&credential);
+
+        let iat = payload["iat"].as_i64().expect("iat");
+        let exp = payload["exp"].as_i64().expect("exp");
+        assert_eq!(
+            exp - iat,
+            43_200,
+            "exp must be iat + validity_seconds, got iat={iat} exp={exp}"
+        );
+        assert!(
+            !payload.contains_key("sub"),
+            "sub must not be present (it is omitted by default)"
+        );
     }
 }

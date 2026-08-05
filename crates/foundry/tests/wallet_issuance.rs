@@ -100,6 +100,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

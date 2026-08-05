@@ -102,6 +102,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                     selectively_disclosable: true,
                     display: vec![],
                 }],
+                validity_seconds: None,
             },
             // A second Credential Type, distinct from "pid", so
             // authorize_rejects_a_scope_naming_a_different_credential_type has a
@@ -115,6 +116,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ],
         verifier: VerifierConfig {

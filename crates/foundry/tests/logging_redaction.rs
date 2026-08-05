@@ -169,6 +169,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "issuer_key".to_string(),
@@ -1235,6 +1236,7 @@ async fn setup_with_required_attestation() -> (
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "issuer_key".to_string(),
