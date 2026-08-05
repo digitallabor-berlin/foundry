@@ -360,8 +360,16 @@ can be diffed against a recorded baseline rather than against memory.
 ## 6. Testing
 
 Scoped gate per root `AGENTS.md` §5.1 — `foundry-sd-jwt-vc`, `foundry-core`,
-`foundry-issuer`, `foundry`. The §5.3 full gate runs once, at the end of the
-branch.
+`foundry-issuer`, **`foundry-verifier`** and `foundry`. The §5.3 full gate runs
+once, at the end of the branch.
+
+`foundry-verifier` is in the set for a non-obvious reason discovered while
+writing the plan: its test module constructs `IssuerClaims` at 21 sites to build
+fixture credentials, so the §3.1 type change breaks its compilation. The
+mechanical footprint of the three changes is larger than the design implies —
+32 `IssuerClaims`, 18 `ClaimDef` and 28 `CredentialType` struct literals across
+the workspace. All are compiler-enumerated; see the plan's File Structure
+section.
 
 **`foundry-sd-jwt-vc`**
 - `sub` is absent from the payload when `IssuerClaims.sub` is `None`.
