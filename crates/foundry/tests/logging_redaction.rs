@@ -17,6 +17,8 @@
 //! If an assertion in this file fails, that is a real leak. Fix the emitting
 //! site; never weaken the assertion.
 
+mod support;
+
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
@@ -851,6 +853,148 @@ async fn issuance_never_logs_codes_tokens_nonces_or_claims() {
     assert!(
         !log.contains_value(PLANTED_CLAIM),
         "the holder's claim value leaked into the log"
+    );
+}
+
+/// As `setup()`, but with `key_attestation.android` enabled at `Mode::Optional`
+/// against a freshly generated CA, whose material is returned so a test can
+/// build a `support::synthetic_android_chain` around it.
+async fn setup_with_android_keystore_attestation(
+) -> (AppState, tempfile::TempDir, foundry_core::pki::CertMaterial) {
+    use foundry_core::config::{AndroidKeystoreConfig, TrustAnchor};
+    use foundry_core::trust::android_attestation::SecurityLevel;
+
+    let (state, dir) = setup().await;
+    let ca = foundry_core::pki::new_ca("Redaction Test Android Root", 3650).expect("ca");
+    let anchor_path = dir.path().join("android-root.pem");
+    std::fs::write(&anchor_path, &ca.cert_pem).expect("write anchor");
+
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.key_attestation.trusted_anchors = vec![TrustAnchor {
+        name: "android-redaction-root".to_string(),
+        certs: anchor_path.to_str().expect("utf-8 path").to_string(),
+    }];
+    cfg.issuer.key_attestation.android = AndroidKeystoreConfig {
+        mode: Mode::Optional,
+        key_mint_security_level: SecurityLevel::TrustedEnvironment,
+    };
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    (state, dir, ca)
+}
+
+/// An `android_keystore_attestation` issuance must never log the
+/// `attestationChallenge` (it is a `c_nonce`) or the `uniqueId` (a
+/// privacy-sensitive hardware device identifier) -- root AGENTS.md sect-4.5.
+///
+/// The positive control for this harness already exists in this binary
+/// (`the_capture_harness_would_catch_a_leaked_challenge`), so the absence
+/// assertions below are trustworthy.
+#[tokio::test]
+async fn android_keystore_issuance_never_logs_the_challenge_or_unique_id() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir, ca) = setup_with_android_keystore_attestation().await;
+
+    let admin = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+    let offer_res = admin
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_type_id": "pid",
+                        "claims": { "given_name": PLANTED_CLAIM },
+                        "tx_code_required": false
+                    })
+                    .to_string(),
+                ))
+                .expect("offer request"),
+        )
+        .await
+        .expect("offer response");
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer = body_json(offer_res).await;
+    let pre_auth_code = offer["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .expect("pre-authorized code")
+        .to_string();
+
+    let token_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .expect("token request"),
+        )
+        .await
+        .expect("token response");
+    assert_eq!(token_res.status(), StatusCode::OK);
+    let access_token = body_json(token_res).await["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_string();
+
+    let nonce_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/nonce")
+                .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                .body(Body::empty())
+                .expect("nonce request"),
+        )
+        .await
+        .expect("nonce response");
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    let c_nonce = body_json(nonce_res).await["c_nonce"]
+        .as_str()
+        .expect("c_nonce")
+        .to_string();
+
+    let chain = support::synthetic_android_chain(&ca, c_nonce.as_bytes());
+
+    let (guard, log) = capture_at_trace();
+    let cred_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credential")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_configuration_id": "pid",
+                        "proofs": { "android_keystore_attestation": [chain] },
+                    })
+                    .to_string(),
+                ))
+                .expect("credential request"),
+        )
+        .await
+        .expect("credential response");
+    drop(guard);
+
+    // The issuance must succeed first -- a rejected request would make the
+    // absence assertions below vacuous.
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    assert!(!log.events().is_empty(), "captured nothing");
+
+    assert!(
+        !log.contains_value(&c_nonce),
+        "the c_nonce used as attestationChallenge must never appear in logs"
+    );
+    assert!(
+        !log.contains_value("unique_id") && !log.contains_value("uniqueId"),
+        "uniqueId must never be logged, not even as a field name"
     );
 }
 

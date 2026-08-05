@@ -1,10 +1,19 @@
-//! Shared setup for the credential-encryption test binary.
+//! Shared setup for the credential-encryption and Android keystore-attestation
+//! test binaries.
 //!
 //! Copied (not imported) from `conformance_http.rs`'s `setup_test_app` and its
 //! helpers, per this repository's convention that test-fixture helpers are
 //! duplicated across test binaries rather than shared through the crate's own
 //! public API. Renamed `setup_test_app` -> `setup_without_encryption` to make
 //! the pairing with `setup_with_encryption` below explicit.
+//!
+//! `mod support;` compiles this file separately into each test binary that
+//! declares it, so no single binary calls every helper here -- e.g.
+//! `credential_encryption.rs` never calls `synthetic_android_chain`, and
+//! `keystore_attestation_proof.rs` never calls `setup_with_encryption`. The
+//! module-wide allow below reflects that shared-fixture shape, not a real dead
+//! path in any one binary.
+#![allow(dead_code)]
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -217,6 +226,119 @@ pub async fn body_json(res: axum::http::Response<Body>) -> serde_json::Value {
         .await
         .expect("body");
     serde_json::from_slice(&bytes).expect("json")
+}
+
+/// A synthetic Android-shaped attestation chain: a leaf carrying the Android
+/// key attestation extension with `challenge` as its `attestationChallenge`,
+/// signed by `ca`, returned as `[leaf, root]` in base64-STANDARD DER.
+///
+/// Runtime-generated rather than a fixture: the real Google chain's challenge is
+/// Google's `c_nonce`, which can never verify against foundry's MAC secret, and
+/// a static chain cannot carry an unexpired one. The DER builder is deliberately
+/// duplicated from `crates/foundry-issuer/src/keystore_proof.rs`'s tests -- see
+/// the design doc's Testing section.
+pub fn synthetic_android_chain(
+    ca: &foundry_core::pki::CertMaterial,
+    challenge: &[u8],
+) -> Vec<String> {
+    use rcgen::{
+        CertificateParams, CustomExtension, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+        KeyUsagePurpose,
+    };
+
+    fn tlv(tag: &[u8], content: &[u8]) -> Vec<u8> {
+        let mut out = tag.to_vec();
+        let len = content.len();
+        if len < 0x80 {
+            out.push(len as u8);
+        } else if len < 0x100 {
+            out.push(0x81);
+            out.push(len as u8);
+        } else {
+            out.push(0x82);
+            out.push((len >> 8) as u8);
+            out.push((len & 0xff) as u8);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+    fn integer(v: i64) -> Vec<u8> {
+        let mut bytes = v.to_be_bytes().to_vec();
+        while bytes.len() > 1 && bytes[0] == 0 && bytes[1] & 0x80 == 0 {
+            bytes.remove(0);
+        }
+        tlv(&[0x02], &bytes)
+    }
+    fn enumerated(v: u8) -> Vec<u8> {
+        tlv(&[0x0a], &[v])
+    }
+    fn octet_string(bytes: &[u8]) -> Vec<u8> {
+        tlv(&[0x04], bytes)
+    }
+    fn sequence(parts: &[Vec<u8>]) -> Vec<u8> {
+        tlv(&[0x30], &parts.concat())
+    }
+
+    // Attestation version 3, TrustedEnvironment for both security levels.
+    let key_description = sequence(&[
+        integer(3),
+        enumerated(1),
+        integer(41),
+        enumerated(1),
+        octet_string(challenge),
+        octet_string(&[]),
+        sequence(&[]),
+        sequence(&[]),
+    ]);
+
+    let ca_key = KeyPair::from_pem(&ca.key_pem).expect("CA key parses");
+    let issuer = Issuer::from_ca_cert_pem(&ca.cert_pem, ca_key).expect("issuer");
+
+    // rcgen's default KeyPair is ECDSA P-256, which is what the attested key
+    // must be.
+    let leaf_key = KeyPair::generate().expect("leaf key");
+    let mut leaf_params = CertificateParams::default();
+    let mut leaf_dn = DistinguishedName::new();
+    leaf_dn.push(DnType::CommonName, "Android Keystore Key");
+    leaf_params.distinguished_name = leaf_dn;
+    leaf_params.is_ca = IsCa::NoCa;
+    leaf_params.use_authority_key_identifier_extension = true;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params
+        .custom_extensions
+        .push(CustomExtension::from_oid_content(
+            &[1, 3, 6, 1, 4, 1, 11129, 2, 1, 17],
+            key_description,
+        ));
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .expect("leaf cert");
+
+    // The root is included, exactly as Google transmits it: `validate_chain`
+    // discards self-signed presented certificates, so it grants nothing.
+    foundry_core::trust::build_x5c(&[leaf.pem().into_bytes(), ca.cert_pem.clone().into_bytes()])
+        .expect("base64 DER chain")
+}
+
+/// As `setup_without_encryption`, plus `android_keystore_attestation` enabled at
+/// `optional` with `anchor_cert_pem` as the only configured trust anchor.
+pub async fn setup_with_android_keystore(anchor_cert_pem: &str) -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup_without_encryption().await;
+    let anchor_path = dir.path().join("android-root.pem");
+    std::fs::write(&anchor_path, anchor_cert_pem).expect("write anchor");
+
+    let mut cfg = (*state.config).clone();
+    cfg.issuer.key_attestation.trusted_anchors = vec![foundry_core::config::TrustAnchor {
+        name: "android-test-root".to_string(),
+        certs: anchor_path.to_str().expect("utf-8 path").to_string(),
+    }];
+    cfg.issuer.key_attestation.android = foundry_core::config::AndroidKeystoreConfig {
+        mode: Mode::Optional,
+        key_mint_security_level:
+            foundry_core::trust::android_attestation::SecurityLevel::TrustedEnvironment,
+    };
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    (state, dir)
 }
 
 /// As `setup_without_encryption`, plus a generated request-decryption key and

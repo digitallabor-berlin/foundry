@@ -724,6 +724,7 @@ dependencies = [
  "foundry-verifier",
  "josekit",
  "percent-encoding",
+ "rcgen",
  "reqwest",
  "serde",
  "serde_html_form",
