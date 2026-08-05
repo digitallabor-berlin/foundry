@@ -70,6 +70,7 @@ fn test_config(status_list_enabled: bool) -> Config {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],

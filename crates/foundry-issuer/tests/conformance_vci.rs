@@ -187,6 +187,7 @@ fn test_config() -> Config {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
@@ -563,6 +564,7 @@ fn credential_test_config(key_path: &str) -> Config {
         display: vec![],
         claims: vec![ClaimDef {
             path: vec!["given_name".to_string()],
+            required: None,
             selectively_disclosable: true,
             display: vec![],
         }],

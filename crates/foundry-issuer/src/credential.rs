@@ -561,6 +561,7 @@ mod tests {
                 display: vec![],
                 claims: vec![ClaimDef {
                     path: vec!["given_name".to_string()],
+                    required: None,
                     selectively_disclosable: true,
                     display: vec![],
                 }],

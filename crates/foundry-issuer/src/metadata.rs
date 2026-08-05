@@ -346,6 +346,7 @@ mod tests {
                 display: vec![serde_json::json!({"name": "Person ID", "locale": "en-US"})],
                 claims: vec![ClaimDef {
                     path: vec!["given_name".to_string()],
+                    required: None,
                     selectively_disclosable: true,
                     display: vec![],
                 }],

@@ -79,10 +79,15 @@ pub async fn create_offer(
         .find(|c| c.id == req.credential_type_id)
         .ok_or_else(|| IssuanceError::UnknownCredentialType(req.credential_type_id.clone()))?;
 
-    // Every non-selectively-disclosable claim's top-level path segment must
-    // be present (nested-path validation is a follow-up — see plan Non-Goals).
+    // Every required claim's top-level path segment must be present.
+    //
+    // "Required" is `ClaimDef::is_required()`, not `!selectively_disclosable`:
+    // a claim can be mandatory in a credential's own schema and still be
+    // selectively disclosable in the SD-JWT, and conflating the two meant such
+    // a claim was never validated at all.
+    // (Nested-path validation is still a follow-up — see GAP-VCI-13.)
     for claim_def in &ct.claims {
-        if claim_def.selectively_disclosable {
+        if !claim_def.is_required() {
             continue;
         }
         let top = claim_def.path.first().ok_or_else(|| {
@@ -277,11 +282,13 @@ mod tests {
                 claims: vec![
                     ClaimDef {
                         path: vec!["birthdate".to_string()],
+                        required: None,
                         selectively_disclosable: false,
                         display: vec![],
                     },
                     ClaimDef {
                         path: vec!["given_name".to_string()],
+                        required: None,
                         selectively_disclosable: true,
                         display: vec![],
                     },
@@ -323,6 +330,7 @@ mod tests {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["family_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
@@ -607,5 +615,68 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+    }
+
+    /// A claim that is BOTH required and selectively disclosable. Before
+    /// `ClaimDef::is_required` existed, `create_offer` skipped presence
+    /// validation for every selectively-disclosable claim, so this offer was
+    /// accepted and issued a credential missing a schema-mandatory claim.
+    #[tokio::test]
+    async fn a_required_selectively_disclosable_claim_must_be_supplied() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].claims = vec![ClaimDef {
+            path: vec!["credential_id".to_string()],
+            required: Some(true),
+            selectively_disclosable: true,
+            display: vec![],
+        }];
+        let storage = test_storage().await;
+
+        let err = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims: serde_json::Map::new(),
+                tx_code_required: false,
+                redirect_uri: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .expect_err("an offer omitting a required claim must be rejected");
+
+        assert!(
+            matches!(err, IssuanceError::ClaimValidation(_)),
+            "expected ClaimValidation, got {err:?}"
+        );
+    }
+
+    /// The counterpart: a claim that is only selectively disclosable stays
+    /// optional, so `pid`-style configurations keep working unchanged.
+    #[tokio::test]
+    async fn an_optional_selectively_disclosable_claim_may_be_omitted() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].claims = vec![ClaimDef {
+            path: vec!["card_id".to_string()],
+            required: None,
+            selectively_disclosable: true,
+            display: vec![],
+        }];
+        let storage = test_storage().await;
+
+        create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims: serde_json::Map::new(),
+                tx_code_required: false,
+                redirect_uri: None,
+            },
+            1_700_000_000,
+        )
+        .await
+        .expect("an offer omitting an optional claim must be accepted");
     }
 }

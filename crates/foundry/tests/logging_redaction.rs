@@ -165,6 +165,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
@@ -1230,6 +1231,7 @@ async fn setup_with_required_attestation() -> (
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
