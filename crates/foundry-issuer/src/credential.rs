@@ -1449,6 +1449,131 @@ mod tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    /// Disclosed claim name -> value, decoded from the `~`-separated disclosures.
+    fn disclosures_of(presentation: &str) -> std::collections::BTreeMap<String, serde_json::Value> {
+        presentation
+            .split('~')
+            .skip(1)
+            .filter(|s| !s.is_empty())
+            .map(|d| {
+                let raw = B64URL.decode(d).unwrap();
+                let arr: Vec<serde_json::Value> = serde_json::from_slice(&raw).unwrap();
+                (arr[1].as_str().unwrap().to_string(), arr[2].clone())
+            })
+            .collect()
+    }
+
+    /// A DPC-shaped credential type, as shipped in the quickstart config:
+    /// `credential_id` and `network` mandatory *and* selectively disclosable,
+    /// `card_id` optional.
+    fn dpc_config(key_path: &str) -> Config {
+        let mut config = test_config(key_path);
+        config.credential_types[0].id = "com.emvco.dpc.card".to_string();
+        config.credential_types[0].vct = Some("com.emvco.dpc.card".to_string());
+        config.credential_types[0].validity_seconds = Some(43_200);
+        config.credential_types[0].claims = vec![
+            ClaimDef {
+                path: vec!["credential_id".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["network".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["card_id".to_string()],
+                required: None,
+                selectively_disclosable: true,
+                display: vec![],
+            },
+        ];
+        config
+    }
+
+    fn issuer_key_for_test() -> (tempfile::TempDir, String) {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+        let s = key_path.to_str().unwrap().to_string();
+        (key_dir, s)
+    }
+
+    /// The co-badged case: `network` carries an array. Required claims must land
+    /// in the disclosures rather than inline in the payload, and an unsupplied
+    /// optional claim must be absent entirely.
+    #[tokio::test]
+    async fn dpc_shaped_type_issues_with_claims_in_disclosures() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "credential_id".to_string(),
+            serde_json::json!("urn:uuid:9f2b7a2e-3b74-4a0d-9b1a-0e6a91f5d2c8"),
+        );
+        claims.insert(
+            "network".to_string(),
+            serde_json::json!(["example_network", "example_network_2"]),
+        );
+        // card_id deliberately not supplied.
+
+        let credential = issue_for_test_with_claims(&config, "com.emvco.dpc.card", claims).await;
+        let payload = payload_of(&credential);
+
+        assert_eq!(payload["vct"], "com.emvco.dpc.card");
+        assert!(!payload.contains_key("sub"), "sub must be omitted");
+        assert!(
+            !payload.contains_key("credential_id"),
+            "a selectively-disclosable claim must not be inline in the payload"
+        );
+        assert!(!payload.contains_key("network"));
+        assert!(payload.contains_key("_sd"), "expected _sd digests");
+
+        let named = disclosures_of(&credential);
+        assert_eq!(
+            named["credential_id"],
+            serde_json::json!("urn:uuid:9f2b7a2e-3b74-4a0d-9b1a-0e6a91f5d2c8")
+        );
+        assert_eq!(
+            named["network"],
+            serde_json::json!(["example_network", "example_network_2"]),
+            "an array-valued network must survive as an array"
+        );
+        assert!(
+            !named.contains_key("card_id"),
+            "an unsupplied optional claim must not be disclosed"
+        );
+    }
+
+    /// The single-network case: `network` as a plain string, which the DPC schema
+    /// allows alongside the array form.
+    #[tokio::test]
+    async fn dpc_shaped_type_accepts_a_single_string_network() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "credential_id".to_string(),
+            serde_json::json!("urn:uuid:abc"),
+        );
+        claims.insert("network".to_string(), serde_json::json!("example_network"));
+
+        let credential = issue_for_test_with_claims(&config, "com.emvco.dpc.card", claims).await;
+        let named = disclosures_of(&credential);
+
+        assert_eq!(
+            named["network"],
+            serde_json::json!("example_network"),
+            "a string-valued network must survive as a string, not be wrapped"
+        );
+    }
+
     /// `exp` must follow the credential type's configured lifetime rather than
     /// a hardcoded year.
     #[tokio::test]
