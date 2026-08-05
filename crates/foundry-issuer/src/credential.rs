@@ -395,7 +395,11 @@ pub async fn handle_credential_request(
 
                 let sd_claims = IssuerClaims {
                     iss: config.issuer.credential_issuer.clone(),
-                    sub: format!("sub_{}", tx.transaction_id),
+                    // Omitted deliberately: a per-transaction `sub` is a static
+                    // correlation identifier that no verifier needs and that
+                    // leaks an internal transaction id into every presentation.
+                    // See docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md §1.2(a).
+                    sub: None,
                     iat: now_unix,
                     exp: now_unix + 86400 * 365,
                     vct,

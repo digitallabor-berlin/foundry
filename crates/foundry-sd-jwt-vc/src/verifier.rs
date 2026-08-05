@@ -408,7 +408,12 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            // Deliberately `Some` here, unlike every other fixture in this file:
+            // this test is the one place that pins the round-trip invariant that
+            // an explicitly configured `sub` is emitted and survives
+            // verification. `sub` is omitted by default (see IssuerClaims.sub),
+            // so without this site nothing would cover the `Some` path end to end.
+            sub: Some("did:example:alice".to_string()),
             iat: 1700000000,
             exp: 1800000000,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -448,7 +453,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "s".to_string(),
+            sub: None,
             iat: 1700000000,
             exp: 1800000000,
             vct: "v".to_string(),

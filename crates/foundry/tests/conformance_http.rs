@@ -1100,7 +1100,7 @@ fn build_presentation(
 
     let claims = foundry_sd_jwt_vc::builder::IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
