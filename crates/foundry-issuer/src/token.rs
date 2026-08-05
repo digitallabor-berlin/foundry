@@ -357,6 +357,7 @@ mod tests {
             trusted_anchors: Vec::new(),
             pop_max_age_secs: 300,
             challenge_mode: Mode::Disabled,
+            android: Default::default(),
         }
     }
 
@@ -1490,6 +1491,7 @@ mod tests {
             }],
             pop_max_age_secs: 300,
             challenge_mode: Mode::Disabled,
+            android: Default::default(),
         };
         (dir, mode)
     }

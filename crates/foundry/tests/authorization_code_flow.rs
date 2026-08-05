@@ -68,12 +68,14 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
                 challenge_mode: Mode::Disabled,
+                android: Default::default(),
             },
             key_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
                 pop_max_age_secs: 300,
                 challenge_mode: Mode::Disabled,
+                android: Default::default(),
             },
             status_list: StatusListConfig {
                 enabled: false,

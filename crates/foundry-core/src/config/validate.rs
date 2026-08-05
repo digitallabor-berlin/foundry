@@ -174,6 +174,20 @@ impl Config {
             }
         }
 
+        // Fail closed at load time. With the proof type enabled and no anchors
+        // every attestation chain would be rejected at request time -- a silent
+        // total outage. Failing here makes it a legible misconfiguration.
+        if self.issuer.key_attestation.android.mode != super::model::Mode::Disabled
+            && self.issuer.key_attestation.trusted_anchors.is_empty()
+        {
+            return Err(ConfigError::Validation(
+                "issuer.key_attestation.android.mode is enabled but \
+                 issuer.key_attestation.trusted_anchors is empty: every \
+                 android_keystore_attestation chain would be rejected"
+                    .into(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -342,12 +356,14 @@ mod tests {
                     trusted_anchors: Vec::new(),
                     pop_max_age_secs: 300,
                     challenge_mode: Mode::Disabled,
+                    android: Default::default(),
                 },
                 key_attestation: AttestationMode {
                     mode: Mode::Optional,
                     trusted_anchors: Vec::new(),
                     pop_max_age_secs: 300,
                     challenge_mode: Mode::Disabled,
+                    android: Default::default(),
                 },
                 status_list: StatusListConfig {
                     enabled: false,
@@ -753,5 +769,41 @@ mod tests {
         let rs = cfg.issuer.response_encryption.as_ref().unwrap();
         assert_eq!(rs.enc_values_supported, vec!["A128GCM", "A256GCM"]);
         assert!(!rs.encryption_required);
+    }
+
+    #[test]
+    fn android_keystore_attestation_requires_trust_anchors() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.key_attestation.android.mode = Mode::Optional;
+        cfg.issuer.key_attestation.trusted_anchors = Vec::new();
+        let err = cfg
+            .validate()
+            .expect_err("enabling the proof type with no anchors must fail at load time");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("android") && msg.contains("trusted_anchors"),
+            "the message must name both fields, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn android_keystore_attestation_disabled_needs_no_anchors() {
+        let cfg = config_passing_keyref_check();
+        assert_eq!(
+            cfg.issuer.key_attestation.android.mode,
+            Mode::Disabled,
+            "the default must be Disabled so no deployment changes behaviour on upgrade"
+        );
+        cfg.validate()
+            .expect("the default configuration stays valid");
+    }
+
+    #[test]
+    fn android_key_mint_security_level_defaults_to_trusted_environment() {
+        let cfg = minimal_config();
+        assert_eq!(
+            cfg.issuer.key_attestation.android.key_mint_security_level,
+            crate::trust::android_attestation::SecurityLevel::TrustedEnvironment
+        );
     }
 }

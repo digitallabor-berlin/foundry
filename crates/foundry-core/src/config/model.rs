@@ -190,6 +190,10 @@ pub struct AttestationMode {
     /// `pop_max_age_secs` above.
     #[serde(default = "default_disabled")]
     pub challenge_mode: Mode,
+    /// Google Wallet's `android_keystore_attestation` proof type. Consulted
+    /// **only** for `issuer.key_attestation`.
+    #[serde(default)]
+    pub android: AndroidKeystoreConfig,
 }
 
 fn default_pop_max_age_secs() -> u64 {
@@ -214,6 +218,57 @@ impl Default for AttestationMode {
             trusted_anchors: Vec::new(),
             pop_max_age_secs: default_pop_max_age_secs(),
             challenge_mode: default_disabled(),
+            android: AndroidKeystoreConfig::default(),
+        }
+    }
+}
+
+/// Google Wallet's `android_keystore_attestation` proof type.
+///
+/// Vendor profile: `docs/specs/google-wallet-openid4vci-profile.md`. Design:
+/// `docs/superpowers/specs/2026-08-04-android-keystore-attestation-proof-design.md`.
+///
+/// Consulted **only** for `issuer.key_attestation` -- `AttestationMode` is
+/// shared with `issuer.wallet_attestation`, which has no such proof type and
+/// never reads this field. Same restriction as `pop_max_age_secs` and
+/// `challenge_mode`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AndroidKeystoreConfig {
+    /// - `disabled` (default) — an `android_keystore_attestation` member in a
+    ///   Credential Request is rejected, and the proof type is absent from
+    ///   issuer metadata. Reproduces pre-support behaviour exactly.
+    /// - `optional` — accepted alongside the `jwt` proof type.
+    /// - `required` — accepted, and a `jwt` proofs member is rejected: a
+    ///   Google-Wallet-only deployment.
+    ///
+    /// Deliberately `default_disabled()` rather than `#[serde(default)]`:
+    /// `Mode::default()` is `Optional`, which would silently start accepting a
+    /// proof type that carries no proof of possession of the attested key.
+    #[serde(default = "default_disabled")]
+    pub mode: Mode,
+    /// Minimum accepted hardware security level, compared against **both**
+    /// `attestationSecurityLevel` and `keyMintSecurityLevel` under
+    /// `Software < TrustedEnvironment < StrongBox`.
+    ///
+    /// Advertised in issuer metadata as `proof_types_supported`
+    /// `.android_keystore_attestation.key_attestations_required`
+    /// `.key_mint_security_level`.
+    #[serde(default = "default_key_mint_security_level")]
+    pub key_mint_security_level: crate::trust::android_attestation::SecurityLevel,
+}
+
+fn default_key_mint_security_level() -> crate::trust::android_attestation::SecurityLevel {
+    crate::trust::android_attestation::SecurityLevel::TrustedEnvironment
+}
+
+// Hand-written for the same reason `AttestationMode`'s is: a derived `Default`
+// would give `mode` the `Mode::default()` value (`Optional`) and silently enable
+// the proof type for any code path using `..Default::default()`.
+impl Default for AndroidKeystoreConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_disabled(),
+            key_mint_security_level: default_key_mint_security_level(),
         }
     }
 }
