@@ -10,14 +10,75 @@ use josekit::jwk::Jwk;
 use josekit::jws::{JwsHeader, ES256};
 use serde::{Deserialize, Serialize};
 
-/// Wire shape of the OpenID4VCI `proofs` request member. Only the `jwt`
-/// proof type is supported — that is the only proof path
-/// `eudi-lib-jvm-openid4vci-kt`'s `ProofsSpecification.JwtProofs` (the
-/// wallet this issuer serves) ever emits; `di_vp` and `attestation` proof
-/// types are intentionally not accepted.
+/// Wire shape of the OpenID4VCI `proofs` request member.
+///
+/// OpenID4VCI Credential Request (L852): "The `proofs` parameter contains
+/// exactly one parameter named as the proof type" -- enforced by
+/// [`ProofsRequest::resolve`], not by the type, because "exactly one of two
+/// optional members" is not expressible in a serde-derived struct.
+///
+/// Two proof types are accepted:
+///
+/// * `jwt` -- OpenID4VCI's own (L2610), the only path
+///   `eudi-lib-jvm-openid4vci-kt`'s `ProofsSpecification.JwtProofs` emits.
+/// * `android_keystore_attestation` -- Google Wallet's, an array of X.509
+///   certificate chains (see `crate::keystore_proof`). A proof-type name beyond
+///   the registry, which Credential Issuer Metadata (L1395) explicitly permits.
+///
+/// `di_vp` and the top-level `attestation` proof type remain unaccepted;
+/// `deny_unknown_fields` makes that an explicit rejection rather than a silently
+/// ignored member.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProofsRequest {
-    pub jwt: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwt: Option<Vec<String>>,
+    /// One entry per attested key; each entry is a certificate chain, leaf
+    /// first, each certificate base64-STANDARD DER.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub android_keystore_attestation: Option<Vec<Vec<String>>>,
+}
+
+/// The single proof type a `proofs` member resolved to.
+#[derive(Debug)]
+pub enum ResolvedProofs<'a> {
+    Jwt(&'a [String]),
+    AndroidKeystoreAttestation(&'a [Vec<String>]),
+}
+
+impl ProofsRequest {
+    /// A `jwt`-only `proofs` member. Keeps call sites that predate the second
+    /// proof type readable.
+    pub fn from_jwts(jwts: Vec<String>) -> Self {
+        Self {
+            jwt: Some(jwts),
+            android_keystore_attestation: None,
+        }
+    }
+
+    /// Resolve to exactly one non-empty proof type, per L852.
+    ///
+    /// An empty array is treated as absence, preserving the pre-existing
+    /// "missing proof in credential request" message for that case.
+    pub fn resolve(&self) -> Result<ResolvedProofs<'_>, IssuanceError> {
+        let jwt = self.jwt.as_deref().filter(|j| !j.is_empty());
+        let android = self
+            .android_keystore_attestation
+            .as_deref()
+            .filter(|a| !a.is_empty());
+        match (jwt, android) {
+            (Some(j), None) => Ok(ResolvedProofs::Jwt(j)),
+            (None, Some(a)) => Ok(ResolvedProofs::AndroidKeystoreAttestation(a)),
+            (Some(_), Some(_)) => Err(IssuanceError::InvalidProof(
+                "proofs must contain exactly one proof type, found both jwt and \
+                 android_keystore_attestation"
+                    .into(),
+            )),
+            (None, None) => Err(IssuanceError::InvalidProof(
+                "missing proof in credential request".into(),
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -593,5 +654,76 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, IssuanceError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn resolves_a_jwt_only_proofs_object() {
+        let p = ProofsRequest::from_jwts(vec!["a".into(), "b".into()]);
+        match p.resolve().expect("resolves") {
+            ResolvedProofs::Jwt(jwts) => assert_eq!(jwts.len(), 2),
+            other => panic!("expected Jwt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolves_an_android_only_proofs_object() {
+        let p: ProofsRequest = serde_json::from_value(serde_json::json!({
+            "android_keystore_attestation": [["MII"], ["MII"]]
+        }))
+        .expect("deserializes");
+        match p.resolve().expect("resolves") {
+            ResolvedProofs::AndroidKeystoreAttestation(chains) => assert_eq!(chains.len(), 2),
+            other => panic!("expected AndroidKeystoreAttestation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_two_proof_types_at_once() {
+        // OpenID4VCI Credential Request (L852): "The proofs parameter contains
+        // exactly one parameter named as the proof type".
+        let p: ProofsRequest = serde_json::from_value(serde_json::json!({
+            "jwt": ["a"],
+            "android_keystore_attestation": [["MII"]]
+        }))
+        .expect("deserializes");
+        let err = p.resolve().expect_err("two proof types must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidProof(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_an_empty_proofs_object() {
+        let p: ProofsRequest = serde_json::from_value(serde_json::json!({})).expect("deserializes");
+        let err = p.resolve().expect_err("no proof type must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidProof(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_an_empty_proof_array() {
+        let p = ProofsRequest::from_jwts(Vec::new());
+        let err = p
+            .resolve()
+            .expect_err("an empty jwt array must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidProof(_)), "got {err:?}");
+        let p: ProofsRequest = serde_json::from_value(serde_json::json!({
+            "android_keystore_attestation": []
+        }))
+        .expect("deserializes");
+        assert!(
+            p.resolve().is_err(),
+            "an empty chain array must be rejected"
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_proof_type_name() {
+        // A strictness gain over the previous shape, where serde ignored the
+        // unknown key and the request then failed as "missing jwt". L1395 lets
+        // an issuer accept proof-type names beyond the registry, but not ones it
+        // has never heard of.
+        let err = serde_json::from_value::<ProofsRequest>(serde_json::json!({
+            "di_vp": ["something"]
+        }))
+        .expect_err("an unknown proof type must not deserialize");
+        assert!(err.to_string().contains("di_vp"), "got {err}");
     }
 }

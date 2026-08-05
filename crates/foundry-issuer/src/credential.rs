@@ -3,7 +3,7 @@
 use crate::dpop::{claim_dpop_jti, verify_dpop_proof, DpopPresentation};
 use crate::error::IssuanceError;
 use crate::nonce::NonceSecret;
-use crate::proof::{verify_holder_proof, ProofsRequest};
+use crate::proof::{verify_holder_proof, ProofsRequest, ResolvedProofs};
 use crate::transaction::{
     load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
 };
@@ -278,30 +278,51 @@ pub async fn handle_credential_request(
         }
     }
 
-    let proof_jwts = req
+    let proofs = req
         .proofs
         .as_ref()
-        .map(|p| p.jwt.as_slice())
-        .filter(|jwts| !jwts.is_empty())
         .ok_or_else(|| IssuanceError::InvalidProof("missing proof in credential request".into()))?;
 
     let key_attestation_trust_store = foundry_core::trust::TrustStore::from_config(
         &config.issuer.key_attestation.trusted_anchors,
     )?;
 
-    let verified_proofs = proof_jwts
-        .iter()
-        .map(|jwt_str| {
-            verify_holder_proof(
-                jwt_str,
-                &config.issuer.credential_issuer,
+    let verified_proofs = match proofs.resolve()? {
+        ResolvedProofs::Jwt(proof_jwts) => {
+            // `android.mode: required` makes this issuer accept only Google
+            // Wallet's proof type. The parent `key_attestation.mode` continues
+            // to govern the jwt path's own key-source rules.
+            if config.issuer.key_attestation.android.mode == foundry_core::config::Mode::Required {
+                return Err(IssuanceError::InvalidProof(
+                    "the jwt proof type is not accepted: this issuer requires \
+                     android_keystore_attestation"
+                        .into(),
+                ));
+            }
+            proof_jwts
+                .iter()
+                .map(|jwt_str| {
+                    verify_holder_proof(
+                        jwt_str,
+                        &config.issuer.credential_issuer,
+                        nonce_secret,
+                        now_unix,
+                        config.issuer.key_attestation.mode.clone(),
+                        &key_attestation_trust_store,
+                    )
+                })
+                .collect::<Result<Vec<_>, IssuanceError>>()?
+        }
+        ResolvedProofs::AndroidKeystoreAttestation(chains) => {
+            crate::keystore_proof::verify_android_keystore_proofs(
+                chains,
+                &config.issuer.key_attestation.android,
+                &key_attestation_trust_store,
                 nonce_secret,
                 now_unix,
-                config.issuer.key_attestation.mode.clone(),
-                &key_attestation_trust_store,
-            )
-        })
-        .collect::<Result<Vec<_>, IssuanceError>>()?;
+            )?
+        }
+    };
 
     let cred_type = config
         .credential_types
@@ -628,9 +649,7 @@ mod tests {
         let req = CredentialRequest {
             credential_configuration_id: Some("pid".to_string()),
             format: Some("dc+sd-jwt".to_string()),
-            proofs: Some(ProofsRequest {
-                jwt: vec![proof_jwt],
-            }),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
             credential_response_encryption: None,
         };
 
@@ -655,6 +674,75 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(updated_tx.state, IssuanceState::Issued);
+    }
+
+    #[tokio::test]
+    async fn required_android_mode_rejects_a_jwt_proof() {
+        // Same setup as `issues_sd_jwt_vc_credential_successfully` above, with
+        // `android.mode` made mandatory: a jwt proof must then be rejected
+        // before any credential is issued, naming the required proof type.
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let mut config = test_config(key_path.to_str().unwrap());
+        config.issuer.key_attestation.android.mode = Mode::Required;
+        let storage = test_storage().await;
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let tx = IssuanceTransaction {
+            transaction_id: "tx-cred-android-required".to_string(),
+            credential_type_id: "pid".to_string(),
+            claims,
+            pre_authorized_code: Some("code-android-required".to_string()),
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some("at_secret_android_required".to_string()),
+            state: IssuanceState::Offered,
+            created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            dpop_jkt: None,
+        };
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, 1_700_000_000);
+        let (proof_jwt, _) = generate_proof(&nonce, "https://issuer.example.com");
+
+        let req = CredentialRequest {
+            credential_configuration_id: Some("pid".to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
+            credential_response_encryption: None,
+        };
+
+        let err = handle_credential_request(
+            &config,
+            &storage,
+            "at_secret_android_required",
+            &req,
+            &secret,
+            &bearer_presentation(),
+            1_700_000_010,
+            false,
+        )
+        .await
+        .expect_err("a jwt proof must be rejected when android.mode is Required");
+
+        assert!(
+            matches!(err, IssuanceError::InvalidProof(ref m)
+                if m.contains("requires android_keystore_attestation")),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -777,9 +865,7 @@ mod tests {
         let req = CredentialRequest {
             credential_configuration_id: Some("pid".to_string()),
             format: Some("dc+sd-jwt".to_string()),
-            proofs: Some(ProofsRequest {
-                jwt: vec![proof_jwt],
-            }),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
             credential_response_encryption: None,
         };
 
@@ -875,9 +961,7 @@ mod tests {
         CredentialRequest {
             credential_configuration_id: Some("pid".to_string()),
             format: Some("dc+sd-jwt".to_string()),
-            proofs: Some(ProofsRequest {
-                jwt: vec![proof_jwt],
-            }),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
             credential_response_encryption: None,
         }
     }

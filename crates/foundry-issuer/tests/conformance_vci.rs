@@ -729,9 +729,7 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
     let req = CredentialRequest {
         credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
 
@@ -772,9 +770,7 @@ async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invali
     let req = CredentialRequest {
         credential_configuration_id: Some("mdl".to_string()),
         format: Some("mso_mdoc".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
 
@@ -812,9 +808,7 @@ async fn gap_vci_02_absent_credential_configuration_id_is_invalid_credential_req
     let req = CredentialRequest {
         credential_configuration_id: None,
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
 
@@ -852,9 +846,9 @@ async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verifica
     let req = CredentialRequest {
         credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec!["not-a-jwt-at-all".to_string()],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![
+            "not-a-jwt-at-all".to_string()
+        ])),
         credential_response_encryption: None,
     };
 
@@ -894,9 +888,7 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
     let req = CredentialRequest {
         credential_configuration_id: Some("mdl".to_string()),
         format: Some("mso_mdoc".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
 
@@ -985,9 +977,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
     let req = CredentialRequest {
         credential_configuration_id: Some("mdl".to_string()),
         format: Some("mso_mdoc".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
     let res = handle_credential_request(
@@ -1875,7 +1865,7 @@ async fn vci_0196_proofs_jwt_array_must_be_non_empty() {
     let req = CredentialRequest {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest { jwt: vec![] }),
+        proofs: Some(ProofsRequest::from_jwts(vec![])),
         credential_response_encryption: None,
     };
 
@@ -2069,9 +2059,7 @@ async fn vci_0207_proof_iss_must_be_omitted_after_anonymous_pre_auth_access() {
     let req = CredentialRequest {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![proof_jwt],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
         credential_response_encryption: None,
     };
 
@@ -2202,9 +2190,7 @@ async fn vci_0058_plural_proofs_validates_every_proof_not_just_the_first() {
     let req = CredentialRequest {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![good, bad],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![good, bad])),
         credential_response_encryption: None,
     };
 
@@ -2473,9 +2459,7 @@ async fn haip_0011_multiple_proofs_yield_one_credential_per_proof() {
     let req = CredentialRequest {
         credential_configuration_id: Some("pid".to_string()),
         format: Some("dc+sd-jwt".to_string()),
-        proofs: Some(ProofsRequest {
-            jwt: vec![first, second],
-        }),
+        proofs: Some(ProofsRequest::from_jwts(vec![first, second])),
         credential_response_encryption: None,
     };
 
