@@ -277,7 +277,7 @@ async fn full_verification_flow_end_to_end() {
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -410,7 +410,7 @@ async fn dc_api_response_via_admin_endpoint_succeeds() {
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -561,7 +561,7 @@ async fn dc_api_response_admin_endpoint_rejects_resubmission() {
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -696,7 +696,7 @@ async fn resubmitting_a_verification_response_is_rejected() {
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -920,7 +920,7 @@ async fn presentation_from_untrusted_issuer_is_rejected() {
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1045,7 +1045,7 @@ async fn dcql_vct_mismatch_is_rejected() {
     select.insert("given_name".to_string(), serde_json::json!("Alice"));
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/OTHER".to_string(),
@@ -1168,7 +1168,7 @@ async fn run_status_flow(revoked_idx: Option<u64>, credential_idx: u64) -> Verif
     select.insert("given_name".to_string(), serde_json::json!("Alice"));
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1485,7 +1485,7 @@ async fn pending_verification_with_vp_token(
 
     let claims = IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),

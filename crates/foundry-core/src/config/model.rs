@@ -423,6 +423,15 @@ pub struct CredentialType {
     pub display: Vec<serde_json::Value>,
     #[serde(default)]
     pub claims: Vec<ClaimDef>,
+    /// Credential lifetime in seconds: the issued credential's `exp` is its
+    /// `iat` plus this value.
+    ///
+    /// Absent resolves to 365 days, the value the Credential Endpoint hardcoded
+    /// before this field existed. A credential's lifecycle is independent of the
+    /// lifecycle of whatever it attests, so ecosystems with short-lived
+    /// credentials set this explicitly.
+    #[serde(default)]
+    pub validity_seconds: Option<u64>,
 }
 
 impl CredentialType {
@@ -431,15 +440,38 @@ impl CredentialType {
     pub fn resolved_scope(&self) -> &str {
         self.scope.as_deref().unwrap_or(&self.id)
     }
+
+    /// The configured credential lifetime, or the 365-day default.
+    /// See the `validity_seconds` field.
+    pub fn resolved_validity_seconds(&self) -> u64 {
+        self.validity_seconds.unwrap_or(31_536_000)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ClaimDef {
     pub path: Vec<String>,
+    /// Whether a value for this claim must be supplied when an offer is created.
+    ///
+    /// Absent resolves to `!selectively_disclosable` — exactly the rule
+    /// `create_offer` applied before this field existed. Setting it explicitly
+    /// decouples "mandatory" from "disclosable", which some credential types
+    /// require: a claim can be mandatory in the credential's own schema *and*
+    /// selectively disclosable in the SD-JWT.
+    #[serde(default)]
+    pub required: Option<bool>,
     #[serde(default)]
     pub selectively_disclosable: bool,
     #[serde(default)]
     pub display: Vec<serde_json::Value>,
+}
+
+impl ClaimDef {
+    /// Whether an offer must carry a value for this claim.
+    /// See the `required` field for the default-resolution rule.
+    pub fn is_required(&self) -> bool {
+        self.required.unwrap_or(!self.selectively_disclosable)
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +691,84 @@ verifier:
 
         let dpop: DpopConfig = serde_json::from_str(r#"{"nonce_mode":"optional"}"#).expect("dpop");
         assert_eq!(dpop.nonce_mode, Mode::Optional);
+    }
+
+    /// `required` absent must reproduce the historical rule exactly:
+    /// non-disclosable claims were implicitly mandatory, disclosable ones
+    /// implicitly optional.
+    #[test]
+    fn claim_required_absent_resolves_to_the_historical_rule() {
+        let disclosable = ClaimDef {
+            path: vec!["given_name".to_string()],
+            required: None,
+            selectively_disclosable: true,
+            display: vec![],
+        };
+        assert!(!disclosable.is_required());
+
+        let always = ClaimDef {
+            path: vec!["country".to_string()],
+            required: None,
+            selectively_disclosable: false,
+            display: vec![],
+        };
+        assert!(always.is_required());
+    }
+
+    /// The combination a payment-credential schema needs: mandatory AND
+    /// selectively disclosable, which the historical rule could not express.
+    #[test]
+    fn claim_required_can_be_set_independently_of_disclosability() {
+        let required_and_disclosable = ClaimDef {
+            path: vec!["credential_id".to_string()],
+            required: Some(true),
+            selectively_disclosable: true,
+            display: vec![],
+        };
+        assert!(required_and_disclosable.is_required());
+
+        let optional_and_always_disclosed = ClaimDef {
+            path: vec!["nickname".to_string()],
+            required: Some(false),
+            selectively_disclosable: false,
+            display: vec![],
+        };
+        assert!(!optional_and_always_disclosed.is_required());
+    }
+
+    /// Absent must reproduce the value the Credential Endpoint hardcoded before
+    /// this field existed: 365 days.
+    #[test]
+    fn credential_validity_defaults_to_one_year() {
+        let yaml = format!(
+            "{MINIMAL}\ncredential_types:\n  - id: pid\n    format: dc+sd-jwt\n    vct: https://example.test/vct/pid\n"
+        );
+        let cfg = parse(&yaml);
+        assert_eq!(cfg.credential_types[0].validity_seconds, None);
+        assert_eq!(
+            cfg.credential_types[0].resolved_validity_seconds(),
+            31_536_000
+        );
+    }
+
+    #[test]
+    fn credential_validity_is_settable() {
+        let yaml = format!(
+            "{MINIMAL}\ncredential_types:\n  - id: dpc\n    format: dc+sd-jwt\n    vct: com.emvco.dpc.card\n    validity_seconds: 43200\n"
+        );
+        let cfg = parse(&yaml);
+        assert_eq!(cfg.credential_types[0].resolved_validity_seconds(), 43_200);
+    }
+
+    /// An omitted `required` key must deserialize, so existing config files
+    /// need no edit.
+    #[test]
+    fn claim_def_without_required_deserializes() {
+        let cd: ClaimDef =
+            serde_yaml::from_str("path: [given_name]\nselectively_disclosable: true\n")
+                .expect("claim def parses");
+        assert_eq!(cd.required, None);
+        assert!(!cd.is_required());
     }
 }
 

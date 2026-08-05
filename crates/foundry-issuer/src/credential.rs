@@ -395,9 +395,15 @@ pub async fn handle_credential_request(
 
                 let sd_claims = IssuerClaims {
                     iss: config.issuer.credential_issuer.clone(),
-                    sub: format!("sub_{}", tx.transaction_id),
+                    // Omitted deliberately: a per-transaction `sub` is a static
+                    // correlation identifier that no verifier needs and that
+                    // leaks an internal transaction id into every presentation.
+                    // See docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md §1.2(a).
+                    sub: None,
                     iat: now_unix,
-                    exp: now_unix + 86400 * 365,
+                    // Lifetime is per credential type; see
+                    // CredentialType::resolved_validity_seconds.
+                    exp: now_unix + cred_type.resolved_validity_seconds() as i64,
                     vct,
                     cnf_jwk: holder_jwk_json,
                     status_list_index,
@@ -429,7 +435,10 @@ pub async fn handle_credential_request(
                     namespaces: ns_map,
                     device_key_jwk: holder_jwk_json,
                     signed_at: now_unix,
-                    valid_until: now_unix + 86400 * 365,
+                    // Same per-credential-type lifetime as the SD-JWT VC branch
+                    // above: a config knob that applied to only one of the two
+                    // formats would be a defect, not a feature.
+                    valid_until: now_unix + cred_type.resolved_validity_seconds() as i64,
                 };
 
                 let cbor_bytes = build_mdoc(mdoc_claims, &signer, x5c.clone()).map_err(|e| {
@@ -557,9 +566,11 @@ mod tests {
                 display: vec![],
                 claims: vec![ClaimDef {
                     path: vec!["given_name".to_string()],
+                    required: None,
                     selectively_disclosable: true,
                     display: vec![],
                 }],
+                validity_seconds: None,
             }],
             verifier: VerifierConfig {
                 signing_key: "verifier_signing".to_string(),
@@ -1370,5 +1381,226 @@ mod tests {
         let (cfg, _dir) = cfg_with_encryption(true, true);
         let req = req_with_response_encryption(wallet_enc_jwk(), "A256GCM", None);
         assert!(check_encryption_policy(&cfg, &req, true).is_ok());
+    }
+
+    /// Run one full `handle_credential_request` and return the issued SD-JWT VC
+    /// compact presentation, so lifetime and claim-shape tests share one setup.
+    async fn issue_for_test_with_claims(
+        config: &Config,
+        credential_type_id: &str,
+        claims: serde_json::Map<String, serde_json::Value>,
+    ) -> String {
+        let storage = test_storage().await;
+
+        let tx = IssuanceTransaction {
+            transaction_id: "tx-cred-1".to_string(),
+            credential_type_id: credential_type_id.to_string(),
+            claims,
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: None,
+            status_list_index: None,
+            access_token: Some("at_secret_123".to_string()),
+            state: IssuanceState::Offered,
+            created_at: 1_700_000_000,
+            redirect_uri: None,
+            issuer_state: None,
+            authorization_code: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            dpop_jkt: None,
+        };
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let secret = test_secret();
+        let nonce = minted_nonce(&secret, 1_700_000_000);
+        let (proof_jwt, _) = generate_proof(&nonce, "https://issuer.example.com");
+
+        let req = CredentialRequest {
+            credential_configuration_id: Some(credential_type_id.to_string()),
+            format: Some("dc+sd-jwt".to_string()),
+            proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
+            credential_response_encryption: None,
+        };
+
+        let res = handle_credential_request(
+            config,
+            &storage,
+            "at_secret_123",
+            &req,
+            &secret,
+            &bearer_presentation(),
+            1_700_000_010,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.credentials.len(), 1);
+        res.credentials[0].credential.clone()
+    }
+
+    /// The issuer JWT payload of an SD-JWT VC issuer presentation.
+    fn payload_of(presentation: &str) -> serde_json::Map<String, serde_json::Value> {
+        let jwt = presentation.split('~').next().unwrap();
+        let b64 = jwt.split('.').nth(1).unwrap();
+        let bytes = B64URL.decode(b64).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Disclosed claim name -> value, decoded from the `~`-separated disclosures.
+    fn disclosures_of(presentation: &str) -> std::collections::BTreeMap<String, serde_json::Value> {
+        presentation
+            .split('~')
+            .skip(1)
+            .filter(|s| !s.is_empty())
+            .map(|d| {
+                let raw = B64URL.decode(d).unwrap();
+                let arr: Vec<serde_json::Value> = serde_json::from_slice(&raw).unwrap();
+                (arr[1].as_str().unwrap().to_string(), arr[2].clone())
+            })
+            .collect()
+    }
+
+    /// A DPC-shaped credential type, as shipped in the quickstart config:
+    /// `credential_id` and `network` mandatory *and* selectively disclosable,
+    /// `card_id` optional.
+    fn dpc_config(key_path: &str) -> Config {
+        let mut config = test_config(key_path);
+        config.credential_types[0].id = "com.emvco.dpc.card".to_string();
+        config.credential_types[0].vct = Some("com.emvco.dpc.card".to_string());
+        config.credential_types[0].validity_seconds = Some(43_200);
+        config.credential_types[0].claims = vec![
+            ClaimDef {
+                path: vec!["credential_id".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["network".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["card_id".to_string()],
+                required: None,
+                selectively_disclosable: true,
+                display: vec![],
+            },
+        ];
+        config
+    }
+
+    fn issuer_key_for_test() -> (tempfile::TempDir, String) {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+        let s = key_path.to_str().unwrap().to_string();
+        (key_dir, s)
+    }
+
+    /// The co-badged case: `network` carries an array. Required claims must land
+    /// in the disclosures rather than inline in the payload, and an unsupplied
+    /// optional claim must be absent entirely.
+    #[tokio::test]
+    async fn dpc_shaped_type_issues_with_claims_in_disclosures() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "credential_id".to_string(),
+            serde_json::json!("urn:uuid:9f2b7a2e-3b74-4a0d-9b1a-0e6a91f5d2c8"),
+        );
+        claims.insert(
+            "network".to_string(),
+            serde_json::json!(["example_network", "example_network_2"]),
+        );
+        // card_id deliberately not supplied.
+
+        let credential = issue_for_test_with_claims(&config, "com.emvco.dpc.card", claims).await;
+        let payload = payload_of(&credential);
+
+        assert_eq!(payload["vct"], "com.emvco.dpc.card");
+        assert!(!payload.contains_key("sub"), "sub must be omitted");
+        assert!(
+            !payload.contains_key("credential_id"),
+            "a selectively-disclosable claim must not be inline in the payload"
+        );
+        assert!(!payload.contains_key("network"));
+        assert!(payload.contains_key("_sd"), "expected _sd digests");
+
+        let named = disclosures_of(&credential);
+        assert_eq!(
+            named["credential_id"],
+            serde_json::json!("urn:uuid:9f2b7a2e-3b74-4a0d-9b1a-0e6a91f5d2c8")
+        );
+        assert_eq!(
+            named["network"],
+            serde_json::json!(["example_network", "example_network_2"]),
+            "an array-valued network must survive as an array"
+        );
+        assert!(
+            !named.contains_key("card_id"),
+            "an unsupplied optional claim must not be disclosed"
+        );
+    }
+
+    /// The single-network case: `network` as a plain string, which the DPC schema
+    /// allows alongside the array form.
+    #[tokio::test]
+    async fn dpc_shaped_type_accepts_a_single_string_network() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "credential_id".to_string(),
+            serde_json::json!("urn:uuid:abc"),
+        );
+        claims.insert("network".to_string(), serde_json::json!("example_network"));
+
+        let credential = issue_for_test_with_claims(&config, "com.emvco.dpc.card", claims).await;
+        let named = disclosures_of(&credential);
+
+        assert_eq!(
+            named["network"],
+            serde_json::json!("example_network"),
+            "a string-valued network must survive as a string, not be wrapped"
+        );
+    }
+
+    /// `exp` must follow the credential type's configured lifetime rather than
+    /// a hardcoded year.
+    #[tokio::test]
+    async fn credential_exp_follows_the_configured_validity() {
+        let key_dir = tempfile::tempdir().unwrap();
+        let key_path = key_dir.path().join("issuer.pem");
+        let km = foundry_core::pki::generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_path, km.private_pem).unwrap();
+
+        let mut config = test_config(key_path.to_str().unwrap());
+        config.credential_types[0].validity_seconds = Some(43_200);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let credential = issue_for_test_with_claims(&config, "pid", claims).await;
+        let payload = payload_of(&credential);
+
+        let iat = payload["iat"].as_i64().expect("iat");
+        let exp = payload["exp"].as_i64().expect("exp");
+        assert_eq!(
+            exp - iat,
+            43_200,
+            "exp must be iat + validity_seconds, got iat={iat} exp={exp}"
+        );
+        assert!(
+            !payload.contains_key("sub"),
+            "sub must not be present (it is omitted by default)"
+        );
     }
 }

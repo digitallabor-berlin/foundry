@@ -96,9 +96,11 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

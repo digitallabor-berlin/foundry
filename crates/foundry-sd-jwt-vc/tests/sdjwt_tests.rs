@@ -54,7 +54,7 @@ fn make_claims(cnf: serde_json::Value, iat: i64, exp: i64) -> IssuerClaims {
     select.insert("name".to_string(), serde_json::json!("Bob"));
     IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:bob".to_string(),
+        sub: None,
         iat,
         exp,
         vct: "vct".to_string(),

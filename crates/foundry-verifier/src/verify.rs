@@ -1003,7 +1003,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1072,7 +1072,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1161,7 +1161,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1247,7 +1247,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1327,7 +1327,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1404,7 +1404,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1472,7 +1472,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1549,7 +1549,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1758,7 +1758,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1821,7 +1821,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1897,7 +1897,7 @@ mod tests {
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1990,7 +1990,7 @@ mod tests {
             .as_secs();
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -2326,7 +2326,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -2399,7 +2399,7 @@ mod tests {
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -2470,7 +2470,7 @@ mod tests {
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -2535,7 +2535,7 @@ mod tests {
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -2599,7 +2599,7 @@ mod tests {
         select.insert("given_name".to_string(), serde_json::json!("Alice"));
         let claims = IssuerClaims {
             iss: "localhost".to_string(),
-            sub: "did:example:alice".to_string(),
+            sub: None,
             iat: (now - 100) as i64,
             exp: (now + 3600) as i64,
             vct: "https://localhost:8443/vct/pid".to_string(),

@@ -346,9 +346,11 @@ mod tests {
                 display: vec![serde_json::json!({"name": "Person ID", "locale": "en-US"})],
                 claims: vec![ClaimDef {
                     path: vec!["given_name".to_string()],
+                    required: None,
                     selectively_disclosable: true,
                     display: vec![],
                 }],
+                validity_seconds: None,
             }],
             verifier: VerifierConfig {
                 signing_key: "verifier_signing".to_string(),
@@ -532,6 +534,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         });
 
         let metadata = build_issuer_metadata(&cfg, &[]);
@@ -564,6 +567,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         });
 
         let meta = build_authorization_server_metadata(&cfg);
@@ -709,5 +713,30 @@ mod tests {
         assert_eq!(obj["enc_values_supported"], serde_json::json!(["A256GCM"]));
         assert_eq!(obj["encryption_required"], serde_json::json!(true));
         assert!(obj.get("zip_values_supported").is_none());
+    }
+
+    /// `display` is an opaque passthrough into
+    /// `credential_configurations_supported[].display`, so every configured
+    /// locale entry must arrive intact, in order, with its members preserved.
+    /// A wallet reads this array to render the credential, so silently dropping
+    /// or reordering entries would be invisible here but visible on a device.
+    #[test]
+    fn credential_configuration_display_carries_every_configured_locale() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].display = vec![
+            serde_json::json!({"name": "Payment Card", "locale": "en-US"}),
+            serde_json::json!({"name": "Zahlungskarte", "locale": "de-DE"}),
+            serde_json::json!({"name": "Carte de paiement", "locale": "fr-FR"}),
+        ];
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+
+        let locales: Vec<&str> = pid
+            .display
+            .iter()
+            .filter_map(|d| d.get("locale").and_then(|l| l.as_str()))
+            .collect();
+        assert_eq!(locales, vec!["en-US", "de-DE", "fr-FR"]);
+        assert_eq!(pid.display[1]["name"], "Zahlungskarte");
     }
 }

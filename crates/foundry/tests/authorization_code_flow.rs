@@ -98,9 +98,11 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 display: vec![],
                 claims: vec![ClaimDef {
                     path: vec!["given_name".to_string()],
+                    required: None,
                     selectively_disclosable: true,
                     display: vec![],
                 }],
+                validity_seconds: None,
             },
             // A second Credential Type, distinct from "pid", so
             // authorize_rejects_a_scope_naming_a_different_credential_type has a
@@ -114,6 +116,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ],
         verifier: VerifierConfig {

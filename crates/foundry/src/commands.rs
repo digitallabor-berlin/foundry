@@ -324,6 +324,56 @@ credential_types:
         selectively_disclosable: true
       - path: [birthdate]
         selectively_disclosable: true
+  # EMVCo Digital Payment Credential. Reference (not a vendored copy):
+  # docs/specs/emvco-dpc-schema-framework.md -- the claim set below is the
+  # SD-JWT binding of that specification's disclosable attributes.
+  - id: com.emvco.dpc.card
+    format: dc+sd-jwt
+    # Unlike `pid` above, this vct is a reverse-DNS identifier rather than a URL.
+    # The specification fixes this exact string as the canonical credential type,
+    # and uses it as the SD-JWT vct, the mdoc docType and the mdoc namespace.
+    vct: com.emvco.dpc.card
+    cryptographic_holder_binding: true
+    # 12 hours, matching the specification's own sample. A credential's lifecycle
+    # is independent of the card's.
+    validity_seconds: 43200
+    # NOTE: status_list is enabled above, so credentials of this type carry a
+    # `status` claim that the DPC payload schema does not list (it declares
+    # additionalProperties: false). That contradiction is the specification's
+    # own -- its security section separately requires status checking -- so
+    # revocation is kept rather than dropped to satisfy the schema.
+    display:
+      # Colours are single-quoted deliberately: a double-quote immediately
+      # followed by a hash would terminate the Rust raw-string literal that
+      # holds this template, so double-quoted hex colours will not compile.
+      - { locale: en-US, name: "Payment Card", background_color: '#1A1A2E', text_color: '#FFFFFF' }
+      - { locale: de-DE, name: "Zahlungskarte", background_color: '#1A1A2E', text_color: '#FFFFFF' }
+      - { locale: fr-FR, name: "Carte de paiement", background_color: '#1A1A2E', text_color: '#FFFFFF' }
+    claims:
+      # credential_id and network are mandatory in the DPC payload schema AND
+      # selectively disclosable, which is why `required` is a field separate
+      # from `selectively_disclosable`.
+      - path: [credential_id]
+        required: true
+        selectively_disclosable: true
+        display:
+          - { locale: en-US, name: "Credential ID" }
+          - { locale: de-DE, name: "Credential-ID" }
+          - { locale: fr-FR, name: "Identifiant du justificatif" }
+      # A single string for one network, or an array for co-badged cards.
+      - path: [network]
+        required: true
+        selectively_disclosable: true
+        display:
+          - { locale: en-US, name: "Payment Network" }
+          - { locale: de-DE, name: "Zahlungsnetzwerk" }
+          - { locale: fr-FR, name: "Reseau de paiement" }
+      - path: [card_id]
+        selectively_disclosable: true
+        display:
+          - { locale: en-US, name: "Card Identifier" }
+          - { locale: de-DE, name: "Karten-ID" }
+          - { locale: fr-FR, name: "Identifiant de carte" }
 verifier:
   # The Client Identifier Prefix is not configurable: HAIP OpenID4VP L256 mandates
   # `x509_hash` for signed requests, so it is always derived from the `x5c` leaf of

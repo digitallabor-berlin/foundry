@@ -8,7 +8,12 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Debug)]
 pub struct IssuerClaims {
     pub iss: String,
-    pub sub: String,
+    /// Optional and omitted by default. A synthesised per-transaction `sub` is a
+    /// unique, static, always-disclosed identifier — a correlation handle that
+    /// rides along in every presentation and that no consumer in this workspace
+    /// reads. Set it only when a deployment has a specific need. See
+    /// docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md §1.2(a).
+    pub sub: Option<String>,
     pub iat: i64,
     pub exp: i64,
     pub vct: String,
@@ -38,7 +43,9 @@ pub fn build_sd_jwt_vc(
 ) -> Result<String, FormatError> {
     let mut payload = Map::new();
     payload.insert("iss".into(), Value::String(claims.iss));
-    payload.insert("sub".into(), Value::String(claims.sub));
+    if let Some(sub) = claims.sub {
+        payload.insert("sub".into(), Value::String(sub));
+    }
     payload.insert("iat".into(), Value::Number(claims.iat.into()));
     payload.insert("exp".into(), Value::Number(claims.exp.into()));
     payload.insert("vct".into(), Value::String(claims.vct));
@@ -187,7 +194,7 @@ mod tests {
 
         let claims = IssuerClaims {
             iss: "https://issuer.dev.local".to_string(),
-            sub: "did:example:123".to_string(),
+            sub: None,
             iat: 1700000000,
             exp: 1800000000,
             vct: "https://localhost:8443/vct/pid".to_string(),
@@ -203,6 +210,56 @@ mod tests {
         let parts: Vec<&str> = result.split('~').collect();
         assert_eq!(parts[0].split('.').count(), 3); // compact JWS h.p.s
         assert!(parts.len() >= 2); // at least one disclosure segment
+    }
+
+    /// Decode the issuer JWT payload out of an issuer presentation
+    /// (`<header>.<payload>.<sig>~<disclosure>~...`).
+    fn payload_of(presentation: &str) -> serde_json::Map<String, serde_json::Value> {
+        use base64::Engine as _;
+        let jwt = presentation.split('~').next().expect("issuer jwt segment");
+        let b64 = jwt.split('.').nth(1).expect("jwt payload segment");
+        let bytes = B64URL.decode(b64).expect("payload is base64url");
+        serde_json::from_slice(&bytes).expect("payload is a JSON object")
+    }
+
+    fn claims_with_sub(sub: Option<String>) -> IssuerClaims {
+        IssuerClaims {
+            iss: "https://issuer.dev.local".to_string(),
+            sub,
+            iat: 1700000000,
+            exp: 1800000000,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: serde_json::json!({"kty": "EC", "crv": "P-256", "x": "abc", "y": "def"}),
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: serde_json::Map::new(),
+        }
+    }
+
+    /// `sub` is a unique, static, always-disclosed identifier that no consumer
+    /// in this workspace reads, so it is omitted unless explicitly set. See
+    /// docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md §1.2(a).
+    #[test]
+    fn omits_sub_when_none() {
+        let signer = test_signer();
+        let payload = payload_of(&build_sd_jwt_vc(claims_with_sub(None), &signer, None).unwrap());
+        assert!(
+            !payload.contains_key("sub"),
+            "sub must be absent from the payload when IssuerClaims.sub is None, got keys {:?}",
+            payload.keys().collect::<Vec<_>>()
+        );
+        // The rest of the payload is unaffected.
+        assert_eq!(payload["iss"], "https://issuer.dev.local");
+        assert_eq!(payload["vct"], "https://localhost:8443/vct/pid");
+    }
+
+    #[test]
+    fn includes_sub_when_some() {
+        let signer = test_signer();
+        let claims = claims_with_sub(Some("did:example:123".to_string()));
+        let payload = payload_of(&build_sd_jwt_vc(claims, &signer, None).unwrap());
+        assert_eq!(payload["sub"], "did:example:123");
     }
 
     #[test]

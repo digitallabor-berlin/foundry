@@ -134,9 +134,11 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -977,9 +979,11 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -1100,7 +1104,7 @@ fn build_presentation(
 
     let claims = foundry_sd_jwt_vc::builder::IssuerClaims {
         iss: "localhost".to_string(),
-        sub: "did:example:holder".to_string(),
+        sub: None,
         iat: (now - 100) as i64,
         exp: (now + 3600) as i64,
         vct: "https://localhost:8443/vct/pid".to_string(),
@@ -1460,9 +1464,11 @@ async fn setup_pop_test_app_with_modes(
             display: vec![],
             claims: vec![ClaimDef {
                 path: vec!["given_name".to_string()],
+                required: None,
                 selectively_disclosable: true,
                 display: vec![],
             }],
+            validity_seconds: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

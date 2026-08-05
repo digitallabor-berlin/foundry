@@ -48,6 +48,33 @@ impl Config {
                     )));
                 }
             }
+
+            // A zero lifetime yields exp == iat, so the credential is expired
+            // the instant it is issued. That is a configuration error, not a
+            // policy an operator could intend.
+            if ct.validity_seconds == Some(0) {
+                return Err(ConfigError::Validation(format!(
+                    "credential_type '{}' has validity_seconds: 0; a credential whose \
+                     exp equals its iat is never valid",
+                    ct.id
+                )));
+            }
+
+            // OpenID4VCI 1.0 Claims Path Pointer (L2366): a claims path pointer
+            // is a *non-empty* array. An empty path addresses no claim, so no
+            // supplied value can ever satisfy it -- reject at startup rather
+            // than per offer. Closes the emptiness half of GAP-VCI-13; the
+            // typing half (Vec<String> cannot express null or integer segments)
+            // remains open.
+            for cd in &ct.claims {
+                if cd.path.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "credential_type '{}' has a claim with an empty 'path'; a claims \
+                         path pointer must be a non-empty array",
+                        ct.id
+                    )));
+                }
+            }
         }
 
         // HAIP OpenID4VCI L209: the scope value MUST map to a *specific* Credential
@@ -321,7 +348,7 @@ fn validate_trust_anchor_list(
 #[cfg(test)]
 mod tests {
     use crate::config::model::{
-        AdminConfig, AttestationMode, Config, CredentialType, DpopConfig, IssuerConfig,
+        AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
         LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
         VerifierConfig, WalletFacingConfig,
     };
@@ -548,6 +575,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
             CredentialType {
                 id: "other".to_string(),
@@ -559,6 +587,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ];
         let err = cfg.validate().unwrap_err();
@@ -581,6 +610,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
             CredentialType {
                 id: "mdl".to_string(),
@@ -591,6 +621,7 @@ mod tests {
                 cryptographic_holder_binding: true,
                 display: vec![],
                 claims: vec![],
+                validity_seconds: None,
             },
         ];
         cfg.validate().unwrap();
@@ -608,6 +639,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         }];
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err}").contains("scope"), "{err}");
@@ -624,6 +656,7 @@ mod tests {
             cryptographic_holder_binding: true,
             display: vec![],
             claims: vec![],
+            validity_seconds: None,
         };
         assert_eq!(ct.resolved_scope(), "pid");
         let with_scope = CredentialType {
@@ -804,6 +837,66 @@ mod tests {
         assert_eq!(
             cfg.issuer.key_attestation.android.key_mint_security_level,
             crate::trust::android_attestation::SecurityLevel::TrustedEnvironment
+        );
+    }
+
+    /// A `dc+sd-jwt` credential type with whatever claims the caller supplies.
+    /// `minimal_config()` ships no credential types, so validation tests that
+    /// need one construct it here rather than indexing an empty vec.
+    fn sd_jwt_type(claims: Vec<ClaimDef>, validity_seconds: Option<u64>) -> CredentialType {
+        CredentialType {
+            id: "dpc".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("com.emvco.dpc.card".to_string()),
+            doctype: None,
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims,
+            validity_seconds,
+        }
+    }
+
+    /// A credential whose `exp` equals its `iat` is never usable — that is a
+    /// configuration error, not a policy choice.
+    #[test]
+    fn validity_seconds_may_not_be_zero() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.credential_types = vec![sd_jwt_type(vec![], Some(0))];
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("validity_seconds"),
+            "error must name the offending field, got: {msg}"
+        );
+    }
+
+    /// A non-zero lifetime must still pass, so the check is narrow.
+    #[test]
+    fn a_nonzero_validity_seconds_passes() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.credential_types = vec![sd_jwt_type(vec![], Some(43_200))];
+        cfg.validate().expect("a 12-hour lifetime is valid");
+    }
+
+    /// An empty claims path pointer addresses nothing, so no supplied value can
+    /// ever satisfy it. Catching it at startup beats failing per offer.
+    /// Closes the emptiness half of GAP-VCI-13.
+    #[test]
+    fn claim_path_may_not_be_empty() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.credential_types = vec![sd_jwt_type(
+            vec![ClaimDef {
+                path: vec![],
+                required: None,
+                selectively_disclosable: true,
+                display: vec![],
+            }],
+            None,
+        )];
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("path"),
+            "error must name the offending field, got: {msg}"
         );
     }
 }
