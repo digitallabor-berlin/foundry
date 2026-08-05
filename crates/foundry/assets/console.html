@@ -122,6 +122,33 @@
   }
   .error-banner.hidden { display: none; }
   .hidden { display: none; }
+  /* Small-screen (phone) treatment. The operator drives this console from the
+     same phone that holds the wallet, to trigger the Digital Credentials API
+     flow — so the DC API button is promoted to the primary action and the QR
+     code (unscannable on the device displaying it) collapses. See
+     docs/superpowers/specs/2026-08-05-admin-console-responsive-design.md. */
+  @media (max-width: 640px) {
+    body { padding: 16px; }
+    main { gap: 14px; }
+    .card { border-radius: 10px; padding: 14px; }
+    .key-bar { padding: 10px 12px; }
+    /* 16px is the threshold below which iOS Safari force-zooms the page on
+       field focus. This is a functional fix, not a cosmetic one. */
+    .key-bar input,
+    .field input[type=text], .field textarea, .field select {
+      font-size: 16px; padding: 10px 12px;
+    }
+    button.primary { width: 100%; padding: 14px 18px; font-size: 16px; }
+    /* No `display` declaration belongs in the two rules below: the DC API and
+       "Open in Wallet" buttons are hidden by JS via `.open-btn.hidden`, and an
+       override here would win on specificity and strand them visible. */
+    .uri-text { flex-basis: 100%; font-size: 13px; }
+    .copy-btn, .open-btn {
+      flex-basis: 100%; margin-left: 0; text-align: center;
+      padding: 10px 14px; font-size: 14px;
+    }
+    #offer-dc-api-btn, #verification-dc-api-btn { order: -1; }
+  }
 </style>
 </head>
 <body>
