@@ -32,7 +32,7 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 
 - **`FormatError`** (re-exported from `foundry-core::error`) — all verification errors.
 - **Builder API**:
-  - `IssuerClaims` — issuer/subject, iat/exp, vct, cnf_jwk, status_list fields, always_disclosed/selectively_disclosable maps.
+  - `IssuerClaims` — issuer, **optional** subject (`Option<String>`, omitted by default), iat/exp, vct, cnf_jwk, status_list fields, always_disclosed/selectively_disclosable maps.
   - `build_sd_jwt_vc(claims, signer, x5c?) → String` — returns issuer presentation ending with `~`.
   - `build_kb_jwt(holder_signer, aud, nonce, sd_hash) → String` — holder key-binding JWT.
   - `attach_kb_jwt(presentation, holder_signer, aud, nonce) → String` — appends KB-JWT.
@@ -69,6 +69,13 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 
 ## Gotchas
 
+- **`IssuerClaims.sub` is optional and omitted by default.** A synthesised
+  per-transaction `sub` is a unique, static, always-disclosed identifier that
+  rides along in every presentation to every verifier and that nothing in this
+  workspace reads. `build_sd_jwt_vc` emits the payload key only when the field is
+  `Some`. Do not reintroduce an unconditional `sub`. The `Some` path is covered
+  end to end by `verifier.rs`'s `parses_and_verifies_valid_presentation`, which
+  is deliberately the only fixture in that file setting it.
 - **KB-JWT sd_hash computation**: hashed over the issuer presentation STRING (everything up to and including the final `~` before the KB-JWT itself), not a computed value. Tampering with any disclosure segment invalidates the hash, raising `KeyBinding` error *before* the crate tries to parse the corrupted disclosure — so malformed disclosure JSON never surfaces as an unrelated parse error.
 - **Disclosure digest matching**: _sd array holds SHA-256(disclosure_b64); each disclosure is [salt, name, value]. Names from disclosures are injected into the payload only if their digest appears in _sd. Order matters for determinism but not validation.
 - **KB-JWT typ field**: MUST be "kb+jwt" (verified strictly, not just suggested).

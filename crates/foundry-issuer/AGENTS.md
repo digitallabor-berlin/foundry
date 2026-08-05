@@ -134,6 +134,20 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 
 ## Gotchas
 
+- **"Required" is not "not selectively disclosable".** `create_offer` gates
+  claim-presence validation on `ClaimDef::is_required()`. A claim can be
+  mandatory in a credential's own schema *and* selectively disclosable in the
+  SD-JWT; while the two were conflated, such a claim was never validated and an
+  offer omitting it issued an incomplete credential. Validation is deliberately
+  offer-time only — a transaction's claims are fixed when the offer is created,
+  so a second gate at `/credential` could only fire on an unreachable state.
+- **Credential lifetime comes from `cred_type.resolved_validity_seconds()`, in
+  both format branches.** The SD-JWT VC `exp` and the mdoc MSO `validUntil` use
+  the same resolver; a knob that applied to only one format would be a defect.
+  Note that no test issues an mdoc through `handle_credential_request` and
+  decodes MSO `validityInfo`, so that branch rests on the shared resolver's unit
+  tests rather than end-to-end coverage.
+- **Issued credentials carry no `sub`.** See `foundry-sd-jwt-vc`'s Gotchas.
 - **`build_dc_api_offer` is the one place in this crate implemented against
   vendor documentation rather than `docs/specs/`.** The `openid4vci-v1`
   protocol identifier is a Chrome origin-trial identifier with no pinned

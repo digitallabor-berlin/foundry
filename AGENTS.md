@@ -126,6 +126,26 @@ code comment naming the profile, so a reader can tell vendor accommodation from
 conformance. Do not extend the "where HAIP is stricter, HAIP wins" precedence to
 a vendor profile by analogy — that would let accommodation read as conformance.
 
+A third governing source is neither standards-track nor a vendor profile, and its
+text is **not present in this repository at all**:
+
+| External reference | Governs |
+|---|---|
+| [`emvco-dpc-schema-framework.md`](docs/specs/emvco-dpc-schema-framework.md) | EMV® Digital Payment Credential Specification — Schema Framework (v1.0, DRAFT Associate Review 2). Governs the shape of the `com.emvco.dpc.card` credential type only: its `vct`, and its three disclosable claims with their types and inclusion requirements. The linked file is a **reference stub**, not the specification — the document is all-rights-reserved and unpublished, so no verbatim copy is committed. |
+
+**External-reference rule.** Where a governing document cannot be committed —
+because its licence forbids redistribution, or because it is unpublished — the
+stub in `docs/specs/` records its exact title, version and revision, why no copy
+is in-tree, where a reader obtains one, and the interface facts foundry relies
+on, **restated rather than quoted**. Claim names, types and inclusion
+requirements are factual interface information; reproducing the document's prose
+is not. Treat the stub as the record of *which* revision the code was built
+against — never as a substitute for the text: do not infer unrecorded behaviour
+from it, obtain the document. A stub does **not** acquire the precedence of a
+standards-track specification, and where the two conflict, the specification
+wins. When the pinned revision is a draft under review, expect it to move;
+bumping it is a deliberate change, exactly as for the pinned specs above.
+
 Rules:
 
 - **Consult the spec before implementing or changing protocol-facing
@@ -408,7 +428,9 @@ recreate a `docs/superlight/` directory.
   `crates/foundry/AGENTS.md`.
 - **Protocol behaviour change** → verify it against the pinned specs in
   `docs/specs/` (§4.4) and cite the section in a code comment. **New or replaced
-  spec file in `docs/specs/`** → add or update its row in the §4.4 table.
+  spec file in `docs/specs/`** → add or update its row in the §4.4 table. A
+  governing document that cannot be committed gets a **reference stub** instead,
+  under §4.4's external-reference rule.
 - **Closing a conformance gap** → update the affected rows in
   `docs/conformance/openid4vc-conformance.md` and remove the `#[ignore]` from
   the test that cites that gap ID. The report is a living document, not a

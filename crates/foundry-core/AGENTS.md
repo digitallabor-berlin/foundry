@@ -114,6 +114,17 @@ cargo test -p foundry-core
 
 ## Gotchas
 
+- **`CredentialType` and `ClaimDef` use the `Option` + resolver pattern.**
+  `resolved_scope()`, `resolved_validity_seconds()` (default `31_536_000`) and
+  `ClaimDef::is_required()` (default `!selectively_disclosable`) all exist so an
+  omitted config key reproduces the behaviour that predated the field. Keep new
+  optional config keys to this shape rather than a bare `bool`: a two-state field
+  cannot express "unspecified, so keep the historical rule", and picking either
+  default silently changes existing deployments.
+- **Adding a field to a config struct is not a config-only change.** `ClaimDef`
+  and `CredentialType` are `Deserialize`, so YAML tolerates a missing key — but
+  every Rust struct literal in the workspace still breaks. Expect to update
+  ~20 test fixture sites per field, compiler-enumerated.
 - **`validate_chain` cryptographically verifies every link's signature, via
   OpenSSL `X509_STORE_CTX`.** As of 2026-08-04 this replaced an earlier
   implementation that only walked Distinguished-Name strings, under which a
