@@ -34,6 +34,18 @@ Where HAIP is stricter than OpenID4VCI or OpenID4VP, **HAIP wins**.
 - The protocol routes in `crates/foundry/src/server.rs`: `/token`, `/authorize`,
   `/nonce`, `/credential`, `/vp/request/:id`, `/vp/response/:id`,
   `/statuslists/:id`, and the `.well-known` metadata routes.
+- **Protocol-facing content emitted through an admin route**, where a wallet is
+  the eventual consumer. Today that means the DC API issuance offer built by
+  `build_dc_api_offer` (offer.rs) and returned from
+  `POST /admin/issuance/offers`: it embeds a whole
+  `credential_issuer_metadata` object, and a DC API wallet reads *that* copy
+  rather than fetching `/.well-known/openid-credential-issuer`. Called out
+  explicitly because listing only wallet-facing routes above was a blind spot —
+  VCI-0134 held a `conforming` verdict while this second publication surface
+  shipped an empty `credential_request_encryption.jwks` (found in interop
+  2026-08-05). The admin surface's *own* semantics (authentication, the status
+  projection) remain out of scope; only protocol content passing through it is
+  in scope.
 
 **Clause selection.** Mandatory clauses only — MUST, MUST NOT, REQUIRED, SHALL,
 SHALL NOT — over features foundry implements. Per `AGENTS.md` §4.4,
@@ -265,7 +277,7 @@ above.
 | VCI-0131 | Credential Issuer Metadata (L1369) | `nonce_endpoint`, when present, MUST use the `https` scheme | issuer | `conforming` | Same `Config::validate()` check as VCI-0130 -- `nonce_endpoint` is derived from the same `issuer.credential_issuer` | vci_0130_0131_config_validation_does_not_enforce_https_scheme_for_issuer_urls |
 | VCI-0132 | Credential Issuer Metadata (L1370) | `deferred_credential_endpoint`, when present, MUST use the `https` scheme | issuer | `not-implemented` | The Deferred Credential Endpoint is not implemented (see VCI-0084); `CredentialIssuerMetadata` (metadata.rs) has no `deferred_credential_endpoint` field, so it is never present to violate this conditional MUST |  |
 | VCI-0133 | Credential Issuer Metadata (L1371) | `notification_endpoint`, when present, MUST use the `https` scheme | issuer | `not-implemented` | The Notification Endpoint is not implemented (see VCI-0103); `CredentialIssuerMetadata` (metadata.rs) has no `notification_endpoint` field, so it is never present to violate this conditional MUST |  |
-| VCI-0134 | Credential Issuer Metadata (L1373) | `credential_request_encryption.jwks` is REQUIRED and every JWK MUST carry a unique `kid` | issuer | `conforming` | `build_issuer_metadata` publishes `credential_request_encryption.jwks` from the loaded `DecryptionKey`s, each `kid` an RFC 7638 thumbprint and therefore unique by construction | publishes_the_request_jwks_with_annotated_kids |
+| VCI-0134 | Credential Issuer Metadata (L1373) | `credential_request_encryption.jwks` is REQUIRED and every JWK MUST carry a unique `kid` | issuer | `conforming` | `build_issuer_metadata` (metadata.rs) publishes `credential_request_encryption.jwks` from the loaded `DecryptionKey`s, each `kid` an RFC 7638 thumbprint and therefore unique by construction. foundry publishes this document through **two** surfaces and both are now covered: the `.well-known` route (`server.rs`, passing `&state.request_decryption_keys`) and the DC API issuance offer's embedded `credential_issuer_metadata` (`build_dc_api_offer`, offer.rs). Until 2026-08-05 this verdict rested on the first surface only: `build_dc_api_offer` called `build_issuer_metadata(cfg, &[])`, publishing `jwks.keys: []` next to `encryption_required: true` — a document no wallet can satisfy, since L871/L873 require the Client to encrypt using the parameters from this very object. A DC API wallet never fetches the `.well-known` document, so the correct surface was unreachable to it; Google's CMWallet aborted before sending a Credential Request at all. Fixed by threading the keys through; the second test below covers the offer surface, which the original test could not reach because it calls `build_issuer_metadata` directly | publishes_the_request_jwks_with_annotated_kids, dc_api_offer_embeds_the_request_encryption_jwks |
 | VCI-0135 | Credential Issuer Metadata (L1374) | `credential_request_encryption.enc_values_supported` is REQUIRED and non-empty | issuer | `conforming` | `enc_values_supported` is published from config, validated non-empty and a subset of `{A128GCM, A256GCM}` at startup, and enforced in `decrypt_compact` | vci_0135_an_unadvertised_request_enc_is_rejected, advertised_enc_values_must_be_supported |
 | VCI-0136 | Credential Issuer Metadata (L1376) | `credential_request_encryption.encryption_required` is REQUIRED | issuer | `conforming` | `encryption_required` is a non-`Option` bool on `CredentialRequestEncryption` and is always serialised | publishes_the_request_jwks_with_annotated_kids |
 | VCI-0137 | Credential Issuer Metadata (L1378) | `credential_response_encryption.alg_values_supported` is REQUIRED and non-empty | issuer | `conforming` | `alg_values_supported` is always `["ECDH-ES"]`, fixed rather than configurable because `encrypt_compact_with_kid` supports no other key-management algorithm | publishes_response_encryption_with_ecdh_es_only |
