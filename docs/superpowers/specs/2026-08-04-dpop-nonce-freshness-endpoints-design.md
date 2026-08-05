@@ -332,13 +332,33 @@ five here so the roadmap survives in the repository rather than in memory:
 
 | Item | Scope | State |
 |---|---|---|
-| **A** | Cryptographic X.509 trust-chain verification (`validate_chain`) | merged 2026-08-04 |
-| **B** | ABCA §8 challenge retrieval + RFC 9449 §8/§9 server-provided DPoP nonces | merged 2026-08-04 |
-| **C** | Credential Request / Response JWE encryption | merged 2026-08-04 |
-| **D** | `android_keystore_attestation` proof type | open |
-| **E** | Credential-type shape (SD-JWT, `vct = com.emvco.dpc.card`) | open |
+| **A** | Cryptographic X.509 trust-chain verification (`validate_chain`) | merged 2026-08-04 (`2d50c7b`) |
+| **B** | ABCA §8 challenge retrieval + RFC 9449 §8/§9 server-provided DPoP nonces | merged 2026-08-04 (`59b36be`) |
+| **C** | Credential Request / Response JWE encryption | landed 2026-08-04 (`ece76ff`…`0a84ad1`, committed directly on `main`) |
+| **D** | `android_keystore_attestation` proof type | landed 2026-08-05 (`8b91256`…`8707af1`, committed directly on `main`) |
+| **E** | Credential-type shape (SD-JWT, `vct = com.emvco.dpc.card`) | merged 2026-08-05 (`90e80d7`) |
 
-This change belongs to none of them: it closes a gap found by re-reading the
-vendor profile after A, B and C had merged, in the seam between B (which built
-the RFC 9449 nonce mechanism) and where the vendor actually expects the nonce to
-be handed out.
+**This table is maintained past the branch that created it.** It is the only
+place the A–E decomposition is recorded, so its `State` column is updated as
+items land rather than frozen at this branch's snapshot — the surrounding prose
+is point-in-time, the table is not. Last updated 2026-08-05, on completion of E.
+
+Note that A, B and E arrived via merge commits while C and D were committed
+straight onto `main`, so "find the merge commit" is not a reliable way to date an
+item — hence the explicit ranges above. `1c1f8aa`
+(`Merge feature/dpop-nonce-freshness-endpoints`) is *this* document's change and
+belongs to no item; do not read it as B's.
+
+**All five items are now done — which is not the same as "Google Wallet
+integration is complete."** The decomposition covered the mechanisms the vendor
+profile requires; several accommodations, unresolved questions with Google, and
+one operational prerequisite remain outstanding. They are listed under "Open
+issues carried forward" in
+[`docs/superpowers/changes/2026-08-05-emvco-dpc-credential-type.md`](../changes/2026-08-05-emvco-dpc-credential-type.md),
+which is where the residual work now lives. Do not read a fully-merged A–E as a
+green light for interop.
+
+The change *this* document designs belongs to none of the five items: it closes a
+gap found by re-reading the vendor profile after A, B and C had merged, in the
+seam between B (which built the RFC 9449 nonce mechanism) and where the vendor
+actually expects the nonce to be handed out.
