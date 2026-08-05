@@ -92,6 +92,10 @@
   }
   .qr-wrap { display: flex; justify-content: center; margin: 12px 0; }
   .qr-wrap svg { background: #fff; padding: 10px; border-radius: 8px; width: 100%; max-width: 220px; height: auto; aspect-ratio: 1 / 1; }
+  .qr-disclosure > summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 10px 0; }
+  /* Desktop has room for the QR, so the disclosure affordance disappears
+     entirely and the (always-`open`) details renders as a plain container. */
+  @media (min-width: 641px) { .qr-disclosure > summary { display: none; } }
   pre.json {
     background: #0c101a; border: 1px solid var(--panel-border); border-radius: 6px;
     padding: 10px; font-size: 12px; overflow-x: auto; max-height: 220px; margin: 0;
@@ -189,7 +193,10 @@
         <a class="open-btn hidden" id="offer-open" target="_self">Open in Wallet</a>
         <button class="open-btn hidden" id="offer-dc-api-btn">Add to Wallet (Digital Credentials API)</button>
       </div>
-      <div class="qr-wrap" id="offer-qr"></div>
+      <details class="qr-disclosure" open>
+        <summary>QR code</summary>
+        <div class="qr-wrap" id="offer-qr"></div>
+      </details>
       <p>Status: <span class="badge offered" id="issuance-status">offered</span></p>
       <p class="hint hidden" id="issuance-tx-code"></p>
       <pre class="json" id="offer-json"></pre>
@@ -227,7 +234,10 @@
         <a class="open-btn hidden" id="verification-open" target="_self">Open in Wallet</a>
         <button class="open-btn hidden" id="verification-dc-api-btn">Trigger via Digital Credentials API</button>
       </div>
-      <div class="qr-wrap" id="verification-qr"></div>
+      <details class="qr-disclosure" open>
+        <summary>QR code</summary>
+        <div class="qr-wrap" id="verification-qr"></div>
+      </details>
       <p>Status: <span class="badge pending" id="verification-status">pending</span></p>
       <ul class="checks hidden" id="verification-checks"></ul>
       <pre class="json hidden" id="verification-claims"></pre>
@@ -3067,11 +3077,24 @@ var qrcode = function() {
     });
   }
 
+  /* The markup ships `open` and this closes it on small screens, rather than
+     shipping closed and opening on desktop. `open` is an HTML attribute CSS
+     cannot set, so the reverse arrangement would leave the QR unreachable
+     behind a CSS-hidden <summary> on any desktop where this script failed to
+     run. Closing-on-mobile degrades instead to the pre-existing behaviour. */
+  function initQrDisclosure() {
+    if (!window.matchMedia('(max-width: 640px)').matches) return;
+    document.querySelectorAll('.qr-disclosure').forEach(function (d) {
+      d.open = false;
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     initApiKey();
     initIssuance();
     initVerification();
     setupCopyButtons();
+    initQrDisclosure();
   });
 })();
 </script>
