@@ -110,6 +110,7 @@ pub fn build_offer_uri(offer: &CredentialOffer) -> Result<String, IssuanceError>
 pub fn build_dc_api_offer(
     cfg: &Config,
     offer: &CredentialOffer,
+    request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey],
 ) -> Result<serde_json::Value, IssuanceError> {
     // Serialize the offer rather than hand-building the object: `CredentialOffer`
     // already owns the serde renames for the grant URN key and the hyphenated
@@ -117,9 +118,21 @@ pub fn build_dc_api_offer(
     let mut root =
         serde_json::to_value(offer).map_err(|e| IssuanceError::Serialization(e.to_string()))?;
 
-    // Credential offers carry no encryption metadata; wallets read it from the
-    // well-known document.
-    let mut issuer_metadata = build_issuer_metadata(cfg, &[]);
+    // The decryption keys MUST be threaded through, not defaulted to `&[]`.
+    //
+    // This object is the ONLY issuer metadata a DC API wallet sees: the offer is
+    // handed to it in-process by the platform, so there is no fetch of the
+    // well-known document to fall back on. Building it with an empty key slice
+    // publishes `credential_request_encryption.jwks.keys: []` while
+    // `encryption_required` stays `true` -- a self-contradictory document that
+    // asks the wallet to encrypt and gives it nothing to encrypt to.
+    //
+    // OpenID4VCI L871/L873: the Client MUST encrypt the Credential Request when
+    // `encryption_required` is `true`, "using the parameters from the
+    // `credential_request_encryption` object in the Credential Issuer Metadata"
+    // (L1372 defines that object, including `jwks`). With no key there, the
+    // mandated behaviour is unperformable and a conformant wallet can only abort.
+    let mut issuer_metadata = build_issuer_metadata(cfg, request_decryption_keys);
     issuer_metadata
         .credential_configurations_supported
         .retain(|id, _| offer.credential_configuration_ids.contains(id));

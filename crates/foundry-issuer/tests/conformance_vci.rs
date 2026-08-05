@@ -238,7 +238,7 @@ fn offer_request(redirect_uri: Option<&str>) -> CreateOfferRequest {
 async fn vci_0004_0005_offer_uri_carries_exactly_one_delivery_parameter() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
 
@@ -264,7 +264,7 @@ async fn vci_0004_0005_offer_uri_carries_exactly_one_delivery_parameter() {
 async fn vci_0006_credential_issuer_is_always_present_and_matches_config() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
 
@@ -283,7 +283,7 @@ async fn vci_0006_credential_issuer_is_always_present_and_matches_config() {
 async fn vci_0007_credential_configuration_ids_are_nonempty_and_resolve_against_metadata() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let metadata = build_issuer_metadata(&cfg, &[]);
@@ -314,7 +314,7 @@ async fn vci_0012_pre_authorized_code_is_present_and_distinct_per_offer() {
     let cfg = test_config();
     let storage = test_storage().await;
 
-    let resp_a = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp_a = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code_a = resp_a
@@ -327,7 +327,7 @@ async fn vci_0012_pre_authorized_code_is_present_and_distinct_per_offer() {
         .clone();
     assert!(!code_a.is_empty());
 
-    let resp_b = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp_b = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code_b = resp_b
@@ -349,7 +349,7 @@ async fn vci_0012_pre_authorized_code_is_present_and_distinct_per_offer() {
 async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -411,7 +411,7 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
 async fn haip_0010_issuer_initiated_flow_always_produces_a_credential_offer() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
 
@@ -452,6 +452,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         &storage,
         offer_request(Some(redirect_uri)),
         1_700_000_000,
+        &[],
     )
     .await
     .unwrap();
@@ -612,7 +613,7 @@ async fn setup_credential_flow(
         tx_code_required: false,
         redirect_uri: None,
     };
-    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -939,7 +940,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         tx_code_required: false,
         redirect_uri: None,
     };
-    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -1047,7 +1048,7 @@ async fn gap_vci_13_claims_path_pointer_cannot_express_null_or_index_segments() 
 async fn haip_0025_credential_offer_uri_format_is_transport_agnostic() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
 
@@ -1073,7 +1074,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
     let storage = test_storage().await;
 
     // Half 1: a request with a valid DPoP proof gets a bound token.
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -1115,7 +1116,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
     );
 
     // Half 2: without a proof, Bearer remains correct (§5).
-    let resp2 = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp2 = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code2 = resp2
@@ -1170,7 +1171,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
 async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -1270,7 +1271,7 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         tx_code_required: true,
         redirect_uri: None,
     };
-    let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp
@@ -1325,6 +1326,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         &storage,
         offer_request(Some(redirect_uri)),
         1_700_000_000,
+        &[],
     )
     .await
     .unwrap();
@@ -1550,7 +1552,7 @@ fn signed_wallet_attestation_no_pop(exp: i64) -> (String, String) {
 async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
     let cfg = test_config();
     let storage = test_storage().await;
-    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000)
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
         .await
         .unwrap();
     let code = resp

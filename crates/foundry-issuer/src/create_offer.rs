@@ -66,6 +66,7 @@ pub async fn create_offer(
     storage: &dyn Storage,
     req: CreateOfferRequest,
     now_unix: i64,
+    request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey],
 ) -> Result<CreateOfferResponse, IssuanceError> {
     if req.redirect_uri.is_some() && req.tx_code_required {
         return Err(IssuanceError::InvalidRequest(
@@ -201,7 +202,7 @@ pub async fn create_offer(
         grants,
     };
     let credential_offer_uri = build_offer_uri(&offer)?;
-    let dc_api_offer = build_dc_api_offer(cfg, &offer)?;
+    let dc_api_offer = build_dc_api_offer(cfg, &offer, request_decryption_keys)?;
 
     Ok(CreateOfferResponse {
         transaction_id,
@@ -360,6 +361,7 @@ mod tests {
                 redirect_uri: None,
             },
             1_700_000_000,
+            &[],
         )
         .await
         .unwrap();
@@ -387,6 +389,71 @@ mod tests {
         );
     }
 
+    /// Regression: the DC API offer's embedded issuer metadata MUST carry the
+    /// request-decryption JWKs.
+    ///
+    /// That embedded object is the ONLY issuer metadata a DC API wallet sees --
+    /// the platform hands it the offer in-process, so there is no well-known
+    /// document to fall back on. Building it with an empty key slice published
+    /// `credential_request_encryption.jwks.keys: []` next to
+    /// `encryption_required: true`, which cannot be satisfied: OpenID4VCI
+    /// L871/L873 require the Client to encrypt the Credential Request "using the
+    /// parameters from the `credential_request_encryption` object in the
+    /// Credential Issuer Metadata".
+    ///
+    /// Observed in interop against Google's CMWallet sample, which aborted
+    /// before ever reaching `/credential`: with no key of `alg: ECDH-ES` in the
+    /// embedded `jwks`, it had nothing to encrypt to.
+    #[tokio::test]
+    async fn dc_api_offer_embeds_the_request_encryption_jwks() {
+        let mut cfg = test_config();
+        cfg.issuer.request_encryption = Some(foundry_core::config::RequestEncryptionConfig {
+            keys: vec!["issuer_request_enc".to_string()],
+            enc_values_supported: vec!["A128GCM".to_string()],
+            encryption_required: true,
+        });
+        let storage = test_storage().await;
+
+        let km =
+            foundry_core::pki::generate_ec_key(foundry_core::crypto::SignatureAlgorithm::Es256)
+                .unwrap();
+        let key =
+            foundry_core::crypto::jwe::DecryptionKey::from_pem(km.private_pem.as_bytes()).unwrap();
+        let expected_kid = key.kid().to_string();
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+
+        let res = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims,
+                tx_code_required: false,
+                redirect_uri: None,
+            },
+            1_700_000_000,
+            std::slice::from_ref(&key),
+        )
+        .await
+        .unwrap();
+
+        let enc = &res.dc_api_offer["credential_issuer_metadata"]["credential_request_encryption"];
+        assert_eq!(enc["encryption_required"], serde_json::json!(true));
+
+        let keys = enc["jwks"]["keys"]
+            .as_array()
+            .expect("embedded credential_request_encryption.jwks.keys must be an array");
+        assert_eq!(
+            keys.len(),
+            1,
+            "embedded jwks must carry the configured decryption key, got: {enc}"
+        );
+        assert_eq!(keys[0]["kid"], serde_json::json!(expected_kid));
+        assert_eq!(keys[0]["alg"], serde_json::json!("ECDH-ES"));
+    }
+
     /// `credential_issuer_metadata.credential_configurations_supported` must be
     /// narrowed to the offered ids: the wallet renders its consent screen from
     /// it, and shipping every configured type leaves it guessing which one the
@@ -408,6 +475,7 @@ mod tests {
                 redirect_uri: None,
             },
             1_700_000_000,
+            &[],
         )
         .await
         .unwrap();
@@ -443,7 +511,7 @@ mod tests {
             tx_code_required: true,
             redirect_uri: None,
         };
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap();
 
@@ -475,7 +543,7 @@ mod tests {
             tx_code_required: false,
             redirect_uri: None,
         };
-        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::UnknownCredentialType(_)));
@@ -492,7 +560,7 @@ mod tests {
             tx_code_required: false,
             redirect_uri: None,
         };
-        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::ClaimValidation(_)));
@@ -513,7 +581,7 @@ mod tests {
             tx_code_required: false,
             redirect_uri: None,
         };
-        create_offer(&cfg, &storage, req, 1_700_000_000)
+        create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap();
 
@@ -537,7 +605,7 @@ mod tests {
             tx_code_required: false,
             redirect_uri: None,
         };
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap();
         let tx = load_transaction(&storage, &resp.transaction_id)
@@ -565,7 +633,7 @@ mod tests {
         let storage = test_storage().await;
         let req = req_with_redirect_uri("eudi-openid4ci://authorize");
 
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap();
 
@@ -597,7 +665,7 @@ mod tests {
         let storage = test_storage().await;
         let req = req_with_redirect_uri("eudi-openid4ci://authorize");
 
-        let resp = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap();
 
@@ -613,7 +681,7 @@ mod tests {
         let mut req = req_with_redirect_uri("eudi-openid4ci://authorize");
         req.tx_code_required = true;
 
-        let err = create_offer(&cfg, &storage, req, 1_700_000_000)
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
             .unwrap_err();
         assert!(matches!(err, IssuanceError::InvalidRequest(_)));
@@ -644,6 +712,7 @@ mod tests {
                 redirect_uri: None,
             },
             1_700_000_000,
+            &[],
         )
         .await
         .expect_err("an offer omitting a required claim must be rejected");
@@ -677,6 +746,7 @@ mod tests {
                 redirect_uri: None,
             },
             1_700_000_000,
+            &[],
         )
         .await
         .expect("an offer omitting an optional claim must be accepted");

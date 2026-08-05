@@ -158,6 +158,16 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
   It narrows `credential_configurations_supported` to the offered ids, so it is
   deliberately *not* byte-identical to `GET /.well-known/openid-credential-issuer`.
   Its output embeds the `pre-authorized_code`: never log it.
+  **The embedded metadata is the ONLY issuer metadata a DC API wallet sees** —
+  the platform hands it the offer in-process, so there is no well-known fetch to
+  fall back on. Any metadata member sourced from *runtime* state (loaded keys,
+  not just `Config`) must therefore be threaded into `build_dc_api_offer`, not
+  defaulted. This shipped broken once: the call passed `&[]` for the request
+  decryption keys, publishing `credential_request_encryption.jwks.keys: []`
+  alongside `encryption_required: true` — unsatisfiable per OpenID4VCI
+  L871/L873, and Google's CMWallet aborted before reaching `/credential`.
+  Regression test: `dc_api_offer_embeds_the_request_encryption_jwks`. The
+  narrowing above is the only intended difference from the well-known document.
 - **Offers are single-use, enforced by transaction state.**
   `handle_credential_request` rejects anything whose `IssuanceState` is not
   `Offered` with `InvalidGrant("credential offer has already been claimed")`.

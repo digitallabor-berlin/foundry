@@ -221,10 +221,16 @@ pub(crate) async fn create_offer_handler(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    foundry_issuer::create_offer(&state.config, state.storage.as_ref(), req, now)
-        .await
-        .map(Json)
-        .map_err(|e| admin_error_response(&e))
+    foundry_issuer::create_offer(
+        &state.config,
+        state.storage.as_ref(),
+        req,
+        now,
+        &state.request_decryption_keys,
+    )
+    .await
+    .map(Json)
+    .map_err(|e| admin_error_response(&e))
 }
 
 /// Narrow, admin-facing projection of a [`foundry_issuer::IssuanceTransaction`].
