@@ -1018,27 +1018,24 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
 // GAP-VCI-13 — OpenID4VCI Claims Path Pointer (L2366); Claims Description /
 // Issuer Metadata (L2323): a claims path pointer MUST be a non-empty array of
 // strings, nulls and integers.
+//
+// The *emptiness* half of this gap was closed 2026-08-05: `Config::validate()`
+// now rejects a credential type carrying a claim with an empty `path` (see
+// foundry-core's `claim_path_may_not_be_empty`). The *typing* half below
+// remains open, which is why this entry survives.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-13: OpenID4VCI Claims Path Pointer (L2366) — a claims path pointer MUST be a non-empty array, but Config::validate() never checks this, and ClaimDef.path's Vec<String> type cannot represent the null/integer path segments the spec's claims path pointer grammar allows at all"]
-async fn gap_vci_13_claims_path_pointer_emptiness_and_shape_are_never_validated() {
-    let mut cfg = test_config();
-    cfg.keys.insert(
-        "verifier_signing".to_string(),
-        KeyEntry {
-            private_key: "unused".to_string(),
-            x5c: None,
-            alg: "ES256".to_string(),
-        },
-    );
-    // An empty claims path pointer -- the Claims Path Pointer section (L2366)
-    // requires a claims path pointer to be a *non-empty* array.
-    cfg.credential_types[0].claims[0].path = vec![];
-
-    assert!(
-        cfg.validate().is_err(),
-        "Config::validate() should reject a claims description object whose `path` is an empty \
-         array, per the Claims Path Pointer section's non-empty requirement, but it accepted it"
+#[ignore = "GAP-VCI-13: OpenID4VCI Claims Path Pointer (L2366) — ClaimDef.path is typed Vec<String>, so it can never represent the null (address every element of an array) or non-negative-integer (address a specific array index) path segments the claims path pointer grammar defines. The emptiness half of this gap was closed 2026-08-05 by Config::validate(); this test covers only the typing half, which remains open and needs the field retyped"]
+async fn gap_vci_13_claims_path_pointer_cannot_express_null_or_index_segments() {
+    // `ClaimDef.path` is `Vec<String>`. A conformant claims path pointer such as
+    // ["addresses", null, "street"] or ["addresses", 0, "street"] cannot be
+    // *constructed* at all, so there is no value to hand to `validate()`: the
+    // gap is in the type, not in the validation. This test therefore documents
+    // the type-level gap and fails until `path` becomes a sequence of
+    // string | null | u64 segments.
+    panic!(
+        "ClaimDef.path is Vec<String>; null and integer claims-path-pointer segments are \
+         unrepresentable. Closing this gap requires retyping the field, not a validation change."
     );
 }
 
