@@ -300,14 +300,65 @@ platform requirements the console cannot satisfy on your behalf:
   resolves `credential_issuer` itself when it calls `/token`. Use a
   LAN-reachable host or a tunnel. This is the failure mode most likely to be
   misread as a `foundry` bug.
+- **`verifier.dc_api_expected_origins` must list the origin the console is
+  served from** — see [DC API Expected Origins](#dc-api-expected-origins) below.
+  This is the presentation-side equivalent of the previous bullet, and the
+  second most likely thing to be misread as a `foundry` bug.
 
 The console never gates the buttons on browser sniffing: it always offers them
 and reports an unsupported browser at the point of use.
+
+The console is responsive and usable from a phone, which is the expected setup
+for driving a Digital Credentials API flow: below 640px the DC API button becomes
+the first, full-width action in the result block, and the QR code collapses
+behind a `QR code` disclosure — it is unscannable on the device displaying it,
+and one tap reopens it. Desktop layout is unchanged.
 
 Note that the Digital Credentials API is a **platform handoff channel, not a
 protocol**. The payload handed to the wallet is the same OpenID4VCI Credential
 Offer the deep link carries, so `/token` and `/credential` behave identically
 regardless of which affordance you used.
+
+##### DC API Expected Origins
+
+Over the Digital Credentials API transport, OpenID4VP requires a wallet to bind
+an SD-JWT VC's KB-JWT `aud` to the **browsing-context Origin** of the page that
+called `navigator.credentials.get()`, prefixed with `origin:` — *not* to the
+verifier's `x509_hash` Client Identifier, which is what every other transport
+uses. The browser attests that Origin to the wallet; the server cannot derive it
+(RFC 6454), so it has to be told:
+
+```yaml
+verifier:
+  dc_api_expected_origins: ["https://verifier-site.example"]
+```
+
+List one entry per site expected to invoke this verifier over the DC API. A
+single trailing slash is normalised away, so `https://x.example` and
+`https://x.example/` both match.
+
+> **Set this whenever you drive a DC API presentation from the admin console.**
+> `/console` is served **only by the admin listener**, so the Origin the wallet
+> is handed is the *admin* origin — `http://127.0.0.1:9000` by default, or
+> whatever hostname a reverse proxy exposes that listener on. Left unset,
+> foundry falls back to a single origin derived from
+> `server.wallet_facing.public_base_url`, which is a **different** Origin
+> whenever the two listeners differ in host *or* port — which is the default
+> (`:9000` vs `:8443`) and stays true behind a proxy that gives them separate
+> hostnames. The fallback exists only for the single-origin case where the DC
+> API caller and the wallet-facing listener genuinely share an Origin.
+
+The symptom when this is wrong is an otherwise well-formed presentation failing
+at HTTP 400 with:
+
+```
+verification failed: holder key binding verification failed: KB-JWT audience mismatch
+```
+
+The log record does not carry the two values being compared, so confirm them
+from each side: the wallet's attested Origin (CMWallet logs it as
+`GetCredentialActivity: origin <value>`, readable via `adb logcat`) against this
+config key — or, when it is unset, against `public_base_url`.
 
 The console plus a real wallet app is the supported way to drive an issuance
 or presentation by hand — foundry ships no wallet client of its own. For a
