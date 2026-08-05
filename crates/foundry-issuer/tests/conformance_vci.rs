@@ -1540,7 +1540,7 @@ fn signed_wallet_attestation_no_pop(exp: i64) -> (String, String) {
 }
 
 // ---------------------------------------------------------------------------
-// VCI-0232 / GAP-VCI-14 (closed) — OpenID4VCI Wallet Attestation (L2600): the
+// VCI-0232 / GAP-VCI-15 (closed) — OpenID4VCI Wallet Attestation (L2600): the
 // Wallet MUST generate, and per draft-ietf-oauth-attestation-based-client-auth
 // Sec5.2 (which OpenID4VCI Appendix E incorporates) the Authorization Server
 // MUST verify, a Client Attestation PoP JWT proving possession of the key the
@@ -2539,5 +2539,50 @@ async fn gap_haip_06_status_index_can_collide_across_credential_types_sharing_on
         "a second credential type must not be able to draw an index into a physical \
          status list whose only slot index {pid_idx} is already taken by a different \
          credential type, but got {mdl_result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GAP-VCI-15 — OpenID4VCI Credential Issuer Metadata (L1395): each name in
+// `proof_types_supported` is "a unique identifier of the supported proof
+// type(s)", and the Wallet uses that identifier in the Credential Request.
+//
+// Under `key_attestation.android.mode: required`, `handle_credential_request`
+// (credential.rs) rejects a `jwt` proofs member unconditionally -- but
+// `build_issuer_metadata` still advertises `jwt`, so the advertised set is
+// strictly larger than the accepted set.
+//
+// Note the asymmetry this test pins down: `android.mode: disabled` DOES remove
+// `android_keystore_attestation` from the metadata (metadata.rs gates that
+// entry on the mode), so the generator already knows how to reflect a mode in
+// the advertised set. It simply never applies the converse to `jwt`.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "GAP-VCI-15: OpenID4VCI Credential Issuer Metadata (L1395) — with key_attestation.android.mode: required, build_issuer_metadata still advertises the `jwt` proof type that handle_credential_request rejects unconditionally, so a wallet implementing only `jwt` complies with the metadata and is refused"]
+fn gap_vci_15_metadata_advertises_jwt_proof_type_that_credential_endpoint_rejects() {
+    let mut cfg = test_config();
+    // The Google-Wallet-only posture: android_keystore_attestation is the only
+    // proof type the Credential Endpoint will accept.
+    cfg.issuer.key_attestation.android.mode = Mode::Required;
+
+    let metadata = build_issuer_metadata(&cfg, &[]);
+    let config = metadata
+        .credential_configurations_supported
+        .get("pid")
+        .expect("the `pid` credential configuration must be present");
+
+    assert!(
+        config
+            .proof_types_supported
+            .contains_key("android_keystore_attestation"),
+        "android_keystore_attestation must be advertised when android.mode is required"
+    );
+    assert!(
+        !config.proof_types_supported.contains_key("jwt"),
+        "`jwt` must NOT be advertised when android.mode: required makes the \
+         Credential Endpoint reject it: advertising a proof type the issuer \
+         refuses misrepresents the supported set (L1395) and strands any wallet \
+         that implements only `jwt`. Advertised: {:?}",
+        config.proof_types_supported.keys().collect::<Vec<_>>()
     );
 }
