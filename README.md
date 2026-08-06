@@ -269,10 +269,14 @@ It lets you trigger the two admin flows from a browser instead of hand-rolling
   and shows `offered` → `issued`, plus the transaction code when
   `tx_code_required` is set.
 - **Verification**: pick a named query (`named_query_ref`) or paste raw
-  `dcql_query` JSON, click "Create Verification Request" — get back the
-  `openid4vp_uri`/`request_uri` as copyable text and as a QR code. The page
+  `dcql_query` JSON, optionally paste a `transaction_data` JSON array under
+  "Transaction data (optional)", click "Create Verification Request" — get back
+  the `openid4vp_uri`/`request_uri` as copyable text and as a QR code. The page
   auto-polls the request's status and shows `verified`, each check's
-  pass/fail, and the disclosed claims once the wallet responds.
+  pass/fail, and the disclosed claims once the wallet responds. When
+  `transaction_data` was requested, the checks list gains a
+  `transaction_data_binding` entry reporting whether the wallet hashed the
+  advertised entries into its Key Binding JWT.
 
 The console only calls the existing Admin API (same endpoints as the `curl`
 example above) — paste your Admin API key into the field at the top of the

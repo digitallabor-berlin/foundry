@@ -336,3 +336,50 @@ async fn console_styles_the_issuance_badge_states() {
         "console CSS must style the `issued` issuance state"
     );
 }
+
+#[tokio::test]
+async fn console_has_transaction_data_input_for_verification() {
+    // OpenID4VP `transaction_data` is implemented end-to-end in the verifier
+    // (validated and encoded by `encode_transaction_data`, bound by
+    // `check_transaction_data_binding`) but was unreachable from the console:
+    // the verification card had no input for it. The field is a raw JSON
+    // textarea inside a collapsed disclosure -- entry bodies are type-specific
+    // and open-ended, so a structured form would encode a partial schema the
+    // console has no business owning.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"id="transaction-data-json"#),
+        "console page should have a transaction_data textarea"
+    );
+    assert!(
+        html.contains("Transaction data (optional)"),
+        "the transaction_data textarea should sit behind a labelled disclosure"
+    );
+    assert!(
+        html.contains("opt-disclosure"),
+        "the disclosure should use its own class, not the QR block's \
+         (whose summary is display:none above 641px)"
+    );
+    assert!(
+        html.contains("payload.transaction_data"),
+        "the create-verification handler should put the parsed entries on the payload"
+    );
+}

@@ -96,6 +96,10 @@
   /* Desktop has room for the QR, so the disclosure affordance disappears
      entirely and the (always-`open`) details renders as a plain container. */
   @media (min-width: 641px) { .qr-disclosure > summary { display: none; } }
+  /* Optional-input disclosure. Unlike `.qr-disclosure` this ships CLOSED with a
+     summary visible at every width: the summary is never CSS-hidden, so a page
+     whose script failed still degrades to "collapsed, one click to open". */
+  .opt-disclosure > summary { cursor: pointer; font-size: 13px; color: var(--muted); padding: 4px 0 10px; }
   pre.json {
     background: #0c101a; border: 1px solid var(--panel-border); border-radius: 6px;
     padding: 10px; font-size: 12px; overflow-x: auto; max-height: 220px; margin: 0;
@@ -225,6 +229,13 @@
         <option value="dc_api">dc_api (Digital Credentials API)</option>
       </select>
     </div>
+    <details class="opt-disclosure">
+      <summary>Transaction data (optional)</summary>
+      <div class="field">
+        <label for="transaction-data-json">transaction_data (JSON array)</label>
+        <textarea id="transaction-data-json" placeholder='[{"type": "…", "credential_ids": ["…"]}]'></textarea>
+      </div>
+    </details>
     <button class="primary" id="create-verification-btn">Create Verification Request</button>
     <div class="error-banner hidden" id="verification-error"></div>
     <div class="result hidden" id="verification-result">
@@ -3027,6 +3038,22 @@ var qrcode = function() {
           showError(errorEl, new Error('dcql_query is not valid JSON: ' + e.message));
           return;
         }
+      }
+
+      const txDataRaw = document.getElementById('transaction-data-json').value;
+      if (txDataRaw.trim()) {
+        let parsed;
+        try {
+          parsed = JSON.parse(txDataRaw);
+        } catch (e) {
+          showError(errorEl, new Error('transaction_data is not valid JSON: ' + e.message));
+          return;
+        }
+        if (!Array.isArray(parsed)) {
+          showError(errorEl, new Error('transaction_data must be a JSON array of objects.'));
+          return;
+        }
+        payload.transaction_data = parsed;
       }
 
       btn.disabled = true;
