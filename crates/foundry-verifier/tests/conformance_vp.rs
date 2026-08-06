@@ -748,3 +748,66 @@ async fn vp_0198_0201_dc_api_unsigned_request_shape() {
         "VP-0201: response_mode MUST be dc_api.jwt when the response is encrypted"
     );
 }
+
+/// OpenID4VP 1.0 §A.3 (DC API / Request, L2421-L2431) lists `transaction_data`
+/// among the Authorization Request parameters supported over the W3C Digital
+/// Credentials API. The bytes advertised must be the same base64url strings
+/// persisted on the transaction -- which are also what the `request_uri`
+/// transport emits -- so a wallet hashes identical input on either transport.
+#[tokio::test]
+async fn dc_api_request_advertises_encoded_transaction_data() {
+    let storage = test_storage().await;
+    let config = sample_config("/tmp/fake_key.pem", None);
+
+    let req = CreateVerificationRequest {
+        dcql_query: Some(serde_json::json!({
+            "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+        })),
+        named_query_ref: None,
+        transport: "dc_api".to_string(),
+        transaction_data: Some(vec![serde_json::json!({
+            "type": "qes_authorization",
+            "credential_ids": ["c1"]
+        })]),
+    };
+
+    let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+        .await
+        .unwrap();
+
+    let verification_id = res.verification_id.clone();
+    let dc_req = res.dc_api_request.unwrap();
+
+    let entries = dc_req["transaction_data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("dc_api_request must carry transaction_data, got: {dc_req}"));
+    assert_eq!(
+        entries.len(),
+        1,
+        "one requested entry must yield one advertised entry"
+    );
+
+    let encoded = entries[0]
+        .as_str()
+        .expect("each transaction_data entry must be a base64url string, not an object");
+
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&B64URL.decode(encoded).unwrap()).unwrap();
+    assert_eq!(decoded["type"], "qes_authorization");
+    assert_eq!(decoded["credential_ids"], serde_json::json!(["c1"]));
+    assert_eq!(
+        decoded["transaction_data_hashes_alg"],
+        serde_json::json!(["sha-256"]),
+        "transaction_data_hashes_alg must be injected before encoding (OpenID4VP L3142)"
+    );
+
+    let tx = load_verification_transaction(&storage, &verification_id)
+        .await
+        .unwrap()
+        .expect("transaction must be persisted");
+    assert_eq!(
+        tx.transaction_data.as_deref(),
+        Some(&[encoded.to_string()][..]),
+        "the advertised bytes must be exactly the bytes stored for the hash check"
+    );
+}

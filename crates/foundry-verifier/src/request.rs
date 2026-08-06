@@ -322,7 +322,7 @@ pub async fn create_verification_request(
         .trim_end_matches('/');
 
     if transport_str == "dc_api" {
-        let dc_api_obj = serde_json::json!({
+        let mut dc_api_obj = serde_json::json!({
             "response_type": RESPONSE_TYPE_VP_TOKEN,
             "response_mode": "dc_api.jwt",
             "dcql_query": dcql,
@@ -333,6 +333,19 @@ pub async fn create_verification_request(
                 "vp_formats_supported": vp_formats_supported()
             }
         });
+
+        // OpenID4VP 1.0 §A.3 (DC API / Request, L2421-L2431) lists
+        // `transaction_data` among the Authorization Request parameters
+        // supported over the W3C Digital Credentials API. The *encoded* entries
+        // (already persisted on `tx`) are emitted -- the same bytes
+        // `build_signed_request_object` advertises on the `request_uri`
+        // transport -- so a wallet hashes identical input into
+        // `transaction_data_hashes` whichever transport it was invoked over.
+        // The key is conditional: a request that does not use the feature
+        // keeps the unsigned-request shape VP-0198 documents.
+        if let (Some(obj), Some(td)) = (dc_api_obj.as_object_mut(), tx.transaction_data.as_ref()) {
+            obj.insert("transaction_data".to_string(), serde_json::json!(td));
+        }
 
         Ok(CreateVerificationResponse {
             verification_id: id,
@@ -773,6 +786,38 @@ mod tests {
         assert_eq!(dc_req["response_mode"], "dc_api.jwt");
         assert!(dc_req["nonce"].is_string());
         assert!(dc_req["client_metadata"]["jwks"]["keys"].is_array());
+    }
+
+    /// A DC API request that does not use transaction data must keep its
+    /// previous five-key shape exactly -- the key is conditional, not
+    /// unconditionally present-and-null.
+    #[tokio::test]
+    async fn test_dc_api_request_omits_transaction_data_when_absent() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "dc_api".to_string(),
+            transaction_data: None,
+        };
+
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let dc_req = res.dc_api_request.unwrap();
+        assert!(
+            dc_req
+                .as_object()
+                .unwrap()
+                .get("transaction_data")
+                .is_none(),
+            "an unsigned DC API request without transaction data must not carry the key: {dc_req}"
+        );
     }
 
     #[tokio::test]
