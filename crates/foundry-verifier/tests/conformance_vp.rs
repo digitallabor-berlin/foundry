@@ -10,15 +10,15 @@
 //!
 //! Code under audit: `crates/foundry-verifier/src/request.rs`.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::*;
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
 use foundry_core::storage::SqliteStorage;
 use foundry_verifier::{
-    build_signed_request_object, check_dcql_match, create_verification_request,
-    load_verification_transaction, CreateVerificationRequest, PresentedFormat,
+    CreateVerificationRequest, PresentedFormat, build_signed_request_object, check_dcql_match,
+    create_verification_request, load_verification_transaction,
 };
 use std::collections::BTreeMap;
 

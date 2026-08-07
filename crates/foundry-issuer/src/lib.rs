@@ -15,33 +15,33 @@ pub mod token;
 pub mod transaction;
 
 pub use authorize::{
-    handle_authorize_request, AuthorizeOutcome, AuthorizeParams, AUTH_CODE_TTL_SECS,
+    AUTH_CODE_TTL_SECS, AuthorizeOutcome, AuthorizeParams, handle_authorize_request,
 };
-pub use challenge::{issue_attestation_challenge, mint_dpop_nonce, ChallengeResponse, NonceSecret};
-pub use create_offer::{create_offer, CreateOfferRequest, CreateOfferResponse};
+pub use challenge::{ChallengeResponse, NonceSecret, issue_attestation_challenge, mint_dpop_nonce};
+pub use create_offer::{CreateOfferRequest, CreateOfferResponse, create_offer};
 pub use credential::{
-    check_encryption_policy, handle_credential_request, CredentialRequest, CredentialResponse,
-    CredentialResponseEncryptionParams, IssuedCredential,
+    CredentialRequest, CredentialResponse, CredentialResponseEncryptionParams, IssuedCredential,
+    check_encryption_policy, handle_credential_request,
 };
 pub use dpop::{
-    access_token_hash, verify_dpop_proof, DpopNoncePolicy, DpopPresentation, VerifiedDpopProof,
+    DpopNoncePolicy, DpopPresentation, VerifiedDpopProof, access_token_hash, verify_dpop_proof,
 };
 pub use error::IssuanceError;
 pub use metadata::{
-    build_authorization_server_metadata, build_issuer_metadata, AuthorizationServerMetadata,
-    CredentialConfigurationSupported, CredentialIssuerMetadata, CredentialRequestEncryption,
-    CredentialResponseEncryption, ProofTypeSupported,
+    AuthorizationServerMetadata, CredentialConfigurationSupported, CredentialIssuerMetadata,
+    CredentialRequestEncryption, CredentialResponseEncryption, ProofTypeSupported,
+    build_authorization_server_metadata, build_issuer_metadata,
 };
-pub use nonce::{issue_nonce, verify_nonce, NonceResponse, C_NONCE_TTL_SECS};
+pub use nonce::{C_NONCE_TTL_SECS, NonceResponse, issue_nonce, verify_nonce};
 pub use offer::{
-    build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
-    TxCodeDefinition,
+    TxCodeDefinition, build_dc_api_offer, build_offer_uri, generate_pre_authorized_code,
+    generate_tx_code,
 };
-pub use proof::{verify_holder_proof, ProofsRequest, VerifiedProof};
+pub use proof::{ProofsRequest, VerifiedProof, verify_holder_proof};
 pub use status_index::allocate_status_index;
-pub use token::{handle_token_request, TokenRequest, TokenResponse};
+pub use token::{TokenRequest, TokenResponse, handle_token_request};
 pub use transaction::{
-    load_transaction, load_transaction_by_access_token, load_transaction_by_pre_auth_code,
-    save_transaction, save_transaction_with_indices, IssuanceState, IssuanceTransaction,
+    IssuanceState, IssuanceTransaction, load_transaction, load_transaction_by_access_token,
+    load_transaction_by_pre_auth_code, save_transaction, save_transaction_with_indices,
 };

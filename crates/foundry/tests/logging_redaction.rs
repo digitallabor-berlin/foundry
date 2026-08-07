@@ -20,10 +20,10 @@
 mod support;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use foundry::admin_auth::AdminApiKey;
 use foundry::log_capture::{self, CaptureHandle};
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -31,9 +31,9 @@ use foundry_core::config::{
 };
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::storage::SqliteStorage;
-use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -261,11 +261,12 @@ async fn drive_issuance(state: &AppState) -> IssuanceSecrets {
         .expect("offer response");
     assert_eq!(offer_res.status(), StatusCode::OK);
     let offer = body_json(offer_res).await;
-    let pre_auth_code = offer["credential_offer"]["grants"]
-        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
-        .as_str()
-        .expect("pre-authorized code")
-        .to_string();
+    let pre_auth_code =
+        offer["credential_offer"]["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+            ["pre-authorized_code"]
+            .as_str()
+            .expect("pre-authorized code")
+            .to_string();
 
     let token_res = wallet_router(state.clone())
         .oneshot(
@@ -557,11 +558,12 @@ async fn drive_issuance_with_challenge_and_nonce(
         .expect("offer response");
     assert_eq!(offer_res.status(), StatusCode::OK);
     let offer = body_json(offer_res).await;
-    let pre_auth_code = offer["credential_offer"]["grants"]
-        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
-        .as_str()
-        .expect("pre-authorized code")
-        .to_string();
+    let pre_auth_code =
+        offer["credential_offer"]["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+            ["pre-authorized_code"]
+            .as_str()
+            .expect("pre-authorized code")
+            .to_string();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -861,8 +863,8 @@ async fn issuance_never_logs_codes_tokens_nonces_or_claims() {
 /// As `setup()`, but with `key_attestation.android` enabled at `Mode::Optional`
 /// against a freshly generated CA, whose material is returned so a test can
 /// build a `support::synthetic_android_chain` around it.
-async fn setup_with_android_keystore_attestation(
-) -> (AppState, tempfile::TempDir, foundry_core::pki::CertMaterial) {
+async fn setup_with_android_keystore_attestation()
+-> (AppState, tempfile::TempDir, foundry_core::pki::CertMaterial) {
     use foundry_core::config::{AndroidKeystoreConfig, TrustAnchor};
     use foundry_core::trust::android_attestation::SecurityLevel;
 
@@ -920,11 +922,12 @@ async fn android_keystore_issuance_never_logs_the_challenge_or_unique_id() {
         .expect("offer response");
     assert_eq!(offer_res.status(), StatusCode::OK);
     let offer = body_json(offer_res).await;
-    let pre_auth_code = offer["credential_offer"]["grants"]
-        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
-        .as_str()
-        .expect("pre-authorized code")
-        .to_string();
+    let pre_auth_code =
+        offer["credential_offer"]["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+            ["pre-authorized_code"]
+            .as_str()
+            .expect("pre-authorized code")
+            .to_string();
 
     let token_res = wallet_router(state.clone())
         .oneshot(
@@ -1535,11 +1538,12 @@ async fn drive_encrypted_issuance(state: &AppState) -> (String, String) {
         .expect("offer response");
     assert_eq!(offer_res.status(), StatusCode::OK);
     let offer = body_json(offer_res).await;
-    let pre_auth_code = offer["credential_offer"]["grants"]
-        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
-        .as_str()
-        .expect("pre-authorized code")
-        .to_string();
+    let pre_auth_code =
+        offer["credential_offer"]["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+            ["pre-authorized_code"]
+            .as_str()
+            .expect("pre-authorized code")
+            .to_string();
 
     let token_res = wallet_router(state.clone())
         .oneshot(

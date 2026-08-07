@@ -597,7 +597,9 @@ verifier:
     /// window value the spec fixes at 300s.
     #[test]
     fn wallet_attestation_without_pop_max_age_secs_defaults_to_300() {
-        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n  status_list:\n    enabled: false\n");
+        let cfg = parse_with_issuer(
+            "issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n  status_list:\n    enabled: false\n",
+        );
         assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 300);
     }
 
@@ -605,7 +607,9 @@ verifier:
     /// default.
     #[test]
     fn wallet_attestation_pop_max_age_secs_explicit_value_is_honoured() {
-        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n");
+        let cfg = parse_with_issuer(
+            "issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n",
+        );
         assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 60);
     }
 
@@ -616,7 +620,9 @@ verifier:
     /// the place that decision gets made implicitly.
     #[test]
     fn wallet_attestation_pop_max_age_secs_zero_still_parses() {
-        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 0\n  status_list:\n    enabled: false\n");
+        let cfg = parse_with_issuer(
+            "issuer:\n  credential_issuer: https://example.test\n  wallet_attestation:\n    mode: required\n    pop_max_age_secs: 0\n  status_list:\n    enabled: false\n",
+        );
         assert_eq!(cfg.issuer.wallet_attestation.pop_max_age_secs, 0);
     }
 
@@ -627,7 +633,9 @@ verifier:
     /// consumer, not by a runtime assertion.
     #[test]
     fn key_attestation_pop_max_age_secs_parses_but_has_no_consumer() {
-        let cfg = parse_with_issuer("issuer:\n  credential_issuer: https://example.test\n  key_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n");
+        let cfg = parse_with_issuer(
+            "issuer:\n  credential_issuer: https://example.test\n  key_attestation:\n    mode: required\n    pop_max_age_secs: 60\n  status_list:\n    enabled: false\n",
+        );
         assert_eq!(cfg.issuer.key_attestation.pop_max_age_secs, 60);
     }
 

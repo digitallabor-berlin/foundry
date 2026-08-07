@@ -11,8 +11,8 @@
 //!
 //! Run with: `cargo test -p foundry --test e2e_full_flow -- --ignored`
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::crypto::jwe::{encrypt_compact, encrypt_compact_with_kid};
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_sd_jwt_vc::builder::attach_kb_jwt;
@@ -22,7 +22,7 @@ use foundry_verifier::{
 use josekit::jwe::ECDH_ES;
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::{Jwk, KeyPair as _};
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpListener;
@@ -229,10 +229,10 @@ async fn spawn_server_inner(
     let ready_url = format!("http://127.0.0.1:{admin_port}/ready");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(resp) = client.get(&ready_url).send().await {
-            if resp.status().is_success() {
-                break;
-            }
+        if let Ok(resp) = client.get(&ready_url).send().await
+            && resp.status().is_success()
+        {
+            break;
         }
         if Instant::now() > deadline {
             panic!(

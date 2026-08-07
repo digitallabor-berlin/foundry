@@ -1,9 +1,9 @@
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::pki::{issue_leaf, new_ca};
 use foundry_core::trust::TrustStore;
-use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-use foundry_mdoc::verifier::verify_mdoc;
 use foundry_mdoc::FormatError;
+use foundry_mdoc::builder::{MdocClaims, build_mdoc};
+use foundry_mdoc::verifier::verify_mdoc;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 

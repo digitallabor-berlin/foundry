@@ -1,16 +1,16 @@
 use crate::error::VerificationError;
 use crate::transaction::{
-    save_verification_transaction, VerificationState, VerificationTransaction,
+    VerificationState, VerificationTransaction, save_verification_transaction,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Config;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use foundry_core::storage::Storage;
 use foundry_core::url::dns_host_only;
-use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -226,12 +226,11 @@ pub async fn create_verification_request(
             .find(|n| n.get("id").and_then(|v| v.as_str()) == Some(named.as_str()))
             .ok_or_else(|| VerificationError::Dcql(format!("unknown named_query_ref '{named}'")))?;
 
-        let dcql_val = entry
+        entry
             .get("dcql")
             .or_else(|| entry.get("dcql_query"))
             .cloned()
-            .unwrap_or_else(|| entry.clone());
-        dcql_val
+            .unwrap_or_else(|| entry.clone())
     } else {
         return Err(VerificationError::Dcql(
             "either dcql_query or named_query_ref is required".to_string(),
@@ -872,10 +871,12 @@ mod tests {
         let leaf_pem = verifier_x5c_leaf_pem(&config).unwrap();
         let expected_client_id = x509_hash_client_id(&leaf_pem).unwrap();
         assert_eq!(payload["client_id"], expected_client_id);
-        assert!(payload["client_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("x509_hash:"));
+        assert!(
+            payload["client_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("x509_hash:")
+        );
         assert_eq!(
             payload["response_uri"],
             format!("https://verifier.example.com/vp/response/{}", tx.id)
@@ -1161,10 +1162,12 @@ mod tests {
             "response_uri {response_uri} must be same-origin as the Verifier's public_base_url \
              host {client_host}"
         );
-        assert!(payload["client_id"]
-            .as_str()
-            .unwrap()
-            .starts_with("x509_hash:"));
+        assert!(
+            payload["client_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("x509_hash:")
+        );
     }
 
     /// The ephemeral response-encryption JWK must carry the metadata a wallet

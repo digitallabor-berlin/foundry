@@ -18,10 +18,10 @@
 
 use crate::error::TrustError;
 use serde::Deserialize;
+use x509_cert::Certificate;
 use x509_cert::der::asn1::AnyRef;
 use x509_cert::der::oid::ObjectIdentifier;
 use x509_cert::der::{Reader, SliceReader, Tag, Tagged};
-use x509_cert::Certificate;
 
 /// OID of the Android Key Attestation extension.
 ///
@@ -310,7 +310,7 @@ fn decode_authorization_list(bytes: &[u8]) -> Result<AuthorizationList, TrustErr
             other => {
                 return Err(TrustError::Parse(format!(
                     "Android key attestation: AuthorizationList: unexpected tag {other:?}"
-                )))
+                )));
             }
         };
         // Every entry is EXPLICIT, so the context-specific wrapper's content is

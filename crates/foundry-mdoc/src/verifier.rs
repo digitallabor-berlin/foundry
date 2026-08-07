@@ -1,14 +1,14 @@
 use crate::error::FormatError;
 use crate::types::{IssuerSignedItem, MobileSecurityObject};
 use base64::{
-    engine::general_purpose::STANDARD as B64STD,
-    engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
+    Engine as _, engine::general_purpose::STANDARD as B64STD,
+    engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
 };
 use coset::iana::EnumI64;
-use coset::{iana, CborSerializable, CoseKey, CoseSign1};
-use foundry_core::trust::{cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
+use coset::{CborSerializable, CoseKey, CoseSign1, iana};
+use foundry_core::trust::{TrustStore, cert_ec_public_coords, parse_cert_pem, validate_chain};
 use josekit::jwk::Jwk;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -154,12 +154,12 @@ pub fn verify_mdoc(
 
     let mut x5c_b64s: Vec<String> = Vec::new();
     for (label, value) in &sign1.unprotected.rest {
-        if *label == coset::Label::Int(33) {
-            if let Some(arr) = value.as_array() {
-                for item in arr {
-                    if let Some(bytes) = item.as_bytes() {
-                        x5c_b64s.push(B64STD.encode(bytes));
-                    }
+        if *label == coset::Label::Int(33)
+            && let Some(arr) = value.as_array()
+        {
+            for item in arr {
+                if let Some(bytes) = item.as_bytes() {
+                    x5c_b64s.push(B64STD.encode(bytes));
                 }
             }
         }
@@ -249,13 +249,13 @@ pub fn verify_mdoc(
 
             let item: IssuerSignedItem = ciborium::from_reader(item_bytes.as_slice())
                 .map_err(|e| FormatError::Deserialization(format!("IssuerSignedItem: {e}")))?;
-            if let Some(expected) = mso_digests.get(&item.digest_id) {
-                if expected == &computed {
-                    ns_elements.insert(
-                        item.element_identifier,
-                        cbor_value_to_json(&item.element_value)?,
-                    );
-                }
+            if let Some(expected) = mso_digests.get(&item.digest_id)
+                && expected == &computed
+            {
+                ns_elements.insert(
+                    item.element_identifier,
+                    cbor_value_to_json(&item.element_value)?,
+                );
             }
         }
         if !ns_elements.is_empty() {
@@ -275,10 +275,10 @@ pub fn verify_mdoc(
             if let Some(b) = value.as_bytes() {
                 d_x = b.clone();
             }
-        } else if *label == coset::Label::Int(iana::Ec2KeyParameter::Y.to_i64()) {
-            if let Some(b) = value.as_bytes() {
-                d_y = b.clone();
-            }
+        } else if *label == coset::Label::Int(iana::Ec2KeyParameter::Y.to_i64())
+            && let Some(b) = value.as_bytes()
+        {
+            d_y = b.clone();
         }
     }
     if d_x.is_empty() || d_y.is_empty() {
@@ -356,7 +356,7 @@ fn cbor_value_to_json(val: &ciborium::Value) -> Result<JsonValue, FormatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{build_mdoc, MdocClaims};
+    use crate::builder::{MdocClaims, build_mdoc};
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};

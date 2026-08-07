@@ -18,9 +18,9 @@ use tracing::level_filters::LevelFilter;
 use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::Interest;
 use tracing::{Event, Level, Metadata, Subscriber};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// One recorded `tracing` event.
 #[derive(Debug, Clone)]
@@ -291,9 +291,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing::{debug, info, warn, Level};
+    use tracing::{Level, debug, info, warn};
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::{filter::LevelFilter, Layer, Registry};
+    use tracing_subscriber::{Layer, Registry, filter::LevelFilter};
 
     /// Run `body` with only the capture layer installed, and return what it saw.
     fn captured(body: impl FnOnce()) -> Vec<CapturedEvent> {

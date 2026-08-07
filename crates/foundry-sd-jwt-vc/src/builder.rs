@@ -1,8 +1,8 @@
 use crate::error::FormatError;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use foundry_core::crypto::Signer;
 use rand::RngCore;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug)]

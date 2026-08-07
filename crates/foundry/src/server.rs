@@ -1,11 +1,11 @@
-use crate::admin_auth::{require_api_key, AdminApiKey};
+use crate::admin_auth::{AdminApiKey, require_api_key};
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     middleware,
     response::Html,
     routing::{get, post},
-    Json, Router,
 };
 use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
@@ -143,8 +143,8 @@ pub fn wallet_router(state: AppState) -> Router {
     crate::http_log::with_access_log(router.with_state(state), "wallet")
 }
 
-pub(crate) async fn wallet_openapi_json_handler(
-) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+pub(crate) async fn wallet_openapi_json_handler()
+-> ([(axum::http::header::HeaderName, &'static str); 1], String) {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         crate::openapi::generate_wallet_openapi_spec(),
@@ -174,8 +174,8 @@ async fn auth_server_metadata(State(state): State<AppState>) -> Json<Authorizati
     ))
 }
 
-pub(crate) async fn openapi_json_handler(
-) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+pub(crate) async fn openapi_json_handler()
+-> ([(axum::http::header::HeaderName, &'static str); 1], String) {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
         crate::openapi::generate_admin_openapi_spec(),
@@ -549,7 +549,7 @@ pub(crate) struct AuthorizeQuery {
 /// string. `base` may be a bare custom-scheme URI (e.g.
 /// `eudi-openid4ci://authorize`) with no existing query string.
 fn append_query(base: &str, params: &[(&str, &str)], state: Option<&str>) -> String {
-    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
     let mut pairs: Vec<String> = params
         .iter()
         .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
@@ -1339,7 +1339,7 @@ async fn submit_vp_response(
                     "error": "not_found",
                     "error_description": format!("verification transaction '{id}' not found")
                 })),
-            ))
+            ));
         }
     };
 
@@ -1806,10 +1806,12 @@ mod tests {
             events[0].fields.get("error.kind").map(String::as_str),
             Some("storage")
         );
-        assert!(events[0]
-            .fields
-            .get("error.detail")
-            .is_some_and(|d| d.contains("disk on fire")));
+        assert!(
+            events[0]
+                .fields
+                .get("error.detail")
+                .is_some_and(|d| d.contains("disk on fire"))
+        );
     }
 
     /// GAP-VCI-14: the wire body for a failed Client Attestation / PoP JWT is

@@ -7,7 +7,7 @@
 
 use foundry_core::error::TrustError;
 use foundry_core::pki::{issue_leaf, new_ca};
-use foundry_core::trust::{validate_chain, TrustStore};
+use foundry_core::trust::{TrustStore, validate_chain};
 
 /// Wall-clock now, for chains generated during the test run.
 fn now_secs() -> u64 {

@@ -6,15 +6,15 @@ pub mod status;
 pub mod transaction;
 pub mod verify;
 
-pub use dcql::{check_dcql_match, PresentedFormat};
+pub use dcql::{PresentedFormat, check_dcql_match};
 pub use error::VerificationError;
 pub use request::{
-    build_signed_request_object, create_verification_request, CreateVerificationRequest,
-    CreateVerificationResponse,
+    CreateVerificationRequest, CreateVerificationResponse, build_signed_request_object,
+    create_verification_request,
 };
-pub use status::{check_status, HttpStatusListResolver, StatusListResolver};
+pub use status::{HttpStatusListResolver, StatusListResolver, check_status};
 pub use transaction::{
-    load_verification_transaction, save_verification_transaction, CheckResult, VerificationResult,
-    VerificationState, VerificationTransaction,
+    CheckResult, VerificationResult, VerificationState, VerificationTransaction,
+    load_verification_transaction, save_verification_transaction,
 };
 pub use verify::verify_vp_response;

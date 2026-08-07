@@ -20,7 +20,7 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 
 ## Prerequisites
 
-- **Rust:** Version 1.97 or later (edition 2021). See `rust-toolchain.toml`.
+- **Rust:** Version 1.97 or later (edition 2024). See `rust-toolchain.toml`.
 - **Cargo:** Included with Rust installation (`rustup`).
 
 ---

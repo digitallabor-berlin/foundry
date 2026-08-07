@@ -5,7 +5,7 @@ use foundry_core::config::Config;
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::pki::{generate_ec_key, issue_leaf, new_ca};
 use foundry_core::status_list::{
-    load_status_list, save_status_list, PersistentStatusList, StatusValue,
+    PersistentStatusList, StatusValue, load_status_list, save_status_list,
 };
 use foundry_core::storage::SqliteStorage;
 use std::path::Path;

@@ -18,8 +18,8 @@
 //! `docs/superpowers/specs/2026-08-04-abca-challenge-and-dpop-nonce-design.md`.
 
 use crate::error::IssuanceError;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Mode;
 use foundry_core::obs::thumbprint_bytes;
 use foundry_core::storage::Storage;
@@ -598,10 +598,12 @@ mod tests {
             None,
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("jti"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("jti")
+        );
     }
 
     #[test]
@@ -609,10 +611,12 @@ mod tests {
         // Check 3.
         let kp = keypair();
         let p = dpop_proof(&kp, "dpop+jwt", None, Some(HTU), Some(NOW), Some("j"), None);
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("htm"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("htm")
+        );
     }
 
     #[test]
@@ -628,10 +632,12 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("htu"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("htu")
+        );
     }
 
     #[test]
@@ -647,10 +653,12 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("iat"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("iat")
+        );
     }
 
     #[test]
@@ -807,10 +815,12 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("older"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("older")
+        );
     }
 
     #[test]
@@ -826,10 +836,12 @@ mod tests {
             Some("j"),
             None,
         );
-        assert!(verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
-            .unwrap_err()
-            .to_string()
-            .contains("future"));
+        assert!(
+            verify_dpop_proof(&p, "POST", HTU, None, NOW, MAX_AGE, None)
+                .unwrap_err()
+                .to_string()
+                .contains("future")
+        );
     }
 
     #[test]
@@ -911,16 +923,18 @@ mod tests {
             Some("j"),
             Some(&access_token_hash("at_one")),
         );
-        assert!(verify_dpop_proof(
-            &p,
-            "POST",
-            HTU,
-            Some(&access_token_hash("at_two")),
-            NOW,
-            MAX_AGE,
-            None
-        )
-        .is_err());
+        assert!(
+            verify_dpop_proof(
+                &p,
+                "POST",
+                HTU,
+                Some(&access_token_hash("at_two")),
+                NOW,
+                MAX_AGE,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -936,16 +950,18 @@ mod tests {
             Some("j"),
             Some(&access_token_hash(token)),
         );
-        assert!(verify_dpop_proof(
-            &p,
-            "POST",
-            HTU,
-            Some(&access_token_hash(token)),
-            NOW,
-            MAX_AGE,
-            None
-        )
-        .is_ok());
+        assert!(
+            verify_dpop_proof(
+                &p,
+                "POST",
+                HTU,
+                Some(&access_token_hash(token)),
+                NOW,
+                MAX_AGE,
+                None
+            )
+            .is_ok()
+        );
     }
 
     #[test]

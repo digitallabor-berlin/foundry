@@ -1,9 +1,9 @@
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use foundry_core::pki::{issue_leaf, new_ca};
 use foundry_core::trust::TrustStore;
-use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
-use foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc;
 use foundry_sd_jwt_vc::FormatError;
+use foundry_sd_jwt_vc::builder::{IssuerClaims, attach_kb_jwt, build_sd_jwt_vc};
+use foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc;
 use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::{Jwk, KeyPair as _};
 use std::time::{SystemTime, UNIX_EPOCH};

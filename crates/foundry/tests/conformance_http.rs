@@ -20,20 +20,20 @@
 //! new conformance tests live in new files and never modify existing ones.
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::http::{Request, StatusCode, header};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
     VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
-use josekit::jwk::alg::ec::EcKeyPair;
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jwk::alg::ec::EcKeyPair;
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -660,10 +660,12 @@ async fn challenge_endpoint_mints_a_challenge_when_enabled() {
         .await
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert!(!body["attestation_challenge"]
-        .as_str()
-        .expect("attestation_challenge")
-        .is_empty());
+    assert!(
+        !body["attestation_challenge"]
+            .as_str()
+            .expect("attestation_challenge")
+            .is_empty()
+    );
 }
 
 /// The route is not registered when the mechanism is disabled, so a wallet
@@ -2042,11 +2044,13 @@ async fn successful_responses_carry_a_dpop_nonce_when_enabled() {
     );
     let token_res = post_token_with_dpop(&state, &pre_auth_code, &token_proof).await;
     assert_eq!(token_res.status(), StatusCode::OK);
-    assert!(token_res
-        .headers()
-        .get("DPoP-Nonce")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| !s.is_empty()));
+    assert!(
+        token_res
+            .headers()
+            .get("DPoP-Nonce")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| !s.is_empty())
+    );
     let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -2064,11 +2068,13 @@ async fn successful_responses_carry_a_dpop_nonce_when_enabled() {
     );
     let cred_res = post_credential_with_dpop(&state, &access_token, &cred_proof).await;
     assert_eq!(cred_res.status(), StatusCode::OK);
-    assert!(cred_res
-        .headers()
-        .get("DPoP-Nonce")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| !s.is_empty()));
+    assert!(
+        cred_res
+            .headers()
+            .get("DPoP-Nonce")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| !s.is_empty())
+    );
 }
 
 /// §8: "there MUST NOT be more than one DPoP-Nonce header."
@@ -2298,10 +2304,12 @@ async fn the_challenge_endpoint_supplies_a_dpop_nonce_when_enabled() {
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
-        assert!(!body["attestation_challenge"]
-            .as_str()
-            .expect("attestation_challenge must be a string")
-            .is_empty());
+        assert!(
+            !body["attestation_challenge"]
+                .as_str()
+                .expect("attestation_challenge must be a string")
+                .is_empty()
+        );
     }
 }
 

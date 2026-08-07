@@ -661,9 +661,11 @@ mod tests {
         );
 
         cfg.issuer.wallet_attestation.challenge_mode = Mode::Required;
-        assert!(build_authorization_server_metadata(&cfg)
-            .challenge_endpoint
-            .is_some());
+        assert!(
+            build_authorization_server_metadata(&cfg)
+                .challenge_endpoint
+                .is_some()
+        );
     }
 
     #[test]

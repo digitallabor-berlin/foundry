@@ -12,11 +12,11 @@
 //! protocol arm to `wallet_error_response` so the body and log shape are
 //! identical to the engine's.
 
-use crate::server::{wallet_error_response, AppState};
-use axum::extract::{FromRequest, Request};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
+use crate::server::{AppState, wallet_error_response};
 use axum::Json;
+use axum::extract::{FromRequest, Request};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use foundry_issuer::IssuanceError;
 use serde::de::DeserializeOwned;
 

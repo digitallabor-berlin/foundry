@@ -16,18 +16,18 @@
 #![allow(dead_code)]
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
     WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
-use josekit::jwk::alg::ec::EcKeyPair;
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jwk::alg::ec::EcKeyPair;
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -8,11 +8,11 @@
 //! (real PKCE pair) -> POST /token (grant_type=authorization_code).
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::http::{Request, StatusCode, header};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -175,11 +175,11 @@ async fn full_authorization_code_flow_end_to_end() {
             .is_null(),
         "an authorization_code offer must not also carry a pre-authorized_code grant"
     );
-    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
-        ["issuer_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let issuer_state =
+        offer_json["credential_offer"]["grants"]["authorization_code"]["issuer_state"]
+            .as_str()
+            .unwrap()
+            .to_string();
     assert!(!issuer_state.is_empty());
 
     // 2. GET /authorize with a real PKCE pair and that issuer_state.
@@ -245,11 +245,11 @@ async fn authorize_with_wrong_redirect_uri_returns_400_not_a_redirect() {
     let (state, _dir) = setup_test_app().await;
 
     let offer_json = create_authz_code_offer(&state).await;
-    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
-        ["issuer_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let issuer_state =
+        offer_json["credential_offer"]["grants"]["authorization_code"]["issuer_state"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
     let wallet_app = wallet_router(state.clone());
     let code_challenge = code_challenge_for(CODE_VERIFIER);
@@ -287,11 +287,11 @@ async fn authorize_accepts_a_scope_matching_the_offers_credential_type() {
     let (state, _dir) = setup_test_app().await;
 
     let offer_json = create_authz_code_offer(&state).await;
-    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
-        ["issuer_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let issuer_state =
+        offer_json["credential_offer"]["grants"]["authorization_code"]["issuer_state"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
     let wallet_app = wallet_router(state.clone());
     let code_challenge = code_challenge_for(CODE_VERIFIER);
@@ -347,11 +347,11 @@ async fn authorize_rejects_a_scope_naming_a_different_credential_type() {
     // The offer is bound to "pid"; the request below sends the OTHER configured
     // type's resolved scope ("mdl"), which must not be honoured.
     let offer_json = create_authz_code_offer(&state).await;
-    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
-        ["issuer_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let issuer_state =
+        offer_json["credential_offer"]["grants"]["authorization_code"]["issuer_state"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
     let wallet_app = wallet_router(state.clone());
     let code_challenge = code_challenge_for(CODE_VERIFIER);
@@ -395,11 +395,11 @@ async fn authorize_without_a_scope_still_succeeds() {
     let (state, _dir) = setup_test_app().await;
 
     let offer_json = create_authz_code_offer(&state).await;
-    let issuer_state = offer_json["credential_offer"]["grants"]["authorization_code"]
-        ["issuer_state"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let issuer_state =
+        offer_json["credential_offer"]["grants"]["authorization_code"]["issuer_state"]
+            .as_str()
+            .unwrap()
+            .to_string();
 
     let wallet_app = wallet_router(state.clone());
     let code_challenge = code_challenge_for(CODE_VERIFIER);

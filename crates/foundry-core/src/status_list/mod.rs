@@ -3,10 +3,10 @@
 
 use crate::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use crate::error::{CoreError, CryptoError, FormatError};
-use crate::trust::{build_x5c, cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use crate::trust::{TrustStore, build_x5c, cert_ec_public_coords, parse_cert_pem, validate_chain};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use josekit::jwk::Jwk;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A Referenced Token's status (draft-ietf-oauth-status-list-14 §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +91,8 @@ pub fn unpack_status(byte_array: &[u8], bits: u8, idx: u64) -> Result<u8, Format
 /// zlib-compress (RFC 1950 wrapping RFC 1951 DEFLATE) at the highest
 /// compression level, per draft-ietf-oauth-status-list-14 §4.1 step 5.
 pub fn compress_zlib(raw: &[u8]) -> Result<Vec<u8>, FormatError> {
-    use flate2::write::ZlibEncoder;
     use flate2::Compression;
+    use flate2::write::ZlibEncoder;
     use std::io::Write;
 
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
@@ -374,10 +374,10 @@ pub fn verify_status_list_token(
             expected: expected_sub.to_string(),
         });
     }
-    if let Some(exp) = payload_json.get("exp").and_then(|v| v.as_i64()) {
-        if now_unix > exp as u64 {
-            return Err(FormatError::Expired);
-        }
+    if let Some(exp) = payload_json.get("exp").and_then(|v| v.as_i64())
+        && now_unix > exp as u64
+    {
+        return Err(FormatError::Expired);
     }
 
     let x5c_array = header_json

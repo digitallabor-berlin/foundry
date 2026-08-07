@@ -9,7 +9,7 @@
 
 use crate::error::VerificationError;
 use crate::transaction::CheckResult;
-use foundry_core::status_list::{verify_status_list_token, StatusValue};
+use foundry_core::status_list::{StatusValue, verify_status_list_token};
 use foundry_core::trust::TrustStore;
 use serde_json::Value;
 use std::time::Duration;
@@ -108,7 +108,7 @@ pub async fn check_status(
         None => {
             return Ok(failed(
                 "status_list.uri missing or not a string".to_string(),
-            ))
+            ));
         }
     };
     let idx = match status_list.get("idx").and_then(|v| v.as_u64()) {
@@ -116,7 +116,7 @@ pub async fn check_status(
         None => {
             return Ok(failed(
                 "status_list.idx missing or not an integer".to_string(),
-            ))
+            ));
         }
     };
 
@@ -141,7 +141,7 @@ pub async fn check_status(
         Err(e) => {
             return Ok(failed(format!(
                 "status list token verification failed: {e}"
-            )))
+            )));
         }
     };
 
@@ -198,8 +198,8 @@ mod tests {
     use super::*;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
     use foundry_core::pki::{issue_leaf, new_ca};
-    use foundry_core::status_list::{build_status_list_token, StatusList, StatusListTokenClaims};
-    use foundry_core::trust::{build_x5c, TrustStore};
+    use foundry_core::status_list::{StatusList, StatusListTokenClaims, build_status_list_token};
+    use foundry_core::trust::{TrustStore, build_x5c};
     use serde_json::json;
 
     const URI: &str = "https://issuer.example/statuslists/1";

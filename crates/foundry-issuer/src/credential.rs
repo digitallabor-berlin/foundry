@@ -1,21 +1,21 @@
 //! OpenID4VCI credential endpoint business logic.
 
-use crate::dpop::{claim_dpop_jti, verify_dpop_proof, DpopPresentation};
+use crate::dpop::{DpopPresentation, claim_dpop_jti, verify_dpop_proof};
 use crate::error::IssuanceError;
 use crate::nonce::NonceSecret;
-use crate::proof::{verify_holder_proof, ProofsRequest, ResolvedProofs};
+use crate::proof::{ProofsRequest, ResolvedProofs, verify_holder_proof};
 use crate::transaction::{
-    load_transaction_by_access_token, save_transaction_with_indices, IssuanceState,
+    IssuanceState, load_transaction_by_access_token, save_transaction_with_indices,
 };
+use base64::Engine as _;
 #[cfg(test)]
 use base64::engine::general_purpose::STANDARD as B64STD;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
-use base64::Engine as _;
 use foundry_core::config::Config;
 use foundry_core::crypto::FileSigner;
 use foundry_core::storage::Storage;
-use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-use foundry_sd_jwt_vc::builder::{build_sd_jwt_vc, IssuerClaims};
+use foundry_mdoc::builder::{MdocClaims, build_mdoc};
+use foundry_sd_jwt_vc::builder::{IssuerClaims, build_sd_jwt_vc};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
@@ -66,14 +66,15 @@ pub fn check_encryption_policy(
     req: &CredentialRequest,
     request_was_encrypted: bool,
 ) -> Result<(), IssuanceError> {
-    if let Some(re) = &cfg.issuer.request_encryption {
-        if re.encryption_required && !request_was_encrypted {
-            return Err(IssuanceError::InvalidCredentialRequest(
-                "this Credential Endpoint requires the Credential Request to be encrypted \
+    if let Some(re) = &cfg.issuer.request_encryption
+        && re.encryption_required
+        && !request_was_encrypted
+    {
+        return Err(IssuanceError::InvalidCredentialRequest(
+            "this Credential Endpoint requires the Credential Request to be encrypted \
                  (OpenID4VCI L1192)"
-                    .to_string(),
-            ));
-        }
+                .to_string(),
+        ));
     }
 
     let Some(params) = &req.credential_response_encryption else {
@@ -368,13 +369,13 @@ pub async fn handle_credential_request(
                 let mut selectively_disclosable = Map::new();
 
                 for claim_def in &cred_type.claims {
-                    if let Some(top_key) = claim_def.path.first() {
-                        if let Some(val) = tx.claims.get(top_key) {
-                            if claim_def.selectively_disclosable {
-                                selectively_disclosable.insert(top_key.clone(), val.clone());
-                            } else {
-                                always_disclosed.insert(top_key.clone(), val.clone());
-                            }
+                    if let Some(top_key) = claim_def.path.first()
+                        && let Some(val) = tx.claims.get(top_key)
+                    {
+                        if claim_def.selectively_disclosable {
+                            selectively_disclosable.insert(top_key.clone(), val.clone());
+                        } else {
+                            always_disclosed.insert(top_key.clone(), val.clone());
                         }
                     }
                 }
@@ -454,7 +455,7 @@ pub async fn handle_credential_request(
             other => {
                 return Err(IssuanceError::InvalidRequest(format!(
                     "unsupported credential format: {other}"
-                )))
+                )));
             }
         };
 
@@ -476,7 +477,7 @@ pub async fn handle_credential_request(
 mod tests {
     use super::*;
     use crate::transaction::{
-        load_transaction, save_transaction_with_indices, IssuanceTransaction,
+        IssuanceTransaction, load_transaction, save_transaction_with_indices,
     };
     use foundry_core::config::{
         AdminConfig, AttestationMode, ClaimDef, CredentialType, DpopConfig, IssuerConfig, KeyEntry,
@@ -485,9 +486,9 @@ mod tests {
     };
     use foundry_core::crypto::SignatureAlgorithm;
     use foundry_core::storage::SqliteStorage;
-    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::KeyPair as _;
-    use josekit::jws::{JwsHeader, ES256};
+    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+    use josekit::jws::{ES256, JwsHeader};
     use josekit::jwt::{self, JwtPayload};
     use std::collections::BTreeMap as StdBTreeMap;
 

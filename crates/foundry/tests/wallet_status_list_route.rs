@@ -1,14 +1,14 @@
-use axum::body::{to_bytes, Body};
-use axum::http::{header, Request, StatusCode};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use axum::body::{Body, to_bytes};
+use axum::http::{Request, StatusCode, header};
 use base64::Engine;
-use foundry::server::{wallet_router, AppState};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use foundry::server::{AppState, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, KeyEntry, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
 };
 use foundry_core::crypto::SignatureAlgorithm;
-use foundry_core::status_list::{save_status_list, PersistentStatusList, StatusValue};
+use foundry_core::status_list::{PersistentStatusList, StatusValue, save_status_list};
 use foundry_core::storage::SqliteStorage;
 use std::collections::BTreeMap as StdBTreeMap;
 use std::sync::Arc;

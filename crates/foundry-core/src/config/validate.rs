@@ -15,12 +15,12 @@ impl Config {
             )));
         }
         // status_list.signing_key, when set, must resolve.
-        if let Some(sk) = &self.issuer.status_list.signing_key {
-            if !self.keys.contains_key(sk) {
-                return Err(ConfigError::Validation(format!(
-                    "issuer.status_list.signing_key references unknown key '{sk}'"
-                )));
-            }
+        if let Some(sk) = &self.issuer.status_list.signing_key
+            && !self.keys.contains_key(sk)
+        {
+            return Err(ConfigError::Validation(format!(
+                "issuer.status_list.signing_key references unknown key '{sk}'"
+            )));
         }
         // Credential types: supported formats + required identifier per format.
         for ct in &self.credential_types {
@@ -82,13 +82,13 @@ impl Config {
         let mut seen_scopes: std::collections::BTreeMap<&str, &str> =
             std::collections::BTreeMap::new();
         for ct in &self.credential_types {
-            if let Some(explicit) = &ct.scope {
-                if explicit.trim().is_empty() {
-                    return Err(ConfigError::Validation(format!(
-                        "credential_type '{}' has an empty 'scope'",
-                        ct.id
-                    )));
-                }
+            if let Some(explicit) = &ct.scope
+                && explicit.trim().is_empty()
+            {
+                return Err(ConfigError::Validation(format!(
+                    "credential_type '{}' has an empty 'scope'",
+                    ct.id
+                )));
             }
             if let Some(previous) = seen_scopes.insert(ct.resolved_scope(), &ct.id) {
                 return Err(ConfigError::Validation(format!(
@@ -295,7 +295,7 @@ impl Config {
                     _ => {
                         return Err(ConfigError::Validation(format!(
                             "key '{name}': public JWK missing EC coordinates"
-                        )))
+                        )));
                     }
                 };
                 let (cx, cy) = crate::trust::cert_ec_public_coords(&cert)
@@ -786,10 +786,11 @@ mod tests {
     #[test]
     fn loads_no_keys_when_the_feature_is_off() {
         let cfg = minimal_config();
-        assert!(cfg
-            .load_request_decryption_keys(std::path::Path::new("."))
-            .unwrap()
-            .is_empty());
+        assert!(
+            cfg.load_request_decryption_keys(std::path::Path::new("."))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

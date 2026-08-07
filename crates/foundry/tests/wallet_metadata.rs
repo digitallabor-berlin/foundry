@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use foundry::server::{wallet_router, AppState};
+use foundry::server::{AppState, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,

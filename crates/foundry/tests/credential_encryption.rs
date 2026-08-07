@@ -8,7 +8,7 @@
 mod support;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use foundry::server::wallet_router;
 use tower::ServiceExt;
 

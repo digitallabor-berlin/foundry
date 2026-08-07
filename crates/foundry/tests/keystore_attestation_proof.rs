@@ -11,8 +11,8 @@
 mod support;
 
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
-use foundry::server::{wallet_router, AppState};
+use axum::http::{Request, StatusCode, header};
+use foundry::server::{AppState, wallet_router};
 use support::{
     body_json, create_proof, issue_pre_auth_offer_and_get_access_token, mint_c_nonce,
     setup_with_android_keystore, setup_without_encryption, synthetic_android_chain,

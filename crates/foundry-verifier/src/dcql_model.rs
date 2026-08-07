@@ -18,8 +18,8 @@
 //!   root and spuriously satisfy any claim requirement.
 //! - `claims[].values` (§6.3) — spec requires non-empty when present.
 
-use serde::de::{Deserializer, Error as _};
 use serde::Deserialize;
+use serde::de::{Deserializer, Error as _};
 use serde_json::Value;
 
 /// Deserialize a `Vec<T>`, rejecting an empty array with a field-specific
@@ -377,37 +377,43 @@ mod tests {
     /// credential root and satisfy any claim requirement.
     #[test]
     fn rejects_empty_claims_path() {
-        assert!(parse(json!({
-            "credentials": [{
-                "id": "c1", "format": "dc+sd-jwt", "meta": {},
-                "claims": [{ "path": [] }]
-            }]
-        }))
-        .is_err());
+        assert!(
+            parse(json!({
+                "credentials": [{
+                    "id": "c1", "format": "dc+sd-jwt", "meta": {},
+                    "claims": [{ "path": [] }]
+                }]
+            }))
+            .is_err()
+        );
     }
 
     /// §6.3: `values`, when present, is a non-empty array.
     #[test]
     fn rejects_empty_values() {
-        assert!(parse(json!({
-            "credentials": [{
-                "id": "c1", "format": "dc+sd-jwt", "meta": {},
-                "claims": [{ "path": ["a"], "values": [] }]
-            }]
-        }))
-        .is_err());
+        assert!(
+            parse(json!({
+                "credentials": [{
+                    "id": "c1", "format": "dc+sd-jwt", "meta": {},
+                    "claims": [{ "path": ["a"], "values": [] }]
+                }]
+            }))
+            .is_err()
+        );
     }
 
     /// §7.1: array indices are non-negative.
     #[test]
     fn rejects_negative_path_index() {
-        assert!(parse(json!({
-            "credentials": [{
-                "id": "c1", "format": "dc+sd-jwt", "meta": {},
-                "claims": [{ "path": ["a", -1] }]
-            }]
-        }))
-        .is_err());
+        assert!(
+            parse(json!({
+                "credentials": [{
+                    "id": "c1", "format": "dc+sd-jwt", "meta": {},
+                    "claims": [{ "path": ["a", -1] }]
+                }]
+            }))
+            .is_err()
+        );
     }
 
     #[test]

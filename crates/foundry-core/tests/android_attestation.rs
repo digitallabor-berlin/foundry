@@ -7,8 +7,8 @@
 
 use foundry_core::error::TrustError;
 use foundry_core::trust::android_attestation::{
-    decode_key_description, find_attestation_cert, parse_key_description, SecurityLevel,
-    VerifiedBootState,
+    SecurityLevel, VerifiedBootState, decode_key_description, find_attestation_cert,
+    parse_key_description,
 };
 use foundry_core::trust::parse_cert_pem;
 

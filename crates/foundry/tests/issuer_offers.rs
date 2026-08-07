@@ -1,7 +1,7 @@
 use axum::body::Body;
-use axum::http::{header::AUTHORIZATION, Request, StatusCode};
+use axum::http::{Request, StatusCode, header::AUTHORIZATION};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, AppState};
+use foundry::server::{AppState, admin_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -123,10 +123,12 @@ async fn creates_an_offer_with_valid_bearer_token() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json["transaction_id"].is_string());
-    assert!(json["credential_offer_uri"]
-        .as_str()
-        .unwrap()
-        .starts_with("openid-credential-offer://"));
+    assert!(
+        json["credential_offer_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("openid-credential-offer://")
+    );
 }
 
 #[tokio::test]

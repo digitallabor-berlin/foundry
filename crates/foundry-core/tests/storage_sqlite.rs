@@ -115,14 +115,18 @@ async fn insert_kv_if_absent_scoped_per_namespace() {
         .await
         .expect("connect");
 
-    assert!(store
-        .insert_kv_if_absent("jti-a", "same-key", "1", None)
-        .await
-        .unwrap());
-    assert!(store
-        .insert_kv_if_absent("jti-b", "same-key", "1", None)
-        .await
-        .unwrap());
+    assert!(
+        store
+            .insert_kv_if_absent("jti-a", "same-key", "1", None)
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .insert_kv_if_absent("jti-b", "same-key", "1", None)
+            .await
+            .unwrap()
+    );
 }
 
 /// `put_kv`'s upsert behaviour must be unaffected by the new method: a plain

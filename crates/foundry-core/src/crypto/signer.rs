@@ -2,9 +2,9 @@
 
 use crate::crypto::{SignatureAlgorithm, Signer};
 use crate::error::CryptoError;
-use josekit::jwk::alg::ec::EcKeyPair;
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsSigner, ES256, ES384, ES512};
+use josekit::jwk::alg::ec::EcKeyPair;
+use josekit::jws::{ES256, ES384, ES512, JwsSigner};
 
 /// A `Signer` backed by an EC private key loaded from a PKCS#8 PEM.
 #[derive(Debug)]
@@ -78,8 +78,8 @@ impl Signer for FileSigner {
 mod tests {
     use super::*;
     use crate::crypto::{SignatureAlgorithm, Signer};
-    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::Jwk;
+    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 
     fn generate_p256_pkcs8_pem() -> Vec<u8> {
         let jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();

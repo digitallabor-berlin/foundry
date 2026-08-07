@@ -1,7 +1,7 @@
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -9,9 +9,9 @@ use foundry_core::config::{
 };
 use foundry_core::crypto::SignatureAlgorithm;
 use foundry_core::storage::SqliteStorage;
-use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use std::collections::BTreeMap as StdBTreeMap;
 use std::sync::Arc;
@@ -280,8 +280,7 @@ async fn token_request_with_wrong_pre_auth_code_is_rejected() {
     let (state, _dir) = setup_test_app().await;
 
     let wallet_app = wallet_router(state.clone());
-    let token_form_body =
-        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code=does-not-exist";
+    let token_form_body = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code=does-not-exist";
 
     let token_req = Request::builder()
         .method("POST")
@@ -642,8 +641,8 @@ async fn second_credential_request_with_same_access_token_is_rejected() {
 
 #[tokio::test]
 async fn full_issuance_flow_with_kid_key_attestation_proof() {
-    use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
     use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_core::trust::parse_cert_pem;
 

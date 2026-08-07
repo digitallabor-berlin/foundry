@@ -1,11 +1,11 @@
 //! Wallet and key attestation verifier traits and default implementations.
 
 use crate::error::IssuanceError;
-use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
 use foundry_core::config::Mode;
 use foundry_core::storage::Storage;
-use foundry_core::trust::{validate_chain, x5c_entry_to_pem, TrustStore};
+use foundry_core::trust::{TrustStore, validate_chain, x5c_entry_to_pem};
 use josekit::jwk::Jwk;
 use josekit::jws::ES256;
 use sha2::{Digest, Sha256};
@@ -183,12 +183,12 @@ fn validate_wallet_attestation_jwt(
             "wallet attestation: has expired".into(),
         ));
     }
-    if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64()) {
-        if now_unix < nbf {
-            return Err(IssuanceError::InvalidClient(
-                "wallet attestation: not yet valid (nbf in the future)".into(),
-            ));
-        }
+    if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64())
+        && now_unix < nbf
+    {
+        return Err(IssuanceError::InvalidClient(
+            "wallet attestation: not yet valid (nbf in the future)".into(),
+        ));
     }
 
     // OpenID4VCI Appendix E: cnf.jwk and sub are REQUIRED. Parsed (not just
@@ -439,12 +439,12 @@ fn validate_client_attestation_pop_jwt(
 
     // Check 9 (ABCA §5.2): nbf, if present, MUST NOT be beyond the tolerable
     // clock skew. Saturating for the same reason as `iat` above.
-    if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64()) {
-        if nbf > now_unix.saturating_add(POP_CLOCK_SKEW_SECS) {
-            return Err(IssuanceError::InvalidClient(
-                "client attestation pop: not yet valid (nbf beyond tolerable clock skew)".into(),
-            ));
-        }
+    if let Some(nbf) = payload.get("nbf").and_then(|v| v.as_i64())
+        && nbf > now_unix.saturating_add(POP_CLOCK_SKEW_SECS)
+    {
+        return Err(IssuanceError::InvalidClient(
+            "client attestation pop: not yet valid (nbf beyond tolerable clock skew)".into(),
+        ));
     }
 
     // No `exp` check by design: ABCA removed `exp` from the PoP JWT in draft
@@ -1536,9 +1536,9 @@ mod tests {
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_core::trust::TrustStore;
-    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::KeyPair as _;
-    use josekit::jws::{JwsSigner, HS256};
+    use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+    use josekit::jws::{HS256, JwsSigner};
 
     /// Builds a signed key-attestation JWT whose leaf cert chains to `ca`.
     /// Returns (jwt, ca_cert_pem) so the caller can build a matching TrustStore.

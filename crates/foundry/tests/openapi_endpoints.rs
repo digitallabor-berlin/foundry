@@ -1,7 +1,7 @@
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,
@@ -268,10 +268,10 @@ fn collect_refs(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
             for (k, v) in map {
-                if k == "$ref" {
-                    if let Some(s) = v.as_str() {
-                        out.push(s.to_string());
-                    }
+                if k == "$ref"
+                    && let Some(s) = v.as_str()
+                {
+                    out.push(s.to_string());
                 }
                 collect_refs(v, out);
             }

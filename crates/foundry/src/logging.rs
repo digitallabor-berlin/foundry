@@ -14,7 +14,7 @@
 
 use crate::cli::LogFormat;
 use foundry_core::config::{LogFormat as CfgFormat, LoggingConfig};
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Level applied when no source specifies one, and when a supplied directive
 /// cannot be parsed.

@@ -1,16 +1,16 @@
 //! Token request handling for OpenID4VCI pre-authorized code and
 //! authorization_code flows.
 
-use crate::attestation::{claim_pop_jti, DefaultAttestationVerifier, WalletAttestationVerifier};
-use crate::dpop::{claim_dpop_jti, verify_dpop_proof, DpopPresentation};
+use crate::attestation::{DefaultAttestationVerifier, WalletAttestationVerifier, claim_pop_jti};
+use crate::dpop::{DpopPresentation, claim_dpop_jti, verify_dpop_proof};
 use crate::error::IssuanceError;
 use crate::transaction::{
-    invalidate_authorization_code, invalidate_pre_authorized_code,
-    load_transaction_by_authorization_code, load_transaction_by_pre_auth_code,
-    save_transaction_with_indices, IssuanceState, IssuanceTransaction,
+    IssuanceState, IssuanceTransaction, invalidate_authorization_code,
+    invalidate_pre_authorized_code, load_transaction_by_authorization_code,
+    load_transaction_by_pre_auth_code, save_transaction_with_indices,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use foundry_core::config::{AttestationMode, DpopConfig, Mode};
 use foundry_core::storage::Storage;
 use foundry_core::trust::TrustStore;
@@ -104,12 +104,12 @@ pub async fn handle_token_request(
         // check 5 already proved those two equal, so claims.iss *is* that
         // shared value -- one comparison here mechanically covers both
         // named requirements.
-        if let Some(client_id) = &req.client_id {
-            if client_id != &claims.iss {
-                return Err(IssuanceError::InvalidClient(
-                    "client_id does not match the wallet attestation/client attestation pop".into(),
-                ));
-            }
+        if let Some(client_id) = &req.client_id
+            && client_id != &claims.iss
+        {
+            return Err(IssuanceError::InvalidClient(
+                "client_id does not match the wallet attestation/client attestation pop".into(),
+            ));
         }
     }
 
@@ -211,14 +211,14 @@ async fn handle_pre_authorized_code_grant(
     //
     // Checked before the code is invalidated so a wrong-key attempt cannot
     // burn the legitimate holder's code (§11.9 is the attack this closes).
-    if let Some(pinned) = &tx.dpop_jkt {
-        if dpop_jkt.as_deref() != Some(pinned.as_str()) {
-            return Err(IssuanceError::InvalidDpopProof(
-                "the DPoP proof key does not match the dpop_jkt pinned at the \
+    if let Some(pinned) = &tx.dpop_jkt
+        && dpop_jkt.as_deref() != Some(pinned.as_str())
+    {
+        return Err(IssuanceError::InvalidDpopProof(
+            "the DPoP proof key does not match the dpop_jkt pinned at the \
                  Authorization Endpoint"
-                    .into(),
-            ));
-        }
+                .into(),
+        ));
     }
 
     // OpenID4VCI 1.0 Credential Offer (L396): `pre-authorized_code` MUST be
@@ -285,14 +285,14 @@ async fn handle_authorization_code_grant(
     // RFC 9449 §10 pin check -- see the identical comment in
     // handle_pre_authorized_code_grant. Checked before the code is
     // invalidated for the same anti-burn reason.
-    if let Some(pinned) = &tx.dpop_jkt {
-        if dpop_jkt.as_deref() != Some(pinned.as_str()) {
-            return Err(IssuanceError::InvalidDpopProof(
-                "the DPoP proof key does not match the dpop_jkt pinned at the \
+    if let Some(pinned) = &tx.dpop_jkt
+        && dpop_jkt.as_deref() != Some(pinned.as_str())
+    {
+        return Err(IssuanceError::InvalidDpopProof(
+            "the DPoP proof key does not match the dpop_jkt pinned at the \
                  Authorization Endpoint"
-                    .into(),
-            ));
-        }
+                .into(),
+        ));
     }
 
     // Only invalidate the code once it has fully passed validation: an
@@ -344,7 +344,7 @@ async fn mint_and_save_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transaction::{load_transaction, IssuanceState, IssuanceTransaction};
+    use crate::transaction::{IssuanceState, IssuanceTransaction, load_transaction};
     use foundry_core::config::Mode;
     use foundry_core::storage::SqliteStorage;
 
@@ -403,7 +403,7 @@ mod tests {
     /// Returns `(proof_jwt, jkt)`.
     fn dpop_keypair_and_proof(jti: &str, now: i64) -> (String, String) {
         use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-        use josekit::jws::{JwsHeader, ES256};
+        use josekit::jws::{ES256, JwsHeader};
         use josekit::jwt::{self, JwtPayload};
 
         let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
@@ -698,8 +698,8 @@ mod tests {
     const CODE_VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 
     fn s256_code_challenge(verifier: &str) -> String {
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use sha2::{Digest, Sha256};
         URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
     }
@@ -1450,7 +1450,7 @@ mod tests {
         iat: i64,
     ) -> String {
         use josekit::jwk::KeyPair as _;
-        use josekit::jws::{JwsSigner, ES256};
+        use josekit::jws::{ES256, JwsSigner};
 
         let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
         let header = serde_json::json!({

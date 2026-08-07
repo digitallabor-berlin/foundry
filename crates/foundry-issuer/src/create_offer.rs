@@ -4,14 +4,14 @@
 
 use crate::error::IssuanceError;
 use crate::offer::{
-    build_dc_api_offer, build_offer_uri, generate_pre_authorized_code, generate_tx_code,
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
-    TxCodeDefinition,
+    TxCodeDefinition, build_dc_api_offer, build_offer_uri, generate_pre_authorized_code,
+    generate_tx_code,
 };
 use crate::status_index::allocate_status_index;
-use crate::transaction::{save_transaction_with_indices, IssuanceState, IssuanceTransaction};
+use crate::transaction::{IssuanceState, IssuanceTransaction, save_transaction_with_indices};
 use foundry_core::config::Config;
-use foundry_core::status_list::{load_status_list, save_status_list, PersistentStatusList};
+use foundry_core::status_list::{PersistentStatusList, load_status_list, save_status_list};
 use foundry_core::storage::Storage;
 use serde::{Deserialize, Serialize};
 
@@ -480,10 +480,10 @@ mod tests {
         .await
         .unwrap();
 
-        let configs = res.dc_api_offer["credential_issuer_metadata"]
-            ["credential_configurations_supported"]
-            .as_object()
-            .expect("credential_configurations_supported must be an object");
+        let configs =
+            res.dc_api_offer["credential_issuer_metadata"]["credential_configurations_supported"]
+                .as_object()
+                .expect("credential_configurations_supported must be an object");
 
         assert_eq!(
             configs.len(),
@@ -519,9 +519,10 @@ mod tests {
             resp.credential_offer.credential_configuration_ids,
             vec!["pid".to_string()]
         );
-        assert!(resp
-            .credential_offer_uri
-            .starts_with("openid-credential-offer://"));
+        assert!(
+            resp.credential_offer_uri
+                .starts_with("openid-credential-offer://")
+        );
 
         let tx = load_transaction(&storage, &resp.transaction_id)
             .await
@@ -669,9 +670,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp
-            .credential_offer_uri
-            .starts_with("openid-credential-offer://"));
+        assert!(
+            resp.credential_offer_uri
+                .starts_with("openid-credential-offer://")
+        );
     }
 
     #[tokio::test]

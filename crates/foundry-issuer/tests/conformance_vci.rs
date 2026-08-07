@@ -6,8 +6,8 @@
 //! See `docs/conformance/openid4vc-conformance.md` for the full clause
 //! inventory and the verdicts these tests are cited as evidence for.
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -17,14 +17,15 @@ use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::TrustStore;
 use foundry_issuer::attestation::verify_key_attestation_jwt;
 use foundry_issuer::{
-    allocate_status_index, build_authorization_server_metadata, build_issuer_metadata,
-    create_offer, handle_authorize_request, handle_credential_request, handle_token_request,
-    issue_nonce, verify_holder_proof, AuthorizeOutcome, AuthorizeParams, CreateOfferRequest,
-    CredentialRequest, DpopPresentation, IssuanceError, NonceSecret, ProofsRequest, TokenRequest,
+    AuthorizeOutcome, AuthorizeParams, CreateOfferRequest, CredentialRequest, DpopPresentation,
+    IssuanceError, NonceSecret, ProofsRequest, TokenRequest, allocate_status_index,
+    build_authorization_server_metadata, build_issuer_metadata, create_offer,
+    handle_authorize_request, handle_credential_request, handle_token_request, issue_nonce,
+    verify_holder_proof,
 };
-use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+use josekit::jws::{ES256, JwsHeader};
 use josekit::jwt::{self, JwtPayload};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -288,10 +289,12 @@ async fn vci_0007_credential_configuration_ids_are_nonempty_and_resolve_against_
         .unwrap();
     let metadata = build_issuer_metadata(&cfg, &[]);
 
-    assert!(!resp
-        .credential_offer
-        .credential_configuration_ids
-        .is_empty());
+    assert!(
+        !resp
+            .credential_offer
+            .credential_configuration_ids
+            .is_empty()
+    );
     for id in &resp.credential_offer.credential_configuration_ids {
         assert!(
             metadata
@@ -417,13 +420,16 @@ async fn haip_0010_issuer_initiated_flow_always_produces_a_credential_offer() {
 
     // foundry's only issuer-initiated issuance entry point is `create_offer`,
     // and it always produces a well-formed CredentialOffer plus its deep-link.
-    assert!(!resp
-        .credential_offer
-        .credential_configuration_ids
-        .is_empty());
-    assert!(resp
-        .credential_offer_uri
-        .starts_with("openid-credential-offer://"));
+    assert!(
+        !resp
+            .credential_offer
+            .credential_configuration_ids
+            .is_empty()
+    );
+    assert!(
+        resp.credential_offer_uri
+            .starts_with("openid-credential-offer://")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -441,9 +447,11 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
 
     // The Authorization Server metadata must advertise the grant.
     let as_metadata = build_authorization_server_metadata(&cfg);
-    assert!(as_metadata
-        .grant_types_supported
-        .contains(&"authorization_code".to_string()));
+    assert!(
+        as_metadata
+            .grant_types_supported
+            .contains(&"authorization_code".to_string())
+    );
 
     // And the flow must actually work end to end: offer -> authorize -> token.
     let redirect_uri = "eudi-openid4ci://authorize";
@@ -751,7 +759,10 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
     .await;
 
     assert!(
-        matches!(result, Err(IssuanceError::UnknownCredentialConfiguration(_))),
+        matches!(
+            result,
+            Err(IssuanceError::UnknownCredentialConfiguration(_))
+        ),
         "an unknown credential_configuration_id must be rejected as UnknownCredentialConfiguration, got: {result:?}"
     );
 }
@@ -763,8 +774,8 @@ async fn vci_0052_credential_configuration_id_mismatch_is_rejected() {
 // not UnknownCredentialConfiguration ("re-read metadata").
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invalid_credential_request(
-) {
+async fn gap_vci_02_configured_but_unbound_credential_configuration_id_is_invalid_credential_request()
+ {
     let (_key_dir, key_path) = write_test_issuer_key();
     // Token issued for "pid", but credential_test_config also configures "mdl".
     let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "pid").await;
@@ -852,7 +863,7 @@ async fn gap_vci_02_credential_configuration_id_is_checked_before_proof_verifica
         credential_configuration_id: Some("some-other-configuration-entirely".to_string()),
         format: Some("dc+sd-jwt".to_string()),
         proofs: Some(ProofsRequest::from_jwts(vec![
-            "not-a-jwt-at-all".to_string()
+            "not-a-jwt-at-all".to_string(),
         ])),
         credential_response_encryption: None,
     };
@@ -1055,9 +1066,10 @@ async fn haip_0025_credential_offer_uri_format_is_transport_agnostic() {
     // The offer is a self-contained deep link with no device-mode signal, so
     // the identical value serves a QR-scanned cross-device flow and a
     // directly-opened same-device flow alike.
-    assert!(resp
-        .credential_offer_uri
-        .starts_with("openid-credential-offer://?credential_offer="));
+    assert!(
+        resp.credential_offer_uri
+            .starts_with("openid-credential-offer://?credential_offer=")
+    );
 }
 
 // ---------------------------------------------------------------------------

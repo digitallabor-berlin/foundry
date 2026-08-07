@@ -2,16 +2,16 @@
 
 use crate::error::TrustError;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL_NOPAD;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use openssl::stack::Stack;
 use openssl::x509::store::{X509Store, X509StoreBuilder};
 use openssl::x509::verify::{X509VerifyFlags, X509VerifyParam};
-use openssl::x509::{X509StoreContext, X509 as OsslX509};
+use openssl::x509::{X509 as OsslX509, X509StoreContext};
 use sha2::{Digest, Sha256};
 use x509_cert::der::oid::AssociatedOid;
 use x509_cert::der::{Decode, DecodePem, Encode};
-use x509_cert::ext::pkix::name::GeneralName;
 use x509_cert::ext::pkix::SubjectAltName;
+use x509_cert::ext::pkix::name::GeneralName;
 
 pub use x509_cert::Certificate;
 
@@ -393,7 +393,7 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         let x5c = build_x5c(&[LEAF_CERT_PEM.to_vec()]).unwrap();
         assert_eq!(x5c.len(), 1);
         // Valid base64 that decodes to non-empty DER.
-        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+        use base64::{Engine, engine::general_purpose::STANDARD as B64};
         let der = B64.decode(&x5c[0]).unwrap();
         assert!(!der.is_empty());
     }

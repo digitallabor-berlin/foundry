@@ -1,9 +1,9 @@
 use crate::error::FormatError;
-use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
 use base64::Engine as _;
-use foundry_core::trust::{cert_ec_public_coords, parse_cert_pem, validate_chain, TrustStore};
+use base64::engine::general_purpose::{STANDARD as B64STD, URL_SAFE_NO_PAD as B64URL};
+use foundry_core::trust::{TrustStore, cert_ec_public_coords, parse_cert_pem, validate_chain};
 use josekit::jwk::Jwk;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
@@ -139,15 +139,15 @@ pub fn verify_sd_jwt_vc(
     .map_err(|e| FormatError::Deserialization(format!("payload json: {e}")))?;
 
     // --- Validity window ---
-    if let Some(exp) = payload_json.get("exp").and_then(|v| v.as_i64()) {
-        if now_unix > exp as u64 {
-            return Err(FormatError::Expired);
-        }
+    if let Some(exp) = payload_json.get("exp").and_then(|v| v.as_i64())
+        && now_unix > exp as u64
+    {
+        return Err(FormatError::Expired);
     }
-    if let Some(iat) = payload_json.get("iat").and_then(|v| v.as_i64()) {
-        if now_unix < iat as u64 {
-            return Err(FormatError::Expired);
-        }
+    if let Some(iat) = payload_json.get("iat").and_then(|v| v.as_i64())
+        && now_unix < iat as u64
+    {
+        return Err(FormatError::Expired);
     }
 
     // --- x5c trust-chain validation ---
@@ -354,7 +354,7 @@ fn verify_kb_jwt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
+    use crate::builder::{IssuerClaims, attach_kb_jwt, build_sd_jwt_vc};
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
     use foundry_core::trust::TrustStore;

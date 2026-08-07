@@ -1,13 +1,13 @@
 //! Holder proof of possession JWT verification for OpenID4VCI.
 
 use crate::error::IssuanceError;
-use crate::nonce::{verify_nonce, NonceSecret};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use crate::nonce::{NonceSecret, verify_nonce};
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Mode;
 use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
-use josekit::jws::{JwsHeader, ES256};
+use josekit::jws::{ES256, JwsHeader};
 use serde::{Deserialize, Serialize};
 
 /// Wire shape of the OpenID4VCI `proofs` request member.
@@ -250,12 +250,12 @@ pub fn verify_holder_proof(
         })?;
     verify_nonce(nonce_secret, nonce, now_unix)?;
 
-    if let Some(attested) = &attested_nonce {
-        if nonce != attested {
-            return Err(IssuanceError::InvalidProof(
-                "proof nonce does not match the key_attestation nonce".into(),
-            ));
-        }
+    if let Some(attested) = &attested_nonce
+        && nonce != attested
+    {
+        return Err(IssuanceError::InvalidProof(
+            "proof nonce does not match the key_attestation nonce".into(),
+        ));
     }
 
     Ok(VerifiedProof { holder_jwk: jwk })

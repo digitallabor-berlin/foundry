@@ -25,14 +25,14 @@
 //! which is why it is checked unconditionally and never made optional.
 
 use crate::error::IssuanceError;
-use crate::nonce::{verify_nonce, NonceSecret};
+use crate::nonce::{NonceSecret, verify_nonce};
 use crate::proof::VerifiedProof;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::{AndroidKeystoreConfig, Mode};
 use foundry_core::trust::android_attestation::find_attestation_cert;
 use foundry_core::trust::{
-    cert_ec_public_coords, parse_cert_pem, validate_chain, x5c_entry_to_pem, TrustStore,
+    TrustStore, cert_ec_public_coords, parse_cert_pem, validate_chain, x5c_entry_to_pem,
 };
 use josekit::jwk::Jwk;
 

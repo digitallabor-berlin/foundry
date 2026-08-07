@@ -2,9 +2,9 @@
 
 use crate::error::IssuanceError;
 use crate::metadata::{build_authorization_server_metadata, build_issuer_metadata};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use foundry_core::config::Config;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 

@@ -1,16 +1,16 @@
-use crate::dcql::{check_dcql_match, PresentedFormat};
+use crate::dcql::{PresentedFormat, check_dcql_match};
 use crate::dcql_model::{CredentialFormat, DcqlQuery};
 use crate::error::VerificationError;
 use crate::request::verifier_x5c_leaf_pem;
-use crate::status::{check_status, StatusListResolver};
+use crate::status::{StatusListResolver, check_status};
 use crate::transaction::{
     CheckResult, VerificationResult, VerificationState, VerificationTransaction,
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
-use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
+use foundry_mdoc::types::{SessionTranscriptParams, build_session_transcript};
 use josekit::jwk::Jwk;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -138,7 +138,7 @@ fn select_presentation<'a>(
                 "vp_token['{}'] must contain exactly one presentation, got {}",
                 cq.id(),
                 other.len()
-            )))
+            )));
         }
     };
 
@@ -194,7 +194,7 @@ fn select_presentation<'a>(
                  verifier does not implement",
                 cq.id(),
                 other
-            )))
+            )));
         }
     };
 
@@ -644,7 +644,7 @@ async fn do_verify_vp_response(
                 other => {
                     return Err(VerificationError::Failed(format!(
                         "unsupported response_mode for the mdoc SessionTranscript: {other}"
-                    )))
+                    )));
                 }
             };
 
@@ -721,7 +721,7 @@ async fn do_verify_vp_response(
                         VerificationError::Failed(
                             "mdoc verification failed: no SessionTranscript candidate".to_string(),
                         )
-                    }))
+                    }));
                 }
             };
 
@@ -802,9 +802,9 @@ mod tests {
     use foundry_core::crypto::jwe::encrypt_compact;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use foundry_core::pki::{issue_leaf, new_ca};
-    use foundry_mdoc::builder::{build_mdoc, MdocClaims};
+    use foundry_mdoc::builder::{MdocClaims, build_mdoc};
     use foundry_sd_jwt_vc::builder::{
-        attach_kb_jwt, build_sd_jwt_vc, IssuerClaims, TransactionDataBinding,
+        IssuerClaims, TransactionDataBinding, attach_kb_jwt, build_sd_jwt_vc,
     };
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
@@ -1037,14 +1037,16 @@ mod tests {
         assert!(res.verified);
         assert_eq!(tx.state, VerificationState::Verified);
         assert_eq!(res.claims["given_name"], "Alice");
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "jwe_decryption" && c.passed));
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "jwe_decryption" && c.passed)
+        );
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed)
+        );
     }
 
     /// VP-0125 (OpenID4VP 1.0 Response / Response Parameters, L1172): the
@@ -1366,10 +1368,11 @@ mod tests {
             .unwrap();
 
         assert!(!res.verified, "checks={:?}", res.checks);
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "transaction_data_binding" && !c.passed));
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && !c.passed)
+        );
     }
 
     /// L3142: the algorithm MUST be one of the request's values. A wallet that used
@@ -1444,10 +1447,11 @@ mod tests {
             .unwrap();
 
         assert!(!res.verified, "checks={:?}", res.checks);
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "transaction_data_binding" && !c.passed));
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && !c.passed)
+        );
     }
 
     /// No transaction_data requested -> no such check exists. The common path's
@@ -1508,10 +1512,11 @@ mod tests {
             .unwrap();
 
         assert!(res.verified, "checks={:?}", res.checks);
-        assert!(!res
-            .checks
-            .iter()
-            .any(|c| c.check == "transaction_data_binding"));
+        assert!(
+            !res.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding")
+        );
     }
 
     /// HAIP-0049, HAIP-0050, HAIP-0053 (HAIP OpenID4VP, L258-259): the JWE
@@ -1859,10 +1864,11 @@ mod tests {
         let dcql = res.checks.iter().find(|c| c.check == "dcql_match").unwrap();
         assert!(!dcql.passed);
         // The signature check still passed and is still reported for transparency.
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed));
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed)
+        );
     }
 
     /// VP-0175, VP-0177, VP-0179, VP-0180 -- OpenID4VP 1.0 Security /
@@ -2134,18 +2140,21 @@ mod tests {
 
         assert!(res.verified, "checks={:?}", res.checks);
         assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "dcql_match" && c.passed));
-        assert!(res
-            .checks
-            .iter()
-            .any(|c| c.check == "status_check" && c.passed));
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed)
+        );
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "dcql_match" && c.passed)
+        );
+        assert!(
+            res.checks
+                .iter()
+                .any(|c| c.check == "status_check" && c.passed)
+        );
     }
 
     // --- select_presentation: the OpenID4VP 1.0 section 8.1 envelope ---

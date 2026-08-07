@@ -10,7 +10,7 @@
 use crate::error::IssuanceError;
 use crate::offer::generate_pre_authorized_code;
 use crate::transaction::{
-    load_transaction_by_issuer_state, save_transaction_with_auth_code, IssuanceState,
+    IssuanceState, load_transaction_by_issuer_state, save_transaction_with_auth_code,
 };
 use foundry_core::storage::Storage;
 
@@ -116,7 +116,7 @@ pub async fn handle_authorize_request(
         Ok(None) => {
             return AuthorizeOutcome::DirectError(IssuanceError::InvalidRequest(
                 "unknown or expired issuer_state".to_string(),
-            ))
+            ));
         }
         Err(e) => return AuthorizeOutcome::DirectError(e),
     };
@@ -130,7 +130,7 @@ pub async fn handle_authorize_request(
             return AuthorizeOutcome::DirectError(IssuanceError::InvalidRequest(
                 "transaction has no redirect_uri configured for the authorization_code grant"
                     .to_string(),
-            ))
+            ));
         }
     };
     if params.redirect_uri != expected_redirect_uri {
@@ -214,7 +214,7 @@ pub async fn handle_authorize_request(
 mod tests {
     use super::*;
     use crate::transaction::{
-        load_transaction, save_transaction_with_indices, IssuanceTransaction,
+        IssuanceTransaction, load_transaction, save_transaction_with_indices,
     };
     use foundry_core::storage::SqliteStorage;
 

@@ -257,8 +257,8 @@ pub fn encrypt_compact_with_kid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use josekit::jwk::alg::ec::EcCurve;
     use josekit::jwk::Jwk;
+    use josekit::jwk::alg::ec::EcCurve;
     use serde_json::json;
 
     /// Mirrors the verifier's real key handling: the *public* JWK handed to the

@@ -1,6 +1,6 @@
 use foundry::commands;
 use foundry_core::config::Config;
-use foundry_verifier::{check_dcql_match, PresentedFormat};
+use foundry_verifier::{PresentedFormat, check_dcql_match};
 
 /// Assert every `named_queries[].dcql` in a config is parseable DCQL.
 ///

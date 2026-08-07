@@ -93,8 +93,8 @@ pub fn verify_nonce(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 
     const EXP_LEN: usize = crate::challenge::EXP_LEN;
 

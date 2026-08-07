@@ -5,7 +5,7 @@
 //! production deployment (log a warning at startup in that case).
 
 use axum::extract::State;
-use axum::http::{header::AUTHORIZATION, Request, StatusCode};
+use axum::http::{Request, StatusCode, header::AUTHORIZATION};
 use axum::middleware::Next;
 use axum::response::Response;
 use foundry_core::config::AdminConfig;
@@ -15,13 +15,21 @@ pub struct AdminApiKey(pub Option<String>);
 
 impl AdminApiKey {
     pub fn resolve(cfg: &AdminConfig) -> Self {
+        Self::resolve_with(cfg, |name| std::env::var(name).ok())
+    }
+
+    /// Env lookup is injected so tests can exercise the `api_key_env` path
+    /// without mutating process-global environment state. `std::env::set_var`
+    /// became `unsafe` in edition 2024 because the test harness runs `#[test]`
+    /// functions on multiple threads, and concurrent `setenv`/`getenv` is UB.
+    fn resolve_with(cfg: &AdminConfig, lookup: impl Fn(&str) -> Option<String>) -> Self {
         if let Some(k) = &cfg.api_key {
             return Self(Some(k.clone()));
         }
-        if let Some(env_name) = &cfg.api_key_env {
-            if let Ok(v) = std::env::var(env_name) {
-                return Self(Some(v));
-            }
+        if let Some(env_name) = &cfg.api_key_env
+            && let Some(v) = lookup(env_name)
+        {
+            return Self(Some(v));
         }
         Self(None)
     }
@@ -62,23 +70,22 @@ mod tests {
 
     #[test]
     fn literal_api_key_takes_precedence() {
-        std::env::set_var("FOUNDRY_TEST_ADMIN_KEY_PRECEDENCE", "from-env");
         let cfg = cfg_with(
             Some("from-literal"),
             Some("FOUNDRY_TEST_ADMIN_KEY_PRECEDENCE"),
         );
-        let resolved = AdminApiKey::resolve(&cfg);
+        // Env var *is* present, yet the literal must still win.
+        let resolved = AdminApiKey::resolve_with(&cfg, |_| Some("from-env".to_string()));
         assert_eq!(resolved.0.as_deref(), Some("from-literal"));
-        std::env::remove_var("FOUNDRY_TEST_ADMIN_KEY_PRECEDENCE");
     }
 
     #[test]
     fn falls_back_to_env_var_when_no_literal_key() {
-        std::env::set_var("FOUNDRY_TEST_ADMIN_KEY_FALLBACK", "from-env-only");
         let cfg = cfg_with(None, Some("FOUNDRY_TEST_ADMIN_KEY_FALLBACK"));
-        let resolved = AdminApiKey::resolve(&cfg);
+        let resolved = AdminApiKey::resolve_with(&cfg, |name| {
+            (name == "FOUNDRY_TEST_ADMIN_KEY_FALLBACK").then(|| "from-env-only".to_string())
+        });
         assert_eq!(resolved.0.as_deref(), Some("from-env-only"));
-        std::env::remove_var("FOUNDRY_TEST_ADMIN_KEY_FALLBACK");
     }
 
     #[test]

@@ -1,7 +1,7 @@
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, AppState};
+use foundry::server::{AppState, admin_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, VerifierConfig, WalletFacingConfig,

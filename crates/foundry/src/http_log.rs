@@ -22,11 +22,11 @@
 //! convention: a path parameter or query string cannot leak through this field
 //! because the concrete path is never formatted into it.
 
+use axum::Router;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::Router;
 use std::time::Instant;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -116,10 +116,10 @@ async fn access_log(
 mod tests {
     use super::*;
     use crate::log_capture;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
     use tracing::Level;
     use tracing_subscriber::filter::LevelFilter;

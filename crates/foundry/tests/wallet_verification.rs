@@ -1,10 +1,10 @@
 use axum::body::Body;
-use axum::http::{header, Request, StatusCode};
+use axum::http::{Request, StatusCode, header};
 use axum::routing::get;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{admin_router, wallet_router, AppState};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, Config, DpopConfig, IssuerConfig, KeyEntry, LoggingConfig, Mode,
     ServerConfig, StatusListConfig, StorageConfig, TrustAnchor, VerifierConfig, WalletFacingConfig,
@@ -12,17 +12,17 @@ use foundry_core::config::{
 use foundry_core::crypto::jwe::encrypt_compact;
 use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::pki::{issue_leaf, new_ca};
-use foundry_core::status_list::{build_status_list_token, StatusList, StatusListTokenClaims};
+use foundry_core::status_list::{StatusList, StatusListTokenClaims, build_status_list_token};
 use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::build_x5c;
-use foundry_mdoc::builder::{build_mdoc, MdocClaims};
-use foundry_mdoc::types::{build_session_transcript, SessionTranscriptParams};
-use foundry_sd_jwt_vc::builder::{attach_kb_jwt, build_sd_jwt_vc, IssuerClaims};
+use foundry_mdoc::builder::{MdocClaims, build_mdoc};
+use foundry_mdoc::types::{SessionTranscriptParams, build_session_transcript};
+use foundry_sd_jwt_vc::builder::{IssuerClaims, attach_kb_jwt, build_sd_jwt_vc};
 use foundry_verifier::{
     CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
 };
-use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use josekit::jwk::KeyPair as _;
+use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
 use std::collections::BTreeMap as StdBTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1085,10 +1085,12 @@ async fn dcql_vct_mismatch_is_rejected() {
     let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
 
     assert!(!verify_result.verified, "DCQL vct mismatch must not verify");
-    assert!(verify_result
-        .checks
-        .iter()
-        .any(|c| c.check == "dcql_match" && !c.passed));
+    assert!(
+        verify_result
+            .checks
+            .iter()
+            .any(|c| c.check == "dcql_match" && !c.passed)
+    );
 }
 
 /// Run the full SD-JWT VC verification flow issuing a credential whose
@@ -1213,10 +1215,12 @@ async fn revoked_credential_is_rejected() {
     // Credential at index 5; the status list marks index 5 revoked.
     let result = run_status_flow(Some(5), 5).await;
     assert!(!result.verified, "revoked credential must not verify");
-    assert!(result
-        .checks
-        .iter()
-        .any(|c| c.check == "status_check" && !c.passed));
+    assert!(
+        result
+            .checks
+            .iter()
+            .any(|c| c.check == "status_check" && !c.passed)
+    );
 }
 
 #[tokio::test]
@@ -1224,14 +1228,18 @@ async fn valid_non_revoked_credential_succeeds() {
     // Credential at index 5; nothing is revoked.
     let result = run_status_flow(None, 5).await;
     assert!(result.verified, "checks={:?}", result.checks);
-    assert!(result
-        .checks
-        .iter()
-        .any(|c| c.check == "status_check" && c.passed));
-    assert!(result
-        .checks
-        .iter()
-        .any(|c| c.check == "dcql_match" && c.passed));
+    assert!(
+        result
+            .checks
+            .iter()
+            .any(|c| c.check == "status_check" && c.passed)
+    );
+    assert!(
+        result
+            .checks
+            .iter()
+            .any(|c| c.check == "dcql_match" && c.passed)
+    );
     assert_eq!(result.claims["given_name"], "Alice");
 }
 
@@ -1385,10 +1393,12 @@ async fn mdoc_presentation_is_accepted() {
         verify_result.claims["org.iso.18013.5.1"]["given_name"],
         "John"
     );
-    assert!(verify_result
-        .checks
-        .iter()
-        .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed));
+    assert!(
+        verify_result
+            .checks
+            .iter()
+            .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed)
+    );
 }
 
 // ---------------------------------------------------------------------------
