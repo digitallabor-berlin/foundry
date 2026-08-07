@@ -40,7 +40,7 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
 
-      # rust-toolchain.toml pins 1.97.0; the rustup shims already on
+      # rust-toolchain.toml pins 1.97.1; the rustup shims already on
       # ubuntu-latest resolve it transparently for every cargo/rustc
       # invocation below. This step forces (and verifies) that resolution
       # up front rather than relying on it lazily inside `cargo test`.
