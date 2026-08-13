@@ -184,6 +184,17 @@
   "birthdate": "1990-01-01"
 }</textarea>
     </div>
+    <details class="opt-disclosure">
+      <summary>DPC display metadata (optional)</summary>
+      <div class="field">
+        <label for="offer-display-json">offer_display (JSON array)</label>
+        <textarea id="offer-display-json" placeholder='[{"locale": "en-US", "card": {"type": {"code": "CREDIT"}, "network_branding": [{"network": "example_network", "branding": {"name": "Example Network"}}]}}]'></textarea>
+      </div>
+      <div class="field">
+        <label for="credential-response-display-json">credential_response_display (JSON array)</label>
+        <textarea id="credential-response-display-json" placeholder='[{"locale": "en-US", "card": {"last_four": "4444", "card_art": [{"theme": "DEFAULT", "image_url": "https://bank.example/card.png"}]}}]'></textarea>
+      </div>
+    </details>
     <div class="field checkbox">
       <input type="checkbox" id="tx-code-required">
       <label for="tx-code-required">tx_code_required</label>
@@ -2709,6 +2720,8 @@ var qrcode = function() {
       const credentialTypeId = document.getElementById('cred-type-id').value.trim();
       const claimsRaw = document.getElementById('claims-json').value;
       const txCodeRequired = document.getElementById('tx-code-required').checked;
+      const offerDisplayRaw = document.getElementById('offer-display-json').value;
+      const credentialResponseDisplayRaw = document.getElementById('credential-response-display-json').value;
 
       let claims;
       try {
@@ -2718,15 +2731,45 @@ var qrcode = function() {
         return;
       }
 
+      // A blank textarea omits the field entirely rather than sending null or
+      // [], because the server rejects an empty display array.
+      let offerDisplay = null;
+      try {
+        offerDisplay = offerDisplayRaw.trim() ? JSON.parse(offerDisplayRaw) : null;
+      } catch (e) {
+        showError(errorEl, new Error('offer_display is not valid JSON: ' + e.message));
+        return;
+      }
+
+      let credentialResponseDisplay = null;
+      try {
+        credentialResponseDisplay = credentialResponseDisplayRaw.trim()
+          ? JSON.parse(credentialResponseDisplayRaw)
+          : null;
+      } catch (e) {
+        showError(errorEl, new Error('credential_response_display is not valid JSON: ' + e.message));
+        return;
+      }
+
       btn.disabled = true;
       try {
+        // Named `requestBody`, not `body`: the response is already bound to
+        // `body` below and shadowing it here would silently break every use.
+        const requestBody = {
+          credential_type_id: credentialTypeId,
+          claims: claims,
+          tx_code_required: txCodeRequired
+        };
+        if (offerDisplay !== null) {
+          requestBody.offer_display = offerDisplay;
+        }
+        if (credentialResponseDisplay !== null) {
+          requestBody.credential_response_display = credentialResponseDisplay;
+        }
+
         const body = await adminFetch('/admin/issuance/offers', {
           method: 'POST',
-          body: JSON.stringify({
-            credential_type_id: credentialTypeId,
-            claims: claims,
-            tx_code_required: txCodeRequired
-          })
+          body: JSON.stringify(requestBody)
         });
 
         document.getElementById('offer-uri').textContent = body.credential_offer_uri;
