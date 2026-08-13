@@ -2,6 +2,7 @@
 //! pre-auth code/tx_code generation, transaction persistence, and offer
 //! construction.
 
+use crate::display_metadata::{DisplayStage, validate_display};
 use crate::error::IssuanceError;
 use crate::offer::{
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
@@ -28,6 +29,27 @@ pub struct CreateOfferRequest {
     /// used, unchanged.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    /// EMVCo DPC display metadata for the **Credential Offer**.
+    ///
+    /// Validated with `DisplayStage::Offer`, which treats `last_four` and
+    /// `card_art` as optional. That is deliberate: the Schema Framework's
+    /// offer-stage guidance says PII-type data should not appear on an offer,
+    /// while its schema marks both members required. See design §1.3.
+    ///
+    /// Accepted only for the `com.emvco.dpc.card` credential type.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub offer_display: Option<Vec<serde_json::Value>>,
+    /// EMVCo DPC display metadata for the **Credential Response**.
+    ///
+    /// Validated with `DisplayStage::CredentialResponse`, which requires
+    /// `last_four` and `card_art`. Persisted on the `IssuanceTransaction` and
+    /// echoed at `/credential`.
+    ///
+    /// Accepted only for the `com.emvco.dpc.card` credential type.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub credential_response_display: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -49,6 +71,19 @@ pub struct CreateOfferResponse {
 /// Default tx_code length when `tx_code_required` is set (HAIP-typical 4 digits).
 const DEFAULT_TX_CODE_LENGTH: usize = 4;
 
+/// The canonical EMVCo Digital Payment Credential type identifier.
+///
+/// Behaviour keyed on this constant is justified **only** by the EMV® Digital
+/// Payment Credential Specification — Schema Framework, an external-reference
+/// document rather than a standards-track specification (root AGENTS.md §4.4,
+/// external-reference rule; the stub is
+/// `docs/specs/emvco-dpc-schema-framework.md`).
+///
+/// Confining display metadata to this one `vct` is what keeps a member
+/// OpenID4VCI 1.0 does not define off every other credential type's offer and
+/// response. The mdoc binding is unimplemented, so only `vct` is consulted.
+const DPC_VCT: &str = "com.emvco.dpc.card";
+
 /// `skip_all` is mandatory: `req` carries the claim values to be issued and the
 /// optional transaction code.
 #[tracing::instrument(
@@ -59,12 +94,17 @@ const DEFAULT_TX_CODE_LENGTH: usize = 4;
         // A redirect URI means an authorization_code grant; the URI itself is
         // caller-supplied, so only its presence is recorded.
         authorization_code_grant = req.redirect_uri.is_some(),
+        // Presence only, never contents: these objects carry `last_four`, a
+        // cardholder-recognisable alias and possibly personalised art URLs, all
+        // of which are on root AGENTS.md §4.5's never-logged list.
+        offer_display_present = req.offer_display.is_some(),
+        credential_response_display_present = req.credential_response_display.is_some(),
     )
 )]
 pub async fn create_offer(
     cfg: &Config,
     storage: &dyn Storage,
-    req: CreateOfferRequest,
+    mut req: CreateOfferRequest,
     now_unix: i64,
     request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey],
 ) -> Result<CreateOfferResponse, IssuanceError> {
@@ -79,6 +119,25 @@ pub async fn create_offer(
         .iter()
         .find(|c| c.id == req.credential_type_id)
         .ok_or_else(|| IssuanceError::UnknownCredentialType(req.credential_type_id.clone()))?;
+
+    // Gate, then validate -- in that order, and both before any state is
+    // mutated, so a rejected request allocates no status index and writes no
+    // transaction.
+    if (req.offer_display.is_some() || req.credential_response_display.is_some())
+        && ct.vct.as_deref() != Some(DPC_VCT)
+    {
+        return Err(IssuanceError::InvalidRequest(format!(
+            "display metadata is only supported for the '{DPC_VCT}' credential \
+             type; credential_type '{}' declares vct {:?}",
+            ct.id, ct.vct
+        )));
+    }
+    if let Some(display) = req.offer_display.as_deref() {
+        validate_display(display, DisplayStage::Offer)?;
+    }
+    if let Some(display) = req.credential_response_display.as_deref() {
+        validate_display(display, DisplayStage::CredentialResponse)?;
+    }
 
     // Every required claim's top-level path segment must be present.
     //
@@ -128,6 +187,10 @@ pub async fn create_offer(
         None
     };
 
+    // Bound before the branches below move the rest of `req`.
+    let offer_display = req.offer_display.take();
+    let credential_response_display = req.credential_response_display.take();
+
     let (tx, grants) = if let Some(redirect_uri) = req.redirect_uri {
         let issuer_state = generate_pre_authorized_code();
         let tx = IssuanceTransaction {
@@ -146,7 +209,7 @@ pub async fn create_offer(
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
-            credential_response_display: None,
+            credential_response_display: credential_response_display.clone(),
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: None,
@@ -178,7 +241,7 @@ pub async fn create_offer(
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
-            credential_response_display: None,
+            credential_response_display: credential_response_display.clone(),
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: Some(PreAuthorizedCodeGrant {
@@ -202,7 +265,7 @@ pub async fn create_offer(
             .to_string(),
         credential_configuration_ids: vec![ct.id.clone()],
         grants,
-        display: None,
+        display: offer_display,
     };
     let credential_offer_uri = build_offer_uri(&offer)?;
     let dc_api_offer = build_dc_api_offer(cfg, &offer, request_decryption_keys)?;
@@ -362,6 +425,8 @@ mod tests {
                 claims,
                 tx_code_required: false,
                 redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
             },
             1_700_000_000,
             &[],
@@ -435,6 +500,8 @@ mod tests {
                 claims,
                 tx_code_required: false,
                 redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
             },
             1_700_000_000,
             std::slice::from_ref(&key),
@@ -476,6 +543,8 @@ mod tests {
                 claims,
                 tx_code_required: false,
                 redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
             },
             1_700_000_000,
             &[],
@@ -513,6 +582,8 @@ mod tests {
             claims,
             tx_code_required: true,
             redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
         };
         let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
@@ -546,6 +617,8 @@ mod tests {
             claims: serde_json::Map::new(),
             tx_code_required: false,
             redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
         };
         let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
@@ -563,6 +636,8 @@ mod tests {
             claims: serde_json::Map::new(),
             tx_code_required: false,
             redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
         };
         let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
@@ -584,6 +659,8 @@ mod tests {
             claims,
             tx_code_required: false,
             redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
         };
         create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
@@ -608,6 +685,8 @@ mod tests {
             claims,
             tx_code_required: false,
             redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
         };
         let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
             .await
@@ -628,6 +707,8 @@ mod tests {
             claims,
             tx_code_required: false,
             redirect_uri: Some(redirect_uri.to_string()),
+            offer_display: None,
+            credential_response_display: None,
         }
     }
 
@@ -715,6 +796,8 @@ mod tests {
                 claims: serde_json::Map::new(),
                 tx_code_required: false,
                 redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
             },
             1_700_000_000,
             &[],
@@ -749,11 +832,290 @@ mod tests {
                 claims: serde_json::Map::new(),
                 tx_code_required: false,
                 redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
             },
             1_700_000_000,
             &[],
         )
         .await
         .expect("an offer omitting an optional claim must be accepted");
+    }
+
+    /// `test_config()` plus the DPC credential type, so gating has something to
+    /// accept as well as something to reject.
+    fn test_config_with_dpc() -> Config {
+        let mut cfg = test_config();
+        cfg.credential_types.push(CredentialType {
+            id: "com.emvco.dpc.card".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("com.emvco.dpc.card".to_string()),
+            doctype: None,
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![
+                ClaimDef {
+                    path: vec!["credential_id".to_string()],
+                    required: Some(true),
+                    selectively_disclosable: true,
+                    display: vec![],
+                },
+                ClaimDef {
+                    path: vec!["network".to_string()],
+                    required: Some(true),
+                    selectively_disclosable: true,
+                    display: vec![],
+                },
+            ],
+            validity_seconds: None,
+        });
+        cfg
+    }
+
+    fn dpc_claims() -> serde_json::Map<String, serde_json::Value> {
+        let mut claims = serde_json::Map::new();
+        claims.insert("credential_id".to_string(), serde_json::json!("cred-1"));
+        claims.insert("network".to_string(), serde_json::json!("example_network"));
+        claims
+    }
+
+    fn offer_stage_display() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "locale": "en-US",
+            "card": {
+                "type": { "code": "CREDIT", "label": "Credit Card" },
+                "network_branding": [
+                    { "network": "example_network", "branding": { "name": "Example Network" } }
+                ]
+            }
+        })]
+    }
+
+    fn response_stage_display() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "locale": "en-US",
+            "card": {
+                "last_four": "4444",
+                "alias": "Platinum Credit Card",
+                "card_art": [
+                    { "theme": "DEFAULT", "image_url": "https://bank.example/card.png" }
+                ]
+            }
+        })]
+    }
+
+    fn dpc_request() -> CreateOfferRequest {
+        CreateOfferRequest {
+            credential_type_id: "com.emvco.dpc.card".to_string(),
+            claims: dpc_claims(),
+            tx_code_required: false,
+            redirect_uri: None,
+            offer_display: Some(offer_stage_display()),
+            credential_response_display: Some(response_stage_display()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dpc_offer_carries_the_offer_stage_display_and_persists_the_response_stage_one() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let res = create_offer(&cfg, &storage, dpc_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        let display = res
+            .credential_offer
+            .display
+            .as_ref()
+            .expect("the offer must carry the offer-stage display array");
+        assert_eq!(display[0]["card"]["type"]["code"], "CREDIT");
+        assert!(
+            display[0]["card"].get("last_four").is_none(),
+            "the offer must carry the offer-stage object, not the response-stage one"
+        );
+
+        let tx = load_transaction(&storage, &res.transaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let persisted = tx
+            .credential_response_display
+            .as_ref()
+            .expect("the response-stage display must be persisted on the transaction");
+        assert_eq!(persisted[0]["card"]["last_four"], "4444");
+    }
+
+    /// The DC API payload is built by serialising the offer, so the two
+    /// transports cannot disagree about `display`. This test is what keeps that
+    /// true if someone later hand-builds the payload.
+    #[tokio::test]
+    async fn the_dc_api_offer_carries_the_offer_stage_display() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let res = create_offer(&cfg, &storage, dpc_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.dc_api_offer["display"][0]["card"]["type"]["code"], "CREDIT",
+            "dc_api_offer is built by serialising the offer, so it must inherit display"
+        );
+    }
+
+    /// The gate of design §3.5: a non-OpenID4VCI member must not appear on any
+    /// credential type except the one whose governing document asks for it.
+    #[tokio::test]
+    async fn display_metadata_is_rejected_for_a_non_dpc_credential_type() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+
+        let err = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims,
+                tx_code_required: false,
+                redirect_uri: None,
+                offer_display: Some(offer_stage_display()),
+                credential_response_display: None,
+            },
+            1_700_000_000,
+            &[],
+        )
+        .await
+        .expect_err("display metadata on a non-DPC credential type must be rejected");
+
+        match err {
+            IssuanceError::InvalidRequest(m) => assert!(
+                m.contains("com.emvco.dpc.card"),
+                "the rejection should name the only credential type that may carry it, got: {m}"
+            ),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// A rejected request must not leave a transaction or a consumed status
+    /// index behind: the gate runs before any state is mutated.
+    #[tokio::test]
+    async fn a_rejected_display_request_persists_nothing() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+
+        let _ = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "pid".to_string(),
+                claims,
+                tx_code_required: false,
+                redirect_uri: None,
+                offer_display: Some(offer_stage_display()),
+                credential_response_display: None,
+            },
+            1_700_000_000,
+            &[],
+        )
+        .await;
+
+        assert!(
+            load_status_list(&storage, "1").await.unwrap().is_none(),
+            "no status list should have been created for a rejected request"
+        );
+    }
+
+    /// Structural validation runs at the admin boundary, and the two stages use
+    /// different rules: an object missing `last_four` is fine on the offer and
+    /// invalid on the response.
+    #[tokio::test]
+    async fn a_response_stage_object_missing_last_four_is_rejected() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let mut req = dpc_request();
+        req.credential_response_display = Some(offer_stage_display());
+
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
+            .await
+            .expect_err("a response-stage object without last_four must be rejected");
+
+        match err {
+            IssuanceError::InvalidRequest(m) => assert!(m.contains("last_four"), "got: {m}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_offer_stage_object_missing_last_four_is_accepted() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let mut req = dpc_request();
+        req.credential_response_display = None;
+
+        create_offer(&cfg, &storage, req, 1_700_000_000, &[])
+            .await
+            .expect("the offer stage must accept an object without last_four");
+    }
+
+    #[tokio::test]
+    async fn a_structurally_invalid_display_object_is_rejected() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let mut req = dpc_request();
+        req.offer_display = Some(vec![serde_json::json!({
+            "locale": "en-US",
+            "card": { "type": { "code": "CHARGE" } }
+        })]);
+
+        let err = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
+            .await
+            .expect_err("an invalid type.code must be rejected");
+
+        match err {
+            IssuanceError::InvalidRequest(m) => assert!(m.contains("type.code"), "got: {m}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// A DPC offer that supplies no display metadata must still serialise
+    /// without the key -- the gate must not force the member into existence.
+    #[tokio::test]
+    async fn a_dpc_offer_without_display_still_omits_the_key() {
+        let cfg = test_config_with_dpc();
+        let storage = test_storage().await;
+
+        let res = create_offer(
+            &cfg,
+            &storage,
+            CreateOfferRequest {
+                credential_type_id: "com.emvco.dpc.card".to_string(),
+                claims: dpc_claims(),
+                tx_code_required: false,
+                redirect_uri: None,
+                offer_display: None,
+                credential_response_display: None,
+            },
+            1_700_000_000,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let value = serde_json::to_value(&res.credential_offer).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("display"),
+            "got: {value}"
+        );
     }
 }

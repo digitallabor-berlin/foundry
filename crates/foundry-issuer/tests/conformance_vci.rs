@@ -228,6 +228,8 @@ fn offer_request(redirect_uri: Option<&str>) -> CreateOfferRequest {
         claims: claims_with("given_name", "Alice"),
         tx_code_required: false,
         redirect_uri: redirect_uri.map(|s| s.to_string()),
+        offer_display: None,
+        credential_response_display: None,
     }
 }
 
@@ -620,6 +622,8 @@ async fn setup_credential_flow(
         claims: claims_with("given_name", "Alice"),
         tx_code_required: false,
         redirect_uri: None,
+        offer_display: None,
+        credential_response_display: None,
     };
     let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
@@ -950,6 +954,8 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         claims: claims_with("given_name", "Alice"),
         tx_code_required: false,
         redirect_uri: None,
+        offer_display: None,
+        credential_response_display: None,
     };
     let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
@@ -1282,6 +1288,8 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         claims: claims_with("given_name", "Alice"),
         tx_code_required: true,
         redirect_uri: None,
+        offer_display: None,
+        credential_response_display: None,
     };
     let resp = create_offer(&cfg, &storage, req, 1_700_000_000, &[])
         .await
