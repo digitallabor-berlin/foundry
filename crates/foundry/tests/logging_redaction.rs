@@ -1707,3 +1707,140 @@ async fn encrypted_issuance_leaks_nothing_even_with_sensitive_payloads_enabled()
         "key material is never unlocked by the sensitive-payloads flag"
     );
 }
+
+/// EMVCo DPC display metadata carries `card.last_four`, a cardholder-recognisable
+/// alias and possibly personalised art URLs. Root AGENTS.md §4.5 puts all of it
+/// on the never-logged list; `create_offer` records presence only.
+///
+/// Captured at TRACE so the assertion covers every level -- a leak that only
+/// appears at `debug` is still a leak.
+#[tokio::test]
+async fn display_metadata_never_reaches_the_log() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (base, _dir) = setup().await;
+
+    // `setup()` configures only `pid`, and the DPC_VCT gate rejects display
+    // metadata for anything else. Extend the config rather than duplicating the
+    // whole harness.
+    let mut cfg = (*base.config).clone();
+    cfg.credential_types.push(CredentialType {
+        id: "com.emvco.dpc.card".to_string(),
+        format: "dc+sd-jwt".to_string(),
+        vct: Some("com.emvco.dpc.card".to_string()),
+        doctype: None,
+        scope: None,
+        cryptographic_holder_binding: true,
+        display: vec![],
+        claims: vec![
+            ClaimDef {
+                path: vec!["credential_id".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["network".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+        ],
+        validity_seconds: None,
+    });
+    let state = AppState::new(base.storage.clone(), Arc::new(cfg));
+
+    // Distinctive values, so a match cannot be coincidental.
+    const LAST_FOUR: &str = "9137";
+    const ALIAS: &str = "Unmistakable Alias 8f3a2c";
+    const ART_URL_MARKER: &str = "personalised-7d41e9";
+
+    let request = serde_json::json!({
+        "credential_type_id": "com.emvco.dpc.card",
+        "claims": { "credential_id": "cred-1", "network": "example_network" },
+        "tx_code_required": false,
+        "offer_display": [{
+            "locale": "en-US",
+            "card": { "type": { "code": "CREDIT" } }
+        }],
+        "credential_response_display": [{
+            "locale": "en-US",
+            "card": {
+                "last_four": LAST_FOUR,
+                "alias": ALIAS,
+                "card_art": [
+                    { "theme": "DEFAULT", "image_url": "https://bank.example/personalised-7d41e9.png" }
+                ]
+            }
+        }]
+    });
+
+    let (guard, log) = capture_at_trace();
+    let res = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(request.to_string()))
+                .expect("create offer request"),
+        )
+        .await
+        .expect("create offer response");
+    let status = res.status();
+    let created = body_json(res).await;
+    drop(guard);
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the offer must be created, else the assertions below are vacuous: {created}"
+    );
+    assert!(
+        !log.events().is_empty(),
+        "captured nothing; the negative assertions below would be vacuous"
+    );
+
+    for (label, secret) in [
+        ("last_four", LAST_FOUR),
+        ("cardholder alias", ALIAS),
+        ("personalised card-art URL", ART_URL_MARKER),
+    ] {
+        assert!(
+            !log.contains_value(secret),
+            "{label} leaked into the log: {secret:?} found"
+        );
+    }
+
+    // The positive control: prove the capture window actually covered this
+    // request, so the negative assertions above are not vacuously true of an
+    // irrelevant buffer.
+    //
+    // This deliberately does NOT assert on `offer_display_present` /
+    // `credential_response_display_present`. Those are span fields, and
+    // `create_offer` emits no tracing event of its own -- so nothing is ever
+    // recorded *inside* its span and its fields reach no log record. That is
+    // pre-existing and equally true of `credential_type_id`,
+    // `tx_code_required` and `authorization_code_grant`, which have been on
+    // that span all along. The fields are still correct per AGENTS.md §4.5
+    // (presence only, never contents); they are simply unobservable until some
+    // event is emitted within the span. Asserting otherwise would encode a
+    // property this code does not have.
+    let saw_this_request = log.events().iter().any(|e| {
+        e.fields
+            .get("route")
+            .is_some_and(|r| r.contains("/admin/issuance/offers"))
+            && e.fields.get("http.status").map(String::as_str) == Some("200")
+    });
+    assert!(
+        saw_this_request,
+        "the capture window must cover the create-offer request, else the \
+         negative assertions above prove nothing; captured fields: {:?}",
+        log.events()
+            .iter()
+            .map(|e| e.fields.clone())
+            .collect::<Vec<_>>()
+    );
+}
