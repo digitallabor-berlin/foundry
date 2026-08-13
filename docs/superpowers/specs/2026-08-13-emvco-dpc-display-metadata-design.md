@@ -307,15 +307,31 @@ inside the encrypted payload like every other member; no special handling.
 ### 3.7 Admin console
 
 `crates/foundry/assets/console.html`, Issuance card, below `claims (JSON)`: a
-`<details>` group labelled for DPC display metadata, **collapsed by default** so
-the PID flow's UI is visually unchanged.
+`<details class="opt-disclosure">` group labelled for DPC display metadata,
+**collapsed by default** so the PID flow's UI is visually unchanged.
 
 Two textareas, `offer_display (JSON, optional)` and
-`credential_response_display (JSON, optional)`, each pre-filled with a worked
-example. The offer example is deliberately **non-PII** — `type`, `card_art` and
-`network_branding`, with no `last_four` and no `alias` — so the shipped default
-demonstrates the privacy posture of §1.3 rather than the schema's `required`
-list. The response example is the full object.
+`credential_response_display (JSON, optional)`. Both ship **empty, with a
+`placeholder`** — not pre-filled with a worked example.
+
+That is a correction to an earlier draft of this section, and the reason is
+worth recording because it is not a style preference. Pre-filling would break
+the console's default flow outright: the default `credential_type_id` is `pid`,
+so a pre-filled textarea means the out-of-the-box "Create Offer" click sends
+display metadata for a non-DPC credential type and is rejected by the §3.5 gate
+with a `400`. `claims (JSON)` can be pre-filled precisely because its default
+contents are valid *for the default credential type*; display metadata has no
+such value. The alternative — a JavaScript check on `credential_type_id` before
+sending — was rejected because it would duplicate the §3.5 gate on the client,
+and a client-side copy of a server-side rule is how the two drift apart.
+
+This also matches the established pattern for optional JSON inputs in this
+console: the `transaction_data` textarea added for the verification card is an
+empty `placeholder` textarea inside an `opt-disclosure`, not a pre-filled one.
+
+The worked EMVCo examples — a non-PII offer-stage object and a full
+response-stage object — go in `README.md` beside the `curl` example instead,
+which is where an operator assembling an API call will look.
 
 A blank textarea omits the field from the request body entirely; it does not
 send `null` or `[]`. Parse failures surface through the same `showError` path
@@ -376,7 +392,7 @@ output, alongside the existing positive control.
 | `docs/superpowers/specs/2026-08-05-emvco-dpc-credential-type-design.md` | §8 item 2 marked closed, pointing here |
 | `AGENTS.md` | §4.5 never-logged list |
 | `crates/foundry-issuer/AGENTS.md` | module map + gotcha for the deviation |
-| `README.md` | two places, both confirmed present: the `POST /admin/issuance/offers` `curl` example under "Creating an Offer via Admin API", and the "Issuance" bullet of the Admin Test Console section |
+| `README.md` | two places, both confirmed present: the `POST /admin/issuance/offers` `curl` example under "Creating an Offer via Admin API", and the "Issuance" bullet of the Admin Test Console section. Also gains the two worked EMVCo display objects, which §3.7 moves out of the console DOM and into the docs |
 
 `crates/foundry/src/openapi.rs` is deliberately **not** in that list.
 `CreateOfferRequest`, `CredentialOffer` and `CredentialResponse` are already
