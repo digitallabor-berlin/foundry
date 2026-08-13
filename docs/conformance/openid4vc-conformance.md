@@ -71,6 +71,20 @@ key binding requirements, and the profile's constraints on `vct` and doctype
 handling. That a status check happens and is honoured is in scope; whether the
 bitset is decoded correctly is not.
 
+**Deliberate non-spec members are recorded here, not in the Gap Register.**
+The Gap Register is for *unmet* mandatory requirements: its machinery requires
+each entry to be cited by a clause with verdict `gap` and covered by an
+`#[ignore]`d test, so that an open gap cannot appear to pass. An implemented,
+tested, deliberate **extension** is a different thing and would be misfiled
+there — writing a permanently-failing ignored test for working behaviour would
+corrupt the register's meaning.
+
+One such extension exists, added 2026-08-13:
+
+| Member | Structures | Justification and confinement |
+|---|---|---|
+| `display` | Credential Offer, Credential Response | Carries EMVCo DPC display metadata (`com.emvco.dpc.card.meta`) per EMV® DPC Schema Framework A.5's non-normative "Protocol Alignment" proposal. **OpenID4VCI 1.0 defines no `display` member on either structure.** The governing text is an *external reference*, not a standards-track specification, so this is accommodation and never conformance (root `AGENTS.md` §4.4; stub: [`docs/specs/emvco-dpc-schema-framework.md`](../specs/emvco-dpc-schema-framework.md)). Confined two ways: both members are `Option` with `skip_serializing_if`, so any credential type without display metadata serialises byte-identically to before the field existed; and `create_offer` rejects display metadata for any credential type whose `vct` is not `com.emvco.dpc.card`, so no PID or mDL offer can acquire it. Covered by `display_metadata_is_rejected_for_a_non_dpc_credential_type`, `an_offer_without_display_serialises_without_a_display_key`, and `display_metadata_flows_from_offer_creation_through_to_the_credential_response` — none `#[ignore]`d, because none records a gap. Design: [`2026-08-13-emvco-dpc-display-metadata-design.md`](../superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md). |
+
 **Presentation-binding clauses are attributed to the `verifier`.** A few clauses
 constrain the *content* of a presentation without naming the actor — the Key
 Binding JWT `nonce` and `aud` values (OpenID4VP, *IETF SD-JWT VC / Presentation

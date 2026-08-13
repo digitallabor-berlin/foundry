@@ -188,9 +188,12 @@ Logging is a request-path concern and is governed like one.
   pre-authorized codes, authorization codes, transaction codes, the raw
   compact JWE of an encrypted Credential Request, the decrypted Credential
   Request, the plaintext Credential Response when encryption was requested,
-  the wallet's `credential_response_encryption.jwk`, and the Android key
+  the wallet's `credential_response_encryption.jwk`, the Android key
   attestation `uniqueId` (a privacy-sensitive hardware device identifier that
-  survives factory reset). Public keys appear only as RFC 7638 thumbprints
+  survives factory reset), and the EMVCo DPC display-metadata objects
+  (`card.last_four`, the cardholder-recognisable `card.alias`, and card-art
+  URLs, which may be personalised) — `create_offer` records their *presence*
+  only, never their contents. Public keys appear only as RFC 7638 thumbprints
   (`foundry_core::obs::thumbprint`).
 - **Payload fields require BOTH `foundry_core::obs::sensitive_enabled()` AND a
   `debug`/`trace` level** — never one alone. A level is not authorisation;
