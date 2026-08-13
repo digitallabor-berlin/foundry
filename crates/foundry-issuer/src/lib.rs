@@ -3,6 +3,7 @@ pub mod authorize;
 pub mod challenge;
 pub mod create_offer;
 pub mod credential;
+pub mod display_metadata;
 pub mod dpop;
 pub mod error;
 pub mod keystore_proof;
@@ -23,6 +24,7 @@ pub use credential::{
     CredentialRequest, CredentialResponse, CredentialResponseEncryptionParams, IssuedCredential,
     check_encryption_policy, handle_credential_request,
 };
+pub use display_metadata::{DisplayStage, validate_display};
 pub use dpop::{
     DpopNoncePolicy, DpopPresentation, VerifiedDpopProof, access_token_hash, verify_dpop_proof,
 };
