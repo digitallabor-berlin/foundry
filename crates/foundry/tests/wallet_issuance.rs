@@ -1190,7 +1190,10 @@ async fn display_metadata_flows_from_offer_creation_through_to_the_credential_re
 
     // 4. The credential response carries the response-stage object.
     assert_eq!(cred_json["display"][0]["card"]["last_four"], "4444");
-    assert_eq!(cred_json["display"][0]["card"]["card_art"][0]["theme"], "DEFAULT");
+    assert_eq!(
+        cred_json["display"][0]["card"]["card_art"][0]["theme"],
+        "DEFAULT"
+    );
 
     // 5. And the credential itself was still issued.
     let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
