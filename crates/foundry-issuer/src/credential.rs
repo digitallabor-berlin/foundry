@@ -129,6 +129,14 @@ pub struct CredentialResponse {
     pub credentials: Vec<IssuedCredential>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_id: Option<String>,
+    /// EMVCo DPC display metadata, echoed from the `IssuanceTransaction`.
+    ///
+    /// **OpenID4VCI 1.0 defines no `display` member on a Credential Response.**
+    /// Same divergence, same justification and same confinement as
+    /// `CredentialOffer::display`; see that field's comment.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub display: Option<Vec<serde_json::Value>>,
 }
 
 /// `skip_all` is mandatory: the arguments include the bearer `access_token`, the
@@ -470,6 +478,11 @@ pub async fn handle_credential_request(
     Ok(CredentialResponse {
         credentials,
         notification_id: None,
+        // Echoed verbatim from the transaction, where create_offer pinned and
+        // already validated it. Not re-validated here: a defect in an operator's
+        // input belongs to the admin boundary that accepted it, not to the
+        // wallet's /credential call.
+        display: tx.credential_response_display.clone(),
     })
 }
 
@@ -649,6 +662,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -721,6 +735,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -813,6 +828,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, now)
             .await
@@ -936,6 +952,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt,
+            credential_response_display: None,
         }
     }
 
@@ -1391,6 +1408,23 @@ mod tests {
         credential_type_id: &str,
         claims: serde_json::Map<String, serde_json::Value>,
     ) -> String {
+        let res = issue_response_for_test(config, credential_type_id, claims, None).await;
+        assert_eq!(res.credentials.len(), 1);
+        res.credentials[0].credential.clone()
+    }
+
+    /// The full-response variant of [`issue_for_test_with_claims`], which
+    /// discards everything but the credential string.
+    ///
+    /// `credential_response_display` is seeded onto the transaction exactly as
+    /// `create_offer` would, so a test can assert what `/credential` does with
+    /// it without reaching for a second harness.
+    async fn issue_response_for_test(
+        config: &Config,
+        credential_type_id: &str,
+        claims: serde_json::Map<String, serde_json::Value>,
+        credential_response_display: Option<Vec<serde_json::Value>>,
+    ) -> CredentialResponse {
         let storage = test_storage().await;
 
         let tx = IssuanceTransaction {
@@ -1409,6 +1443,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -1425,7 +1460,7 @@ mod tests {
             credential_response_encryption: None,
         };
 
-        let res = handle_credential_request(
+        handle_credential_request(
             config,
             &storage,
             "at_secret_123",
@@ -1436,10 +1471,7 @@ mod tests {
             false,
         )
         .await
-        .unwrap();
-
-        assert_eq!(res.credentials.len(), 1);
-        res.credentials[0].credential.clone()
+        .unwrap()
     }
 
     /// The issuer JWT payload of an SD-JWT VC issuer presentation.
@@ -1602,6 +1634,95 @@ mod tests {
         assert!(
             !payload.contains_key("sub"),
             "sub must not be present (it is omitted by default)"
+        );
+    }
+
+    fn dpc_display() -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "locale": "en-US",
+            "card": {
+                "last_four": "4444",
+                "card_art": [
+                    { "theme": "DEFAULT", "image_url": "https://bank.example/card.png" }
+                ]
+            }
+        })]
+    }
+
+    fn dpc_test_claims() -> serde_json::Map<String, serde_json::Value> {
+        let mut claims = serde_json::Map::new();
+        claims.insert("credential_id".to_string(), serde_json::json!("cred-1"));
+        claims.insert("network".to_string(), serde_json::json!("example_network"));
+        claims
+    }
+
+    /// The response half of design §3.6: whatever was pinned on the transaction
+    /// at offer time appears on the Credential Response, unchanged.
+    ///
+    /// Validation is deliberately NOT repeated at `/credential`. The object was
+    /// validated at the admin boundary and has been inert in storage since;
+    /// re-validating would turn an operator's input defect into a wallet-facing
+    /// `/credential` failure.
+    #[tokio::test]
+    async fn the_credential_response_echoes_the_transactions_display_metadata() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let res = issue_response_for_test(
+            &config,
+            "com.emvco.dpc.card",
+            dpc_test_claims(),
+            Some(dpc_display()),
+        )
+        .await;
+
+        let display = res
+            .display
+            .as_ref()
+            .expect("the credential response must echo the transaction's display metadata");
+        assert_eq!(display[0]["card"]["last_four"], "4444");
+        assert_eq!(display[0]["card"]["card_art"][0]["theme"], "DEFAULT");
+        assert!(
+            res.credentials[0].credential.contains('~'),
+            "the credential itself must still be issued"
+        );
+    }
+
+    /// The no-regression counterpart: a transaction with no display metadata
+    /// produces a response with no `display` key at all.
+    #[tokio::test]
+    async fn a_credential_response_omits_display_when_the_transaction_has_none() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = dpc_config(&key_path);
+
+        let res =
+            issue_response_for_test(&config, "com.emvco.dpc.card", dpc_test_claims(), None).await;
+
+        assert!(res.display.is_none());
+        let value = serde_json::to_value(&res).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("display"),
+            "got: {value}"
+        );
+    }
+
+    /// The no-regression assertion for the Credential Response: with no display
+    /// metadata the key must be absent entirely, not present as `null`.
+    /// Asserted on the serialised keys for the same reason as the offer's
+    /// counterpart in `offer.rs`.
+    #[test]
+    fn a_credential_response_without_display_serialises_without_a_display_key() {
+        let response = CredentialResponse {
+            credentials: vec![IssuedCredential {
+                credential: "eyJ...".to_string(),
+            }],
+            notification_id: None,
+            display: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("display"),
+            "got: {value}"
         );
     }
 }

@@ -383,3 +383,63 @@ async fn console_has_transaction_data_input_for_verification() {
         "the create-verification handler should put the parsed entries on the payload"
     );
 }
+
+#[tokio::test]
+async fn console_has_display_metadata_inputs_for_dpc_issuance() {
+    // EMVCo DPC display metadata is accepted by POST /admin/issuance/offers but
+    // was unreachable from the console. Both textareas ship EMPTY with a
+    // placeholder, not pre-filled: the default credential_type_id is `pid`, and
+    // the server-side gate rejects display metadata for any type other than
+    // com.emvco.dpc.card -- a pre-filled textarea would make the console's
+    // default "Create Offer" click fail with a 400. See design §3.7.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"id="offer-display-json"#),
+        "console should have an offer_display textarea"
+    );
+    assert!(
+        html.contains(r#"id="credential-response-display-json"#),
+        "console should have a credential_response_display textarea"
+    );
+    assert!(
+        html.contains("DPC display metadata (optional)"),
+        "the textareas should sit behind a labelled disclosure"
+    );
+    assert!(
+        html.contains("opt-disclosure"),
+        "the disclosure should reuse the optional-input class, not the QR block's"
+    );
+    // `requestBody`, not `body`: the handler already binds `body` to the
+    // response, so the request object must not shadow it.
+    assert!(
+        html.contains("requestBody.offer_display"),
+        "the create-offer handler should put the parsed offer-stage array on the request body"
+    );
+    assert!(
+        html.contains("requestBody.credential_response_display"),
+        "the create-offer handler should put the parsed response-stage array on the request body"
+    );
+    assert!(
+        !html.contains(r#"<textarea id="offer-display-json">{"#),
+        "the offer_display textarea must ship empty: a pre-filled value would \
+         make the default pid flow fail the server-side DPC gate"
+    );
+}

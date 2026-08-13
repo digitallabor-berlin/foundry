@@ -131,6 +131,13 @@ documentation.
 
 ### 2.1 Why display metadata is excluded
 
+> **Superseded 2026-08-13.** The exclusion held for *this* branch; the work has
+> since been done. Each of the three objections below is answered in §2 of
+> [`2026-08-13-emvco-dpc-display-metadata-design.md`](2026-08-13-emvco-dpc-display-metadata-design.md).
+> The reasoning is kept rather than deleted because it records *why* display
+> metadata needed its own spec, plan and review cycle instead of being folded
+> in here.
+
 This is the largest piece of the specification and the most tempting to fold in,
 so the reasoning is recorded explicitly.
 
@@ -372,10 +379,12 @@ the workspace. All are compiler-enumerated; see the plan's File Structure
 section.
 
 **`foundry-sd-jwt-vc`**
+
 - `sub` is absent from the payload when `IssuerClaims.sub` is `None`.
 - `sub` is present and correct when `Some`, so the capability is not lost.
 
 **`foundry-core`**
+
 - `is_required()` resolution matrix: `required` absent / `Some(true)` /
   `Some(false)`, crossed with `selectively_disclosable` true / false.
 - `resolved_validity_seconds()` default and explicit value.
@@ -390,6 +399,7 @@ section.
   closed.
 
 **`foundry-issuer`**
+
 - **The defect's regression test:** an offer omitting a claim that is
   `required: true, selectively_disclosable: true` is rejected; one omitting a
   claim that is only `selectively_disclosable: true` is accepted.
@@ -402,6 +412,7 @@ section.
 - Issuer metadata advertises the DPC configuration with every configured locale.
 
 **`foundry`**
+
 - The generated quickstart config parses and the server boots with both types.
 - `e2e_full_flow` is unchanged and still passes — the regression guard for
   dropping `sub` from `pid`.
@@ -444,10 +455,16 @@ In the order they would block a full DPC deployment:
    **unverified** — it may match, may not, or may match only by accident.
    Deciding the intended semantics is a prerequisite to shipping a DPC verifier
    configuration.
-2. **Display metadata** (`com.emvco.dpc.card.meta`) — the `card` object on the
-   Credential Offer and Credential Response. See §2.1 for the full reasoning.
-   Needs per-instance display plumbing and an extension to two wire structures
-   that OpenID4VCI 1.0 does not define.
+2. ~~**Display metadata**~~ — **CLOSED 2026-08-13.** The `card` object
+   (`com.emvco.dpc.card.meta`) is now carried on both the Credential Offer and
+   the Credential Response, supplied per-offer through the admin API and
+   confined to the `com.emvco.dpc.card` `vct`. The per-instance plumbing this
+   item anticipated is `IssuanceTransaction.credential_response_display`; the
+   extension to two wire structures is recorded as a deliberate divergence in
+   the Audit Boundary of
+   [`docs/conformance/openid4vc-conformance.md`](../../conformance/openid4vc-conformance.md).
+   See
+   [`2026-08-13-emvco-dpc-display-metadata-design.md`](2026-08-13-emvco-dpc-display-metadata-design.md).
 3. **mdoc binding** — `docType` and namespace `com.emvco.dpc.card`, with
    `credential_id` / `network` / `card_id` as namespace data elements.
    `MdocClaims.namespaces` is already a `BTreeMap<String, ...>`, so the

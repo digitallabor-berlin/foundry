@@ -33,6 +33,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `nonce.rs` | `POST /nonce` logic: stateless MAC-authenticated `c_nonce` minting (`issue_nonce`) and verification (`verify_nonce`), plus `NonceResponse`. Delegates its MAC work to `challenge.rs`, which is also where `NonceSecret` now lives (re-exported here for source compatibility) |
 | `transaction.rs` | `IssuanceTransaction` model, `IssuanceState`, and `Storage`-backed load/save (namespace `issuance_tx`, TTL-based), including lookup by pre-auth code and by access token |
 | `credential.rs` | `POST /credential` logic: `check_encryption_policy` gate, access-token lookup, single-use state check, proof verification, then delegation to `build_sd_jwt_vc` / `build_mdoc`. Also defines `CredentialResponseEncryptionParams` (the wallet's `credential_response_encryption` request field) |
+| `display_metadata.rs` | Structural validation of EMVCo DPC display metadata (`com.emvco.dpc.card.meta`): `DisplayStage` (`Offer` \| `CredentialResponse`) and `validate_display`. Open-world — unknown members pass; `last_four`/`card_art` are required only at the response stage |
 | `proof.rs` | Holder proof-of-possession JWT verification (`typ`, embedded `jwk` or `kid`+`key_attestation`, `aud`, `nonce`) |
 | `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt` — including, since 2026-08-04, ABCA §9 rule 8's `challenge` claim (check 10), gated on `issuer.wallet_attestation.challenge_mode` and implemented via `challenge.rs`'s `Domain::AttestationChallenge` — and owns anti-replay claiming of the PoP's `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config`; `build_issuer_metadata` also takes the loaded request-decryption keys and populates `credential_request_encryption`/`credential_response_encryption` (both `Option`, omitted entirely when their config block is absent) |
@@ -134,6 +135,30 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 
 ## Gotchas
 
+- **`CredentialOffer.display` and `CredentialResponse.display` are not
+  OpenID4VCI members.** They carry EMVCo DPC display metadata per Schema
+  Framework A.5's non-normative transport proposal, and `create_offer` rejects
+  them for any credential type whose `vct` is not `DPC_VCT`
+  (`com.emvco.dpc.card`). Both are `Option` with `skip_serializing_if`, so every
+  other credential type's wire output is unchanged byte-for-byte — the
+  regression tests assert on the *serialised keys*, not a round-tripped
+  `Option`, because a `null` would pass the weaker check. Deviation recorded in
+  [`docs/specs/emvco-dpc-schema-framework.md`](../../docs/specs/emvco-dpc-schema-framework.md)
+  and in the Audit Boundary of
+  [`docs/conformance/openid4vc-conformance.md`](../../docs/conformance/openid4vc-conformance.md);
+  design in
+  [`docs/superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md`](../../docs/superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md).
+- **The offer-stage and response-stage display objects follow different rules.**
+  `last_four` and `card_art` are required on a Credential Response and optional
+  on a Credential Offer. Not an oversight: the governing annex's schema marks
+  both required while its own offer-stage guidance forbids `last_four` as PII.
+  Two request fields (`offer_display`, `credential_response_display`) exist so
+  the compliant split is expressible; foundry never derives one from the other,
+  because "personalised card art" is not machine-decidable.
+- **`/credential` does not re-validate the stored display object.** It was
+  validated at the admin boundary and has been inert in storage since;
+  re-validating would turn an operator's input defect into a wallet-facing
+  `/credential` failure instead of an admin-facing rejection.
 - **"Required" is not "not selectively disclosable".** `create_offer` gates
   claim-presence validation on `ClaimDef::is_required()`. A claim can be
   mandatory in a credential's own schema *and* selectively disclosable in the

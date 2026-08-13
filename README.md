@@ -203,6 +203,7 @@ cargo run -p foundry -- serve --config config.yaml
 #### Exposed Endpoints
 
 **Wallet-facing Server (`0.0.0.0:8443`):**
+
 - `GET /.well-known/openid-credential-issuer` — OpenID4VCI Credential Issuer Metadata
 - `GET /.well-known/oauth-authorization-server` — OAuth 2.0 Authorization Server Metadata
 - `POST /challenge` — ABCA §8 attestation challenge retrieval; registered only when `issuer.wallet_attestation.challenge_mode` is not `disabled` (see [ABCA Challenge Retrieval](#abca-challenge-retrieval-post-challenge))
@@ -210,6 +211,7 @@ cargo run -p foundry -- serve --config config.yaml
 - `GET /api-docs/openapi.json` — Raw OpenAPI 3.x spec (JSON) for the wallet-facing endpoints
 
 **Admin Server (`127.0.0.1:9000`):**
+
 - `GET /health` — Health check endpoint
 - `GET /ready` — Readiness check endpoint (verifies storage connectivity)
 - `GET /api-docs` — Interactive OpenAPI/Swagger UI (enabled by default; see [API Documentation](#api-documentation-openapi--swagger-ui) below)
@@ -222,12 +224,14 @@ cargo run -p foundry -- serve --config config.yaml
 Foundry auto-generates **two independent** OpenAPI 3.x specifications — one for the admin API, one for the wallet-facing OpenID4VCI/OpenID4VP protocol endpoints — each served from its own listener.
 
 **Admin API** (`127.0.0.1:9000` by default):
+
 - Swagger UI: `http://127.0.0.1:9000/api-docs`
 - Raw spec: `http://127.0.0.1:9000/api-docs/openapi.json`
 - Toggle: `server.admin.swagger_ui_enabled` (default `true`)
 - Startup file: `openapi.json`
 
 **Wallet-facing API** (`0.0.0.0:8443` by default):
+
 - Swagger UI: `http://localhost:8443/api-docs`
 - Raw spec: `http://localhost:8443/api-docs/openapi.json`
 - Toggle: `server.wallet_facing.swagger_ui_enabled` (default `true`)
@@ -253,6 +257,78 @@ curl -X POST http://127.0.0.1:9000/admin/issuance/offers \
   }'
 ```
 
+#### Example: A DPC Offer With Display Metadata
+
+For the EMVCo Digital Payment Credential type (`vct` `com.emvco.dpc.card`) the
+offer may additionally carry **display metadata** — presentation data such as
+card art, issuer branding and the last four PAN digits, which is *not* part of
+the signed credential.
+
+Two independent fields exist because the governing annex applies different rules
+at the two protocol stages: `card.last_four` and `card.card_art` are required on
+the Credential Response, but the same annex says PII-type data should not appear
+on a Credential Offer. `offer_display` therefore omits them; only
+`credential_response_display` carries them.
+
+Both fields are accepted **only** for a credential type whose `vct` is
+`com.emvco.dpc.card`; supplying either for any other type is rejected with
+`400 invalid_request`.
+
+```bash
+curl -X POST http://127.0.0.1:9000/admin/issuance/offers \
+  -H "Authorization: Bearer dev-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "credential_type_id": "com.emvco.dpc.card",
+    "claims": {
+      "credential_id": "urn:uuid:9f2b7a2e-3b74-4a0d-9b1a-0e6a91f5d2c8",
+      "network": "example_network"
+    },
+    "tx_code_required": false,
+    "offer_display": [
+      {
+        "locale": "en-US",
+        "card": {
+          "type": { "code": "CREDIT", "label": "Credit Card" },
+          "network_branding": [
+            {
+              "network": "example_network",
+              "branding": { "name": "Example Network" }
+            }
+          ]
+        }
+      }
+    ],
+    "credential_response_display": [
+      {
+        "locale": "en-US",
+        "card": {
+          "type": { "code": "CREDIT", "label": "Credit Card" },
+          "last_four": "4444",
+          "alias": "Platinum Credit Card",
+          "card_art": [
+            {
+              "theme": "DEFAULT",
+              "image_url": "https://bank.example/card.png"
+            }
+          ],
+          "issuer": {
+            "branding": { "name": "Example Bank" },
+            "country": "DE"
+          }
+        }
+      }
+    ]
+  }'
+```
+
+`offer_display` is echoed on the Credential Offer (and on the Digital
+Credentials API rendering of it); `credential_response_display` is persisted on
+the transaction and echoed on the Credential Response at `/credential`. Neither
+member is defined by OpenID4VCI 1.0 — see
+[`docs/specs/emvco-dpc-schema-framework.md`](docs/specs/emvco-dpc-schema-framework.md)
+for the deviation record.
+
 #### Admin Test Console
 
 `foundry` serves a self-contained HTML/JS test console at `GET /console` on
@@ -267,7 +343,11 @@ It lets you trigger the two admin flows from a browser instead of hand-rolling
   device, or use **Add to Wallet (Digital Credentials API)** to hand the offer
   to the platform's wallet picker (see below). The page polls the transaction
   and shows `offered` → `issued`, plus the transaction code when
-  `tx_code_required` is set.
+  `tx_code_required` is set. An optional collapsed **DPC display metadata**
+  disclosure holds two JSON textareas (`offer_display`,
+  `credential_response_display`); both are empty by default, since display
+  metadata is accepted only for the `com.emvco.dpc.card` credential type and
+  the field defaults to `pid`.
 - **Verification**: pick a named query (`named_query_ref`) or paste raw
   `dcql_query` JSON, optionally paste a `transaction_data` JSON array under
   "Transaction data (optional)", click "Create Verification Request" — get back
@@ -381,16 +461,19 @@ below for what it covers.
 Foundry provides built-in tools for generating EC private keys (PKCS#8 PEM) and issuing X.509 certificates.
 
 #### Generate an EC Private Key (ES256 / P-256)
+
 ```bash
 cargo run -p foundry -- keys generate --alg ES256 --out private_key.pem
 ```
 
 #### Create a Root CA
+
 ```bash
 cargo run -p foundry -- cert new-ca --cn "My Root CA" --out-cert ca.pem --out-key ca-key.pem --days 3650
 ```
 
 #### Issue a Leaf Certificate
+
 ```bash
 cargo run -p foundry -- cert issue \
   --ca ca.pem \

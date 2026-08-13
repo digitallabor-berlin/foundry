@@ -1031,3 +1031,171 @@ async fn two_dpop_headers_at_the_credential_endpoint_are_rejected() {
     // other malformed-header case at this endpoint.
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
+
+/// `setup_test_app()` plus the EMVCo DPC credential type.
+///
+/// Extends the config rather than editing `setup_test_app` itself: that harness
+/// backs every other test in this file, and the DPC type is needed by exactly
+/// one of them. The `DPC_VCT` gate keys on `vct`, so that field is what matters
+/// here.
+async fn setup_test_app_with_dpc() -> (AppState, tempfile::TempDir) {
+    let (base, dir) = setup_test_app().await;
+    let mut cfg = (*base.config).clone();
+    cfg.credential_types.push(CredentialType {
+        id: "com.emvco.dpc.card".to_string(),
+        format: "dc+sd-jwt".to_string(),
+        vct: Some("com.emvco.dpc.card".to_string()),
+        doctype: None,
+        scope: None,
+        cryptographic_holder_binding: true,
+        display: vec![],
+        claims: vec![
+            ClaimDef {
+                path: vec!["credential_id".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["network".to_string()],
+                required: Some(true),
+                selectively_disclosable: true,
+                display: vec![],
+            },
+        ],
+        validity_seconds: None,
+    });
+    (AppState::new(base.storage.clone(), Arc::new(cfg)), dir)
+}
+
+/// The property the whole branch exists for: display metadata supplied once at
+/// offer creation reaches the wallet twice -- on the offer for consent, and on
+/// the credential response for rendering -- with the offer-stage and
+/// response-stage objects kept distinct.
+#[tokio::test]
+async fn display_metadata_flows_from_offer_creation_through_to_the_credential_response() {
+    let (state, _dir) = setup_test_app_with_dpc().await;
+
+    // 1. Create a DPC offer carrying both display objects. The offer-stage
+    //    object is deliberately non-PII; the response-stage one carries
+    //    last_four and card_art, which the schema requires.
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_req_body = serde_json::json!({
+        "credential_type_id": "com.emvco.dpc.card",
+        "claims": { "credential_id": "cred-1", "network": "example_network" },
+        "tx_code_required": false,
+        "offer_display": [{
+            "locale": "en-US",
+            "card": { "type": { "code": "CREDIT", "label": "Credit Card" } }
+        }],
+        "credential_response_display": [{
+            "locale": "en-US",
+            "card": {
+                "last_four": "4444",
+                "alias": "Platinum Credit Card",
+                "card_art": [
+                    { "theme": "DEFAULT", "image_url": "https://bank.example/card.png" }
+                ]
+            }
+        }]
+    });
+
+    let offer_res = admin_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::from(offer_req_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+
+    // 2. The offer carries the offer-stage object and NOT the response-stage one.
+    assert_eq!(
+        offer_json["credential_offer"]["display"][0]["card"]["type"]["code"],
+        "CREDIT"
+    );
+    assert!(
+        offer_json["credential_offer"]["display"][0]["card"]
+            .get("last_four")
+            .is_none(),
+        "the offer must not carry the response-stage object: the annex's \
+         offer-stage guidance excludes PII-type members"
+    );
+
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .unwrap();
+
+    // 3. Redeem the pre-authorized code, mint a c_nonce, build a holder proof.
+    let token_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(
+                    header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(token_res.status(), StatusCode::OK);
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap();
+
+    let c_nonce = mint_c_nonce(&state).await;
+    let (proof_jwt, _keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+
+    let cred_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/credential")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "credential_configuration_id": "com.emvco.dpc.card",
+                        "format": "dc+sd-jwt",
+                        "proofs": { "jwt": [proof_jwt] },
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+
+    // 4. The credential response carries the response-stage object.
+    assert_eq!(cred_json["display"][0]["card"]["last_four"], "4444");
+    assert_eq!(
+        cred_json["display"][0]["card"]["card_art"][0]["theme"],
+        "DEFAULT"
+    );
+
+    // 5. And the credential itself was still issued.
+    let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
+    assert!(credential_str.contains('~'));
+}
