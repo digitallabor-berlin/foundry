@@ -250,6 +250,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         }
     }
 

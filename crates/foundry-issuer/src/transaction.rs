@@ -45,6 +45,17 @@ pub struct IssuanceTransaction {
     /// deserialize after a rolling restart.
     #[serde(default)]
     pub dpop_jkt: Option<String>,
+    /// The response-stage EMVCo DPC display metadata pinned at `create_offer`
+    /// time, echoed onto the Credential Response at `/credential`.
+    ///
+    /// Only the response-stage object is persisted: the offer-stage object is
+    /// consumed while building the `CredentialOffer` and never read again.
+    ///
+    /// `#[serde(default)]` is load-bearing for the same reason as `dpop_jkt`'s:
+    /// transactions are persisted as JSON in the KV store, so a row written
+    /// before this field existed must still deserialize after a rolling restart.
+    #[serde(default)]
+    pub credential_response_display: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -245,6 +256,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         }
     }
 
@@ -435,12 +447,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_transaction_round_trips_its_credential_response_display() {
+        let storage = test_storage().await;
+        let mut tx = sample_tx("tx-display");
+        tx.credential_response_display = Some(vec![serde_json::json!({
+            "locale": "en-US",
+            "card": { "last_four": "4444" }
+        })]);
+
+        save_transaction(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+        let loaded = load_transaction(&storage, "tx-display")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            loaded.credential_response_display,
+            tx.credential_response_display
+        );
+    }
+
     #[test]
     fn a_transaction_persisted_before_dpop_existed_still_deserializes() {
         // Transactions live as JSON in the KV store, so a row written by a
         // pre-DPoP binary must survive a rolling restart onto this one. This is
         // what #[serde(default)] on dpop_jkt buys, and it is the only test that
         // would catch its removal.
+        //
+        // The same literal now also covers credential_response_display, added
+        // later for EMVCo DPC display metadata: this row predates both fields,
+        // so one pre-upgrade row exercises every #[serde(default)] on the
+        // struct. Extend the assertions here rather than adding a second
+        // near-identical literal.
         let legacy = r#"{
             "transaction_id": "tx-legacy",
             "credential_type_id": "pid",
@@ -459,5 +500,6 @@ mod tests {
         }"#;
         let tx: IssuanceTransaction = serde_json::from_str(legacy).unwrap();
         assert_eq!(tx.dpop_jkt, None);
+        assert_eq!(tx.credential_response_display, None);
     }
 }

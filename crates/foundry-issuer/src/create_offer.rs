@@ -146,6 +146,7 @@ pub async fn create_offer(
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: None,
@@ -177,6 +178,7 @@ pub async fn create_offer(
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         let grants = CredentialOfferGrants {
             pre_authorized_code: Some(PreAuthorizedCodeGrant {
@@ -200,6 +202,7 @@ pub async fn create_offer(
             .to_string(),
         credential_configuration_ids: vec![ct.id.clone()],
         grants,
+        display: None,
     };
     let credential_offer_uri = build_offer_uri(&offer)?;
     let dc_api_offer = build_dc_api_offer(cfg, &offer, request_decryption_keys)?;

@@ -129,6 +129,14 @@ pub struct CredentialResponse {
     pub credentials: Vec<IssuedCredential>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notification_id: Option<String>,
+    /// EMVCo DPC display metadata, echoed from the `IssuanceTransaction`.
+    ///
+    /// **OpenID4VCI 1.0 defines no `display` member on a Credential Response.**
+    /// Same divergence, same justification and same confinement as
+    /// `CredentialOffer::display`; see that field's comment.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub display: Option<Vec<serde_json::Value>>,
 }
 
 /// `skip_all` is mandatory: the arguments include the bearer `access_token`, the
@@ -470,6 +478,7 @@ pub async fn handle_credential_request(
     Ok(CredentialResponse {
         credentials,
         notification_id: None,
+        display: None,
     })
 }
 
@@ -649,6 +658,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -721,6 +731,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -813,6 +824,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, now)
             .await
@@ -936,6 +948,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt,
+            credential_response_display: None,
         }
     }
 
@@ -1409,6 +1422,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             dpop_jkt: None,
+            credential_response_display: None,
         };
         save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
             .await
@@ -1602,6 +1616,26 @@ mod tests {
         assert!(
             !payload.contains_key("sub"),
             "sub must not be present (it is omitted by default)"
+        );
+    }
+
+    /// The no-regression assertion for the Credential Response: with no display
+    /// metadata the key must be absent entirely, not present as `null`.
+    /// Asserted on the serialised keys for the same reason as the offer's
+    /// counterpart in `offer.rs`.
+    #[test]
+    fn a_credential_response_without_display_serialises_without_a_display_key() {
+        let response = CredentialResponse {
+            credentials: vec![IssuedCredential {
+                credential: "eyJ...".to_string(),
+            }],
+            notification_id: None,
+            display: None,
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert!(
+            !value.as_object().unwrap().contains_key("display"),
+            "got: {value}"
         );
     }
 }

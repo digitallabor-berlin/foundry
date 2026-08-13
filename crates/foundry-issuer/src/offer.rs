@@ -29,6 +29,21 @@ pub struct CredentialOffer {
     pub credential_issuer: String,
     pub credential_configuration_ids: Vec<String>,
     pub grants: CredentialOfferGrants,
+    /// EMVCo DPC display metadata (`com.emvco.dpc.card.meta`), carried per the
+    /// Schema Framework A.5 "Protocol Alignment" proposal.
+    ///
+    /// **OpenID4VCI 1.0 defines no `display` member on a Credential Offer.**
+    /// This is a deliberate, documented divergence justified only by an
+    /// external-reference document (root AGENTS.md §4.4) and confined by
+    /// `create_offer` to the `com.emvco.dpc.card` credential type. See
+    /// `docs/specs/emvco-dpc-schema-framework.md` and
+    /// `docs/superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md`.
+    ///
+    /// `skip_serializing_if` is load-bearing: an offer without display metadata
+    /// must serialise to exactly the bytes it did before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub display: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -186,6 +201,7 @@ mod tests {
                 }),
                 authorization_code: None,
             },
+            display: None,
         }
     }
 
@@ -199,6 +215,7 @@ mod tests {
                     issuer_state: Some("issuer-state-abc".to_string()),
                 }),
             },
+            display: None,
         }
     }
 
@@ -266,5 +283,32 @@ mod tests {
         assert_eq!(json, r#"{"issuer_state":"abc"}"#);
         let round_tripped: AuthorizationCodeGrant = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.issuer_state, Some("abc".to_string()));
+    }
+
+    /// The no-regression assertion for every credential type that is not DPC.
+    ///
+    /// Asserted on the serialised object's KEYS, not on a round-tripped
+    /// `Option`: a `display: null` member would satisfy the weaker check while
+    /// still changing the bytes every existing wallet receives.
+    #[test]
+    fn an_offer_without_display_serialises_without_a_display_key() {
+        let offer = pre_auth_offer();
+        let value = serde_json::to_value(&offer).unwrap();
+        let object = value.as_object().unwrap();
+        assert!(
+            !object.contains_key("display"),
+            "an offer with no display metadata must not carry the key at all, got: {value}"
+        );
+    }
+
+    #[test]
+    fn an_offer_with_display_serialises_the_array_verbatim() {
+        let mut offer = pre_auth_offer();
+        offer.display = Some(vec![serde_json::json!({
+            "locale": "en-US",
+            "card": { "type": { "code": "CREDIT" } }
+        })]);
+        let value = serde_json::to_value(&offer).unwrap();
+        assert_eq!(value["display"][0]["card"]["type"]["code"], "CREDIT");
     }
 }
