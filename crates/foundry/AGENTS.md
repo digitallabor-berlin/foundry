@@ -26,7 +26,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Module Map
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `lib.rs` | Declares `admin_auth`, `cli`, `commands`, `http_log`, `log_capture`, `logging`, `openapi`, `server`; re-exports the OpenAPI surface |
 | `main.rs` | `#[tokio::main]`; parses `Cli`, **best-effort-loads the config to shape the subscriber**, calls `logging::init`, then **dispatches the `Command` match inline** (there is no `commands::execute`) |
 | `cli.rs` | Clap definitions: `Cli`, `LogFormat` (+ `From` into the core `LogFormat`), `Command::config_path`, and the sub-action enums `ConfigAction`, `KeysAction`, `CertAction`, `StatusListCommands` |
@@ -42,7 +42,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ### Route table — admin listener (`admin_router`, binds `server.admin.bind`)
 
 | Path | Method | Auth | Calls |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `/health` | GET | none | `health` — static OK |
 | `/ready` | GET | none | `ready` → `storage.purge_expired(0)`; 200 or 503 |
 | `/api-docs`, `/api-docs/openapi.json` | GET | none | Swagger UI if `admin.swagger_ui_enabled`, else `openapi_json_handler` (`AdminApiDoc`) |
@@ -55,7 +55,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ### Route table — wallet-facing listener (`wallet_router`, binds `server.wallet_facing.bind`)
 
 | Path | Method | Calls |
-|---|---|---|
+| --- | --- | --- |
 | `/.well-known/openid-credential-issuer` | GET | `foundry_issuer::build_issuer_metadata` |
 | `/.well-known/oauth-authorization-server` | GET | `foundry_issuer::build_authorization_server_metadata` |
 | `/token` | POST | `foundry_issuer::handle_token_request` |
@@ -249,6 +249,15 @@ cargo test -p foundry --test e2e_full_flow
   NOT be more than one `DPoP-Nonce` header" and ABCA §6.2's
   mandatory-on-error / §8.1's permitted-on-success shape both depend on there
   being exactly one place that decides whether and how to attach them.
+- **`token_handler` builds the `EncryptedCodePolicy` for Google Wallet's
+  `encrypted_pre-authorized_code` extension** (vendor profile, root
+  `AGENTS.md` §4.4) from `AppState` and passes it, plus
+  `issuer.access_token_ttl_secs`, into `handle_token_request`. It reuses
+  `state.request_decryption_keys` and `issuer.request_encryption`'s
+  `enc_values_supported` verbatim — the profile specifies those very keys, so
+  there is deliberately no second key configuration to drift from them — and
+  its `token_endpoint` is the same configuration-derived `htu` the DPoP proof
+  is bound to, never the `Host` header. No route changed.
 - **`assets/console.html` embeds a vendored QR library with a provenance
   comment.** Do not delete that comment, and do not reintroduce a CDN
   dependency (it exists for air-gapped deployment) or dynamic `innerHTML` (prior
