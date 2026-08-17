@@ -3,6 +3,7 @@
 
 use crate::attestation::{DefaultAttestationVerifier, WalletAttestationVerifier, claim_pop_jti};
 use crate::dpop::{DpopPresentation, claim_dpop_jti, verify_dpop_proof};
+use crate::encrypted_pre_auth::resolve_encrypted_pre_authorized_code;
 use crate::error::IssuanceError;
 use crate::transaction::{
     IssuanceState, IssuanceTransaction, invalidate_authorization_code,
@@ -11,7 +12,8 @@ use crate::transaction::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use foundry_core::config::{AttestationMode, DpopConfig, Mode};
+use foundry_core::config::{AttestationMode, DpopConfig, EncryptedPreAuthCodeConfig, Mode};
+use foundry_core::crypto::jwe::DecryptionKey;
 use foundry_core::storage::Storage;
 use foundry_core::trust::TrustStore;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,33 @@ pub struct TokenRequest {
     pub redirect_uri: Option<String>,
     pub client_id: Option<String>,
     pub code_verifier: Option<String>,
+    /// Google Wallet's `encrypted_pre-authorized_code` extension: the
+    /// pre-authorized code as a JWS nested inside a JWE, replacing the
+    /// plaintext `pre-authorized_code` above.
+    ///
+    /// **Vendor profile only** (root `AGENTS.md` §4.4); see
+    /// [`crate::encrypted_pre_auth`]. The serde rename is the canonical
+    /// spelling from the profile's prose — its worked example says
+    /// `encrypted_pre-authorization_code`, which is not accepted.
+    #[serde(rename = "encrypted_pre-authorized_code", default)]
+    pub encrypted_pre_authorized_code: Option<String>,
+}
+
+/// Everything [`handle_token_request`] needs to resolve an
+/// `encrypted_pre-authorized_code`. Grouped rather than passed as four loose
+/// parameters, following `DpopPresentation`/`DpopNoncePolicy`.
+pub struct EncryptedCodePolicy<'a> {
+    pub cfg: &'a EncryptedPreAuthCodeConfig,
+    /// The issuer's `credential_request_encryption` private keys — the profile
+    /// reuses them verbatim ("the same key used to encrypt the request to the
+    /// Credential Endpoint"). Empty when the mechanism is unconfigured, which
+    /// `Config::validate()` already forbids alongside a non-disabled mode.
+    pub decryption_keys: &'a [DecryptionKey],
+    pub allowed_enc: &'a [String],
+    /// The absolute Token Endpoint URL the inner JWS's `aud` must equal.
+    /// Deliberately not the AS issuer identifier — see
+    /// `encrypted_pre_auth::validate_claims`.
+    pub token_endpoint: &'a str,
 }
 
 /// Token Response (OpenID4VCI 1.0 Section 6.2).
@@ -65,6 +94,8 @@ pub async fn handle_token_request(
     nonce_secret: &crate::challenge::NonceSecret,
     issuer_identifier: &str,
     now_unix: i64,
+    encrypted_code: &EncryptedCodePolicy<'_>,
+    access_token_ttl_secs: u64,
 ) -> Result<TokenResponse, IssuanceError> {
     tracing::info!(
         wallet_attestation_mode = ?wallet_attestation.mode,
@@ -90,10 +121,10 @@ pub async fn handle_token_request(
             tracing::warn!(error.kind = e.kind(), "wallet attestation rejected");
         })?;
 
-    if let Some(claims) = pop_claims {
+    if let Some(claims) = pop_claims.as_ref() {
         // Anti-replay claim happens before any grant work: a replayed PoP
         // must never get the chance to burn a legitimate holder's code.
-        claim_pop_jti(storage, &claims, wallet_attestation.pop_max_age_secs)
+        claim_pop_jti(storage, claims, wallet_attestation.pop_max_age_secs)
             .await
             .inspect_err(|e| {
                 tracing::warn!(error.kind = e.kind(), "client attestation pop jti rejected");
@@ -163,10 +194,20 @@ pub async fn handle_token_request(
 
     match req.grant_type.as_str() {
         "urn:ietf:params:oauth:grant-type:pre-authorized_code" => {
-            handle_pre_authorized_code_grant(storage, req, dpop_jkt, now_unix).await
+            handle_pre_authorized_code_grant(
+                storage,
+                req,
+                dpop_jkt,
+                encrypted_code,
+                pop_claims.as_ref(),
+                access_token_ttl_secs,
+                now_unix,
+            )
+            .await
         }
         "authorization_code" => {
-            handle_authorization_code_grant(storage, req, dpop_jkt, now_unix).await
+            handle_authorization_code_grant(storage, req, dpop_jkt, access_token_ttl_secs, now_unix)
+                .await
         }
         _ => Err(IssuanceError::InvalidGrant(
             "unsupported_grant_type".to_string(),
@@ -174,16 +215,108 @@ pub async fn handle_token_request(
     }
 }
 
+/// Resolve the pre-authorized code from whichever form the configured mode
+/// permits.
+///
+/// **Vendor profile only** (root `AGENTS.md` §4.4): the encrypted form is
+/// defined solely by the Google Wallet VCI 1.0 Profile, §"token request field
+/// signing & encryption". Scoped to this grant deliberately — the profile
+/// defines the extension only for the pre-authorized code flow, so the
+/// authorization_code grant must not silently inherit half of it.
+///
+/// `skip_all` is mandatory: `req` carries both code forms.
+#[tracing::instrument(skip_all, fields(mode = ?encrypted_code.cfg.mode))]
+async fn resolve_code(
+    storage: &dyn Storage,
+    req: &TokenRequest,
+    encrypted_code: &EncryptedCodePolicy<'_>,
+    pop_claims: Option<&crate::attestation::PopClaims>,
+    now_unix: i64,
+) -> Result<String, IssuanceError> {
+    let plaintext = req.pre_authorized_code.as_deref();
+    let envelope = req.encrypted_pre_authorized_code.as_deref();
+
+    match (&encrypted_code.cfg.mode, plaintext, envelope) {
+        // Disabled: the member is REJECTED, never ignored. Silently falling
+        // back to the plaintext form would be exactly the downgrade the
+        // extension exists to prevent.
+        (Mode::Disabled, _, Some(_)) => Err(IssuanceError::InvalidRequest(
+            "encrypted_pre-authorized_code is not enabled at this Token Endpoint".into(),
+        )),
+        (Mode::Disabled, Some(code), None) => Ok(code.to_string()),
+        (Mode::Disabled, None, None) => Err(IssuanceError::InvalidGrant(
+            "missing pre-authorized_code".to_string(),
+        )),
+
+        // Optional: exactly one. Both present is a client bug, and picking a
+        // winner would hide it.
+        (Mode::Optional, Some(_), Some(_)) => Err(IssuanceError::InvalidRequest(
+            "exactly one of pre-authorized_code and encrypted_pre-authorized_code may be \
+             present"
+                .into(),
+        )),
+        (Mode::Optional, Some(code), None) => Ok(code.to_string()),
+        (Mode::Optional, None, None) => Err(IssuanceError::InvalidGrant(
+            "missing pre-authorized_code".to_string(),
+        )),
+
+        // Required: the anti-downgrade rule, structurally identical to RFC 9449
+        // §7.2's rejection of a DPoP-bound token presented as Bearer. Without
+        // it `required` would be advisory.
+        (Mode::Required, Some(_), None) => Err(IssuanceError::InvalidRequest(
+            "this Token Endpoint requires encrypted_pre-authorized_code; a plaintext \
+             pre-authorized_code is not accepted"
+                .into(),
+        )),
+        (Mode::Required, None, None) => Err(IssuanceError::InvalidRequest(
+            "encrypted_pre-authorized_code is required at this Token Endpoint".into(),
+        )),
+
+        (Mode::Optional | Mode::Required, _, Some(env)) => {
+            // The profile's step 5 needs the Client Attestation's cnf.jwk. With
+            // no verified attestation there is none, so the request cannot be
+            // authenticated -- `Config::validate()` forbids the *configuration*
+            // that makes this universal, leaving only the per-request case of a
+            // wallet that sent no attestation under `wallet_attestation.mode:
+            // optional`.
+            let claims = pop_claims.ok_or_else(|| {
+                IssuanceError::InvalidClient(
+                    "encrypted_pre-authorized_code requires a verified wallet attestation: \
+                     its inner JWS is signed by the attestation's cnf.jwk"
+                        .into(),
+                )
+            })?;
+
+            resolve_encrypted_pre_authorized_code(
+                storage,
+                env,
+                encrypted_code.decryption_keys,
+                encrypted_code.allowed_enc,
+                &claims.cnf_jwk,
+                &claims.iss,
+                encrypted_code.token_endpoint,
+                now_unix,
+                encrypted_code.cfg.max_age_secs,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_pre_authorized_code_grant(
     storage: &dyn Storage,
     req: &TokenRequest,
     dpop_jkt: Option<String>,
+    encrypted_code: &EncryptedCodePolicy<'_>,
+    pop_claims: Option<&crate::attestation::PopClaims>,
+    access_token_ttl_secs: u64,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
-    let code = req
-        .pre_authorized_code
-        .as_deref()
-        .ok_or_else(|| IssuanceError::InvalidGrant("missing pre-authorized_code".to_string()))?;
+    // Runs before `load_transaction_by_pre_auth_code`, so a rejected envelope
+    // can never reach the transaction lookup -- the same anti-code-burning
+    // ordering `claim_pop_jti` and the DPoP check already establish above.
+    let code = &resolve_code(storage, req, encrypted_code, pop_claims, now_unix).await?;
 
     let tx = load_transaction_by_pre_auth_code(storage, code)
         .await?
@@ -230,7 +363,7 @@ async fn handle_pre_authorized_code_grant(
     let mut tx = tx;
     tx.pre_authorized_code = None;
 
-    mint_and_save_tokens(storage, tx, dpop_jkt, now_unix).await
+    mint_and_save_tokens(storage, tx, dpop_jkt, access_token_ttl_secs, now_unix).await
 }
 
 /// RFC 7636 §4.6: `code_challenge == BASE64URL-ENCODE(SHA256(ASCII(code_verifier)))`.
@@ -245,6 +378,7 @@ async fn handle_authorization_code_grant(
     storage: &dyn Storage,
     req: &TokenRequest,
     dpop_jkt: Option<String>,
+    access_token_ttl_secs: u64,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
     let code = req
@@ -303,7 +437,7 @@ async fn handle_authorization_code_grant(
     let mut tx = tx;
     tx.authorization_code = None;
 
-    mint_and_save_tokens(storage, tx, dpop_jkt, now_unix).await
+    mint_and_save_tokens(storage, tx, dpop_jkt, access_token_ttl_secs, now_unix).await
 }
 
 /// Shared by both grant branches: mint a fresh access_token, persist it on
@@ -319,10 +453,14 @@ async fn mint_and_save_tokens(
     storage: &dyn Storage,
     mut tx: IssuanceTransaction,
     dpop_jkt: Option<String>,
+    access_token_ttl_secs: u64,
     now_unix: i64,
 ) -> Result<TokenResponse, IssuanceError> {
     let access_token = format!("at_{}", Uuid::new_v4().simple());
-    let expires_in = 600u64;
+    // One value drives both the wire `expires_in` and the transaction row's
+    // TTL: the row must outlive the token that addresses it, and equal
+    // lifetimes is the tightest correct choice.
+    let expires_in = access_token_ttl_secs;
 
     tx.access_token = Some(access_token.clone());
     // §6: the binding the Credential Endpoint will check. Overwrites any §10
@@ -378,6 +516,328 @@ mod tests {
     }
 
     const TOKEN_HTU: &str = "https://issuer.example.com/token";
+
+    /// The extension switched off -- what every pre-existing test in this
+    /// module exercises, and what a default deployment does.
+    static DISABLED_EPAC: std::sync::LazyLock<EncryptedPreAuthCodeConfig> =
+        std::sync::LazyLock::new(EncryptedPreAuthCodeConfig::default);
+
+    fn no_encrypted_code() -> EncryptedCodePolicy<'static> {
+        EncryptedCodePolicy {
+            cfg: &DISABLED_EPAC,
+            decryption_keys: &[],
+            allowed_enc: &[],
+            token_endpoint: TOKEN_HTU,
+        }
+    }
+
+    fn encrypted_policy_cfg(mode: Mode) -> EncryptedPreAuthCodeConfig {
+        EncryptedPreAuthCodeConfig {
+            mode,
+            max_age_secs: 300,
+        }
+    }
+
+    /// Drives `handle_token_request` with wallet attestation and DPoP both
+    /// disabled, so the tests below isolate the encrypted-code mode matrix.
+    async fn call_token_with_ttl(
+        storage: &dyn Storage,
+        req: &TokenRequest,
+        encrypted_cfg: &EncryptedPreAuthCodeConfig,
+        keys: &[DecryptionKey],
+        now: i64,
+        ttl: u64,
+    ) -> Result<TokenResponse, IssuanceError> {
+        let enc_values = vec!["A128GCM".to_string()];
+        let policy = EncryptedCodePolicy {
+            cfg: encrypted_cfg,
+            decryption_keys: keys,
+            allowed_enc: &enc_values,
+            token_endpoint: TOKEN_HTU,
+        };
+        handle_token_request(
+            storage,
+            req,
+            &disabled(),
+            None,
+            None,
+            &dpop_cfg(Mode::Disabled),
+            &no_dpop(),
+            &test_nonce_secret(),
+            ISSUER_ID,
+            now,
+            &policy,
+            ttl,
+        )
+        .await
+    }
+
+    async fn call_token(
+        storage: &dyn Storage,
+        req: &TokenRequest,
+        encrypted_cfg: &EncryptedPreAuthCodeConfig,
+        keys: &[DecryptionKey],
+        now: i64,
+    ) -> Result<TokenResponse, IssuanceError> {
+        call_token_with_ttl(storage, req, encrypted_cfg, keys, now, 600).await
+    }
+
+    /// `disabled` REJECTS the member rather than ignoring it. Silently falling
+    /// back to the plaintext parameter would be the downgrade the extension
+    /// exists to prevent.
+    #[tokio::test]
+    async fn disabled_mode_rejects_a_present_encrypted_member() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-disabled");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let mut req = pre_auth_req();
+        req.encrypted_pre_authorized_code = Some("eyJ.irrelevant.value".to_string());
+
+        let err = call_token(
+            &storage,
+            &req,
+            &encrypted_policy_cfg(Mode::Disabled),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect_err("a disabled feature must reject the member, not ignore it");
+        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+    }
+
+    /// An attacker probing with a bogus envelope must not be able to burn a
+    /// legitimate holder's code. The same property already tested for tx_code
+    /// and code_verifier -- this is its third instance.
+    #[tokio::test]
+    async fn a_rejected_envelope_does_not_burn_the_pre_authorized_code() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-noburn");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let mut req = pre_auth_req();
+        req.pre_authorized_code = None;
+        req.encrypted_pre_authorized_code = Some("not.a.real.envelope".to_string());
+
+        let _ = call_token(
+            &storage,
+            &req,
+            &encrypted_policy_cfg(Mode::Required),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect_err("a malformed envelope must be rejected");
+
+        assert!(
+            load_transaction_by_pre_auth_code(&storage, "code-123")
+                .await
+                .unwrap()
+                .is_some(),
+            "a rejected envelope must leave the pre-authorized code redeemable"
+        );
+    }
+
+    /// `required` rejects the plaintext parameter -- the anti-downgrade rule.
+    #[tokio::test]
+    async fn required_mode_rejects_a_plaintext_pre_authorized_code() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-required");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let err = call_token(
+            &storage,
+            &pre_auth_req(),
+            &encrypted_policy_cfg(Mode::Required),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect_err("required mode must not accept a plaintext code");
+        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn required_mode_rejects_a_request_with_neither_form() {
+        let storage = test_storage().await;
+        let mut req = pre_auth_req();
+        req.pre_authorized_code = None;
+
+        let err = call_token(
+            &storage,
+            &req,
+            &encrypted_policy_cfg(Mode::Required),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect_err("required mode with nothing present must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+    }
+
+    /// `optional` keeps the plaintext path working -- the migration rung.
+    #[tokio::test]
+    async fn optional_mode_still_accepts_a_plaintext_pre_authorized_code() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-optional");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let res = call_token(
+            &storage,
+            &pre_auth_req(),
+            &encrypted_policy_cfg(Mode::Optional),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect("optional mode must keep the plaintext path working");
+        assert!(!res.access_token.is_empty());
+    }
+
+    /// BOTH present is a rejection, not a precedence decision. Two codes in one
+    /// request is a client bug; picking a winner hides it.
+    #[tokio::test]
+    async fn optional_mode_rejects_a_request_carrying_both_forms() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-both");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let mut req = pre_auth_req();
+        req.encrypted_pre_authorized_code = Some("eyJ.some.envelope".to_string());
+
+        let err = call_token(
+            &storage,
+            &req,
+            &encrypted_policy_cfg(Mode::Optional),
+            &[],
+            1_700_000_000,
+        )
+        .await
+        .expect_err("exactly one of the two forms must be present");
+        assert!(matches!(err, IssuanceError::InvalidRequest(_)));
+    }
+
+    /// The remaining cheap cells of the mode matrix. Each is a configuration a
+    /// real deployment can be in, so each gets its own assertion even where
+    /// several share an expected outcome.
+    #[tokio::test]
+    async fn the_remaining_mode_matrix_cells_reject() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-epac-matrix");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        // disabled + envelope only (no plaintext to fall back to)
+        let mut req = pre_auth_req();
+        req.pre_authorized_code = None;
+        req.encrypted_pre_authorized_code = Some("eyJ.env.value".to_string());
+        assert!(matches!(
+            call_token(
+                &storage,
+                &req,
+                &encrypted_policy_cfg(Mode::Disabled),
+                &[],
+                1_700_000_000
+            )
+            .await
+            .expect_err("disabled must reject the member even with no plaintext present"),
+            IssuanceError::InvalidRequest(_)
+        ));
+
+        // disabled + neither -- the pre-existing "missing code" behaviour,
+        // which the extension must not have changed.
+        let mut req = pre_auth_req();
+        req.pre_authorized_code = None;
+        assert!(matches!(
+            call_token(
+                &storage,
+                &req,
+                &encrypted_policy_cfg(Mode::Disabled),
+                &[],
+                1_700_000_000
+            )
+            .await
+            .expect_err("a request with no code at all is still invalid_grant"),
+            IssuanceError::InvalidGrant(_)
+        ));
+
+        // optional + neither -- same, under the migration rung.
+        let mut req = pre_auth_req();
+        req.pre_authorized_code = None;
+        assert!(matches!(
+            call_token(
+                &storage,
+                &req,
+                &encrypted_policy_cfg(Mode::Optional),
+                &[],
+                1_700_000_000
+            )
+            .await
+            .expect_err("optional with neither form is still invalid_grant"),
+            IssuanceError::InvalidGrant(_)
+        ));
+
+        // required + both -- the envelope is attempted (the plaintext is
+        // ignored under required), so this fails on the envelope, not on
+        // arity. Asserted only as "rejected": the precise variant is the
+        // envelope resolver's business, covered by its own tests.
+        let mut req = pre_auth_req();
+        req.encrypted_pre_authorized_code = Some("not.an.envelope".to_string());
+        assert!(
+            call_token(
+                &storage,
+                &req,
+                &encrypted_policy_cfg(Mode::Required),
+                &[],
+                1_700_000_000
+            )
+            .await
+            .is_err(),
+            "required with both forms must not succeed on the plaintext"
+        );
+
+        // The transaction survived every one of those rejections.
+        assert!(
+            load_transaction_by_pre_auth_code(&storage, "code-123")
+                .await
+                .unwrap()
+                .is_some(),
+            "no rejected request may burn the pre-authorized code"
+        );
+    }
+
+    #[tokio::test]
+    async fn expires_in_reflects_the_configured_access_token_ttl() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-ttl");
+        save_transaction_with_indices(&storage, &tx, 600, 1_700_000_000)
+            .await
+            .unwrap();
+
+        let res = call_token_with_ttl(
+            &storage,
+            &pre_auth_req(),
+            &encrypted_policy_cfg(Mode::Disabled),
+            &[],
+            1_700_000_000,
+            86_400,
+        )
+        .await
+        .expect("a configured ttl must be honoured");
+
+        assert_eq!(res.expires_in, 86_400);
+    }
 
     fn no_dpop<'a>() -> DpopPresentation<'a> {
         DpopPresentation {
@@ -474,6 +934,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         let res = handle_token_request(
@@ -487,6 +948,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -517,6 +980,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         let err = handle_token_request(
@@ -530,6 +994,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -557,6 +1023,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         handle_token_request(
             &storage,
@@ -569,6 +1036,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -581,6 +1050,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         let res = handle_token_request(
             &storage,
@@ -593,6 +1063,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("the legitimate holder must still be able to redeem the code afterwards");
@@ -622,6 +1094,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         handle_token_request(
@@ -635,6 +1108,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("first redemption must succeed");
@@ -650,6 +1125,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -674,6 +1151,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         let err = handle_token_request(
@@ -687,6 +1165,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -726,6 +1206,7 @@ mod tests {
             redirect_uri: Some(REDIRECT_URI.to_string()),
             client_id: Some("wallet-dev".to_string()),
             code_verifier: Some(CODE_VERIFIER.to_string()),
+            encrypted_pre_authorized_code: None,
         }
     }
 
@@ -749,6 +1230,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -775,6 +1258,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -803,6 +1288,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -822,6 +1309,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -849,6 +1338,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -873,6 +1364,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -900,6 +1393,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -923,6 +1418,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         let res = handle_token_request(
@@ -936,6 +1432,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -954,6 +1452,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         }
     }
 
@@ -977,6 +1476,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1011,6 +1512,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1043,6 +1546,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1071,6 +1576,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1106,6 +1613,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1131,6 +1640,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1162,6 +1673,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect_err("a malformed proof must be rejected");
@@ -1179,6 +1692,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("the pre-authorized code must survive a rejected proof");
@@ -1211,6 +1726,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1228,6 +1745,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect_err("the same proof must not be usable twice");
@@ -1257,6 +1776,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap();
@@ -1287,6 +1808,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1315,6 +1838,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1346,6 +1871,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_010,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect_err("wrong key must be rejected");
@@ -1361,6 +1888,8 @@ mod tests {
             &test_nonce_secret(),
             "https://issuer.example.com",
             1_700_000_020,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("the authorization code must survive a rejected proof");
@@ -1518,6 +2047,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         let res = handle_token_request(
@@ -1531,6 +2061,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("attestation + a valid, matching pop must issue a token");
@@ -1563,6 +2095,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         handle_token_request(
             &storage,
@@ -1575,6 +2108,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("the first use of the pop must succeed");
@@ -1596,6 +2131,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1642,6 +2179,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         let err = handle_token_request(
             &storage,
@@ -1654,6 +2192,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1676,6 +2216,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("the pre-authorized_code must still be redeemable after a pop-replay rejection");
@@ -1704,6 +2246,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         req.client_id = Some(WALLET_SUB.to_string());
 
@@ -1718,6 +2261,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("a client_id matching the attestation's sub and the pop's iss must be accepted");
@@ -1745,6 +2290,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
         req.client_id = Some("https://someone-else.example.com".to_string());
 
@@ -1759,6 +2305,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .unwrap_err();
@@ -1787,6 +2335,7 @@ mod tests {
             redirect_uri: None,
             client_id: None,
             code_verifier: None,
+            encrypted_pre_authorized_code: None,
         };
 
         handle_token_request(
@@ -1800,6 +2349,8 @@ mod tests {
             &test_nonce_secret(),
             ISSUER_ID,
             now,
+            &no_encrypted_code(),
+            600,
         )
         .await
         .expect("an absent client_id must be accepted -- the sect-6.3 check is conditional");

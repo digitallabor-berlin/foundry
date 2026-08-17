@@ -43,6 +43,22 @@ fn disabled_attestation() -> AttestationMode {
     }
 }
 
+/// Google Wallet's `encrypted_pre-authorized_code` extension switched off --
+/// the default, and what every test in this conformance file exercises. The
+/// extension is a vendor accommodation, not a conformance requirement, so it
+/// has no place in this file's evidence.
+static DISABLED_EPAC: std::sync::LazyLock<foundry_core::config::EncryptedPreAuthCodeConfig> =
+    std::sync::LazyLock::new(foundry_core::config::EncryptedPreAuthCodeConfig::default);
+
+fn no_encrypted_code() -> foundry_issuer::EncryptedCodePolicy<'static> {
+    foundry_issuer::EncryptedCodePolicy {
+        cfg: &DISABLED_EPAC,
+        decryption_keys: &[],
+        allowed_enc: &[],
+        token_endpoint: "https://issuer.example.com/token",
+    }
+}
+
 /// `DpopConfig` in `Optional` mode -- preserves this file's pre-DPoP behaviour
 /// exactly for the many call sites here that are not about DPoP at all.
 fn dpop_optional() -> DpopConfig {
@@ -374,6 +390,7 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     handle_token_request(
@@ -387,6 +404,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .expect("first redemption must succeed");
@@ -402,6 +421,8 @@ async fn vci_0012_pre_authorized_code_grant_rejects_replay_after_token_issuance(
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_020,
+        &no_encrypted_code(),
+        600,
     )
     .await;
     assert!(
@@ -512,6 +533,7 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         redirect_uri: Some(redirect_uri.to_string()),
         client_id: Some("wallet-dev".to_string()),
         code_verifier: Some(code_verifier.to_string()),
+        encrypted_pre_authorized_code: None,
     };
     handle_token_request(
         &storage,
@@ -524,6 +546,8 @@ async fn haip_0022_authorization_code_grant_type_is_supported_end_to_end() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .expect("authorization_code grant must issue an access token");
@@ -645,6 +669,7 @@ async fn setup_credential_flow(
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
     let token = handle_token_request(
         &storage,
@@ -657,6 +682,8 @@ async fn setup_credential_flow(
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .unwrap();
@@ -977,6 +1004,7 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
     let token = handle_token_request(
         &storage,
@@ -989,6 +1017,8 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .unwrap();
@@ -1112,6 +1142,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     let (proof, jkt) = dpop_proof_for_token_endpoint("haip-0009", 1_700_000_010);
@@ -1126,6 +1157,8 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .unwrap();
@@ -1153,6 +1186,7 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
     let bearer = handle_token_request(
         &storage,
@@ -1165,6 +1199,8 @@ async fn haip_0009_token_response_uses_dpop_token_type() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .unwrap();
@@ -1209,6 +1245,7 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     // Not a JWT at all — no dots, no header, no signature. A conformant
@@ -1231,6 +1268,8 @@ async fn haip_0031_wallet_attestation_header_must_be_a_validly_signed_jwt() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await;
 
@@ -1255,6 +1294,7 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     let result = handle_token_request(
@@ -1268,6 +1308,8 @@ async fn vci_0033_pre_authorized_code_is_required_for_that_grant() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_000,
+        &no_encrypted_code(),
+        600,
     )
     .await;
 
@@ -1311,6 +1353,7 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     let result = handle_token_request(
@@ -1324,6 +1367,8 @@ async fn vci_0034_tx_code_is_required_when_the_offer_carried_one() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await;
 
@@ -1398,6 +1443,7 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         redirect_uri: Some(redirect_uri.to_string()),
         client_id: Some("wallet-dev".to_string()),
         code_verifier: Some(code_verifier.to_string()),
+        encrypted_pre_authorized_code: None,
     };
     handle_token_request(
         &storage,
@@ -1410,6 +1456,8 @@ async fn vci_0035_tx_code_is_ignored_by_the_authorization_code_grant() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         1_700_000_010,
+        &no_encrypted_code(),
+        600,
     )
     .await
     .expect("a stray tx_code must not affect the authorization_code grant");
@@ -1592,6 +1640,7 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
         redirect_uri: None,
         client_id: None,
         code_verifier: None,
+        encrypted_pre_authorized_code: None,
     };
 
     let now = now_secs();
@@ -1627,6 +1676,8 @@ async fn vci_0232_rejects_a_wallet_attestation_presented_without_a_pop_jwt() {
         &test_nonce_secret(),
         "https://issuer.example.com",
         now,
+        &no_encrypted_code(),
+        600,
     )
     .await;
 
