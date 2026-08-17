@@ -9,8 +9,8 @@ contents into a changelog or a run artifact — link to it instead.
 
 Its internal consistency is enforced mechanically by
 `crates/foundry/tests/conformance_report.rs`, which runs as part of
-`cargo test --workspace`. Edits that break the cross-references below will fail
-that test.
+`cargo nextest run --workspace`. Edits that break the cross-references below
+will fail that test.
 
 ## Specifications Under Audit
 

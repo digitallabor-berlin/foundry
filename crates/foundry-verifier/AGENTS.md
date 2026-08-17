@@ -25,7 +25,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Module Map
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface |
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
 | `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → transaction_data_binding → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
@@ -115,12 +115,13 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   [AGENTS.md](../../AGENTS.md) §4.1.
 - **`VerificationResult` and friends are `utoipa::ToSchema`** — changing them
   changes `openapi-wallet.json` — root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates are scoped by default:** per task, run `cargo test -p foundry-verifier
-  -p foundry` (the integration suite lives in `crates/foundry/tests`), plus
-  `cargo clippy -p foundry-verifier --all-targets -- -D warnings` and
-  `cargo fmt --check`. Save `cargo test --workspace` for the end of a
-  development cycle or when unsure of the blast radius — **not** between tasks.
-  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
+- **One gate, always the whole workspace:** `cargo fmt`, then
+  `cargo nextest run --workspace --no-fail-fast --status-level fail`, then
+  `cargo clippy --workspace --all-targets -- -D warnings`. There is no scoped
+  tier — the suite runs in seconds, so running less than all of it only reduces
+  coverage. It also means this crate's flow coverage in `crates/foundry/tests`
+  is never something you have to remember to include. **Do not use
+  `cargo test`.** Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 
@@ -132,8 +133,9 @@ most relevant: `wallet_verification.rs`, `e2e_full_flow.rs`,
 `wallet_status_list_route.rs`.
 
 ```bash
-cargo test -p foundry-verifier
-cargo test -p foundry --test wallet_verification
+cargo nextest run --workspace --no-fail-fast --status-level fail  # the gate (§5.1)
+cargo nextest run -p foundry-verifier                             # unit loop, while iterating
+cargo nextest run -p foundry --test wallet_verification           # verification flow only
 ```
 
 ## Gotchas

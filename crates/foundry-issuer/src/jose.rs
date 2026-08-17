@@ -61,10 +61,10 @@
 //! the next inline-key call site inherits the fix instead of the bug. Each of
 //! the four callers carries its own regression test.
 
-use josekit::jwk::Jwk;
-use josekit::jws::alg::ecdsa::EcdsaJwsVerifier;
-use josekit::jws::ES256;
 use josekit::JoseError;
+use josekit::jwk::Jwk;
+use josekit::jws::ES256;
+use josekit::jws::alg::ecdsa::EcdsaJwsVerifier;
 
 /// Build an ES256 verifier for a public key that arrived **inline** with the
 /// message it verifies, ignoring any `kid` the JWK carries.
@@ -81,8 +81,8 @@ pub(crate) fn es256_verifier_from_inline_jwk(jwk: &Jwk) -> Result<EcdsaJwsVerifi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jws::{JwsHeader, JwsVerifier};
     use josekit::jwt::{self, JwtPayload};

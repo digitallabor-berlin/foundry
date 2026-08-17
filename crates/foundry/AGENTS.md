@@ -115,11 +115,12 @@ No admin route is mounted on the wallet router, and vice versa.
   `authenticated` group's `route_layer` without intending auth.
 - **Every endpoint change must be reflected in the OpenAPI specs** via `utoipa`
   annotations in `openapi.rs` — full rule: root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates are scoped by default:** per task, run `cargo test -p foundry`, plus
-  `cargo clippy -p foundry --all-targets -- -D warnings` and
-  `cargo fmt --check`. Save `cargo test --workspace` for the end of a
-  development cycle or when unsure of the blast radius — **not** between tasks.
-  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
+- **One gate, always the whole workspace:** `cargo fmt`, then
+  `cargo nextest run --workspace --no-fail-fast --status-level fail`, then
+  `cargo clippy --workspace --all-targets -- -D warnings`. There is no scoped
+  tier — the suite runs in seconds, so running less than all of it only reduces
+  coverage. **Do not use `cargo test`.** Full rule: root
+  [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 
@@ -129,8 +130,11 @@ is covered by the integration suite under `tests/` — see
 [`tests/AGENTS.md`](tests/AGENTS.md) for the per-file coverage map.
 
 ```bash
-cargo test -p foundry
-cargo test -p foundry --test e2e_full_flow
+cargo nextest run --workspace --no-fail-fast --status-level fail  # the gate (§5.1)
+cargo nextest run -p foundry                                      # narrow, while iterating
+
+# e2e_full_flow is #[ignore]d; nextest needs to be asked for it explicitly (§5.2)
+cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ```
 
 ## Gotchas

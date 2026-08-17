@@ -19,7 +19,7 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 ## Module Map
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `lib.rs` | Public re-exports: `builder`, `verifier`, `error` modules and `FormatError`. |
 | `builder.rs` | Issuer-side: `IssuerClaims` struct, `build_sd_jwt_vc()` (JWT + salts + _sd digests), `build_kb_jwt()` (holder key-binding), `attach_kb_jwt()` (combine). |
 | `verifier.rs` | Verification, in this exact order: split the `~`-separated presentation; parse the issuer JWS header/payload; check the **validity window** (`exp` in the past or `iat` in the future → `Expired`); validate the `x5c` chain via `foundry_core::trust::validate_chain`; verify the issuer JWS against the leaf cert's EC coords; extract holder `cnf.jwk`; **verify the KB-JWT** (before parsing individual disclosures, so `sd_hash` tampering surfaces as `KeyBinding` rather than a confusing parse error); then reconstruct disclosed claims by matching disclosure digests against `_sd`. Returns `VerificationResult`. |
@@ -53,17 +53,22 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 ## Tests
 
 **Inline** (`src/builder.rs`, `src/verifier.rs` `#[cfg(test)]` modules):
+
 - Builder: salt randomness, SD-JWT structure (h.p.s.~d~...~d~).
 - Verifier: valid parse, KB-JWT rejection on nonce/audience/sd_hash mismatch, issuer cert trust validation.
 
 **Integration** (`tests/sdjwt_tests.rs`):
+
 - Selective claim reconstruction.
 - Expiry rejection.
 - Untrusted root rejection.
 - KB audience mismatch.
 - Disclosure tampering (detected via sd_hash).
 
-**Run**: `cargo test -p foundry-sd-jwt-vc`
+**Run**: `cargo nextest run -p foundry-sd-jwt-vc` while iterating. The gate is
+always the whole workspace — `cargo nextest run --workspace --no-fail-fast
+--status-level fail` — per root [AGENTS.md](../../AGENTS.md) §5. Do not use
+`cargo test`.
 
 ---
 

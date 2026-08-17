@@ -19,7 +19,7 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 ## Module Map
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `lib.rs` | Public re-exports: `builder`, `verifier`, `types`, `error` modules and `FormatError`. |
 | `builder.rs` | Issuer-side: `MdocClaims` struct (doc_type, namespaces map, device_key_jwk, timestamps), `build_mdoc()` (creates IssuerSignedItems with CBOR encoding, salts, SHA-256 digests; wraps in MSO; signs as COSE_Sign1; embeds in outer CBOR). |
 | `verifier.rs` | Holder verification (verification engine receives this crate's output). Parse outer CBOR; extract IssuerAuth COSE_Sign1 and x5c; validate issuer cert chain; verify IssuerAuth signature; parse MSO and check validity window; **digest verification** (SHA-256 of each IssuerSignedItem must match MSO value_digests by namespace); extract device key; **device binding** (verify DeviceAuth COSE_Sign1 over SessionTranscript). Returns `MdocVerificationResult`. |
@@ -55,15 +55,20 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 ## Tests
 
 **Inline** (`src/builder.rs`, `src/verifier.rs` `#[cfg(test)]` modules):
+
 - Builder: CBOR structure, MSO/IssuerAuth encoding.
 - Verifier: valid mdoc parse, signature validation, digest matching, device binding mock.
 
 **Integration** (`tests/mdoc_tests.rs`):
+
 - Valid presentation.
 - Expiry rejection (MSO validity window).
 - Untrusted issuer root rejection.
 
-**Run**: `cargo test -p foundry-mdoc`
+**Run**: `cargo nextest run -p foundry-mdoc` while iterating. The gate is always
+the whole workspace — `cargo nextest run --workspace --no-fail-fast
+--status-level fail` — per root [AGENTS.md](../../AGENTS.md) §5. Do not use
+`cargo test`.
 
 ---
 

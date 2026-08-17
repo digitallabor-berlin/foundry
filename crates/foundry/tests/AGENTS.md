@@ -10,17 +10,25 @@ this directory is where you look.
 
 ## Running
 
+The runner is `cargo nextest run`, never `cargo test` (root AGENTS.md §5).
+
 ```bash
-cargo test -p foundry                                  # whole suite
-cargo test -p foundry --test wallet_issuance           # one file
-cargo test -p foundry --test wallet_issuance full_issuance_flow_end_to_end
-cargo test --workspace                                 # full gate — end of cycle only (root AGENTS.md §5)
+# The gate. Run this — always the whole workspace, it takes seconds.
+cargo nextest run --workspace --no-fail-fast --status-level fail
+
+# Narrowing, while iterating only. Note filters are positional: no `--`.
+cargo nextest run -p foundry                           # this crate's suite
+cargo nextest run -p foundry --test wallet_issuance    # one file
+cargo nextest run -p foundry --test wallet_issuance full_issuance_flow_end_to_end
+
+# e2e_full_flow is #[ignore]d, so nextest skips it unless asked (root AGENTS.md §5.2)
+cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ```
 
 ## Coverage Map
 
 | File | Covers | Exercises |
-|---|---|---|
+| --- | --- | --- |
 | `health.rs` | `/health` and `/ready` both return 200 | `server::health`, `server::ready` |
 | `console.rs` | `/console` returns HTML when enabled, 404 when disabled; QR SVG has explicit dimensions; the DC API trigger buttons and issuance status badge are present, and `.badge.offered` / `.badge.issued` are styled | `server::console_handler`, `admin.console_enabled` |
 | `issuer_offers.rs` | `POST /admin/issuance/offers` succeeds with a valid Bearer token, rejected without one; the response carries a `dc_api_offer` with inlined metadata; `GET /admin/issuance/offers/:id` reports `offered`, returns the `tx_code`, 404s on an unknown id, and **never** returns `pre_authorized_code` / `access_token` / `claims` | `server::create_offer_handler`, `server::get_issuance_offer_handler`, `require_api_key`, `foundry_issuer::create_offer` |

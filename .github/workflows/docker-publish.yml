@@ -43,11 +43,16 @@ jobs:
       # rust-toolchain.toml pins 1.97.1; the rustup shims already on
       # ubuntu-latest resolve it transparently for every cargo/rustc
       # invocation below. This step forces (and verifies) that resolution
-      # up front rather than relying on it lazily inside `cargo test`.
+      # up front rather than relying on it lazily inside the test run.
       - name: Resolve pinned toolchain
         run: rustup show
 
       - uses: Swatinem/rust-cache@v2
+
+      # foundry's test runner is cargo-nextest, not `cargo test` (root
+      # AGENTS.md §5). install-action fetches a prebuilt binary rather than
+      # compiling it from source, which would dwarf the test run itself.
+      - uses: taiki-e/install-action@nextest
 
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -55,8 +60,8 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: cargo test
-        run: cargo test --workspace
+      - name: cargo nextest run
+        run: cargo nextest run --workspace --no-fail-fast
 
   build-and-push:
     name: Build & push image
