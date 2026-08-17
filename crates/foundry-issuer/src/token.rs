@@ -1625,6 +1625,12 @@ mod tests {
             iss: WALLET_SUB.to_string(),
             jti: "jti-preburn-1".to_string(),
             iat: now,
+            // `claim_pop_jti` keys on (iss, jti) only and never reads this.
+            cnf_jwk: josekit::jwk::alg::ec::EcKeyPair::generate(
+                josekit::jwk::alg::ec::EcCurve::P256,
+            )
+            .unwrap()
+            .to_jwk_public_key(),
         };
         claim_pop_jti(&storage, &claims, 300).await.unwrap();
 

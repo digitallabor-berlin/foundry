@@ -252,6 +252,16 @@ pub struct PopClaims {
     pub iss: String,
     pub jti: String,
     pub iat: i64,
+    /// The Client Attestation JWT's `cnf.jwk` — the key this PoP's signature
+    /// was verified against (ABCA draft -07 §5.2 rule 3, GAP-VCI-14).
+    ///
+    /// Carried out to the caller because the Google Wallet profile's
+    /// `encrypted_pre-authorized_code` inner JWS is signed by this same key
+    /// ("The JWS must be signed by the cnf.jwk found in the
+    /// OAuth-Client-Attestation JWT used for wallet attestation"), and there is
+    /// no other route to it. Exposing it asserts nothing new — the signature
+    /// check above already proved this key authenticates this client.
+    pub cnf_jwk: Jwk,
 }
 
 /// ABCA draft -07 §12.1: "clock skews between servers and clients may be
@@ -516,6 +526,7 @@ fn validate_client_attestation_pop_jwt(
         iss: iss.to_string(),
         jti: jti.to_string(),
         iat,
+        cnf_jwk: attestation.cnf_jwk.clone(),
     })
 }
 
@@ -1310,6 +1321,15 @@ mod tests {
     /// `cnf.jwk` -- the "present, present" happy path the mode matrix
     /// accepts. Returns `(attestation_jwt, pop_jwt, ca_cert_pem)`.
     fn matched_attestation_and_pop(now: i64, aud: &str) -> (String, String, String) {
+        let (attestation_jwt, pop_jwt, ca_pem, _cnf_jwk) =
+            matched_attestation_and_pop_with_jwk(now, aud);
+        (attestation_jwt, pop_jwt, ca_pem)
+    }
+
+    /// As [`matched_attestation_and_pop`], additionally returning the
+    /// attestation's `cnf.jwk` so a caller can assert the verifier carried
+    /// exactly that key out rather than a re-derived or empty one.
+    fn matched_attestation_and_pop_with_jwk(now: i64, aud: &str) -> (String, String, String, Jwk) {
         let (cnf_jwk, signer) = fresh_cnf_keypair();
         let cnf_jwk_value = serde_json::to_value(&cnf_jwk).unwrap();
         let (attestation_jwt, ca_pem) = wallet_attestation_jwt_custom(
@@ -1329,7 +1349,40 @@ mod tests {
             now,
         );
         let pop_jwt = sign_pop(&hdr, &payload, &signer);
-        (attestation_jwt, pop_jwt, ca_pem)
+        (attestation_jwt, pop_jwt, ca_pem, cnf_jwk)
+    }
+
+    /// The key that verified the PoP must reach the caller: the Google Wallet
+    /// profile's `encrypted_pre-authorized_code` inner JWS is signed by this
+    /// same key, and there is no other route to it.
+    #[test]
+    fn verified_pop_claims_carry_the_attestation_cnf_jwk() {
+        let now = now_secs();
+        let (attestation_jwt, pop_jwt, ca_pem, expected_cnf_jwk) =
+            matched_attestation_and_pop_with_jwk(now, MATRIX_AUD);
+        let store = TrustStore::from_pems(&[ca_pem.into_bytes()]).unwrap();
+
+        let claims = DefaultAttestationVerifier
+            .verify_wallet_attestation(
+                Mode::Required,
+                Some(&attestation_jwt),
+                Some(&pop_jwt),
+                &store,
+                MATRIX_AUD,
+                now,
+                300,
+                Mode::Disabled,
+                &test_secret(),
+            )
+            .expect("a matched attestation and pop must verify")
+            .expect("Required mode with both headers present must yield claims");
+
+        assert_eq!(claims.cnf_jwk.key_type(), "EC");
+        assert_eq!(
+            claims.cnf_jwk.parameter("x"),
+            expected_cnf_jwk.parameter("x"),
+            "cnf_jwk must be the attestation's key, not a re-derived or empty one"
+        );
     }
 
     #[test]
@@ -2793,6 +2846,11 @@ mod tests {
             iss: iss.to_string(),
             jti: jti.to_string(),
             iat,
+            // `claim_pop_jti` keys on (iss, jti) only and never reads this, so
+            // any well-formed P-256 public JWK serves.
+            cnf_jwk: EcKeyPair::generate(EcCurve::P256)
+                .unwrap()
+                .to_jwk_public_key(),
         }
     }
 
