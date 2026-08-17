@@ -24,7 +24,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Module Map
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
 | `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
 | `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`) |

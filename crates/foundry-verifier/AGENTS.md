@@ -25,7 +25,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Module Map
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface |
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
 | `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → transaction_data_binding → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |

@@ -23,7 +23,7 @@ see **[`README.md`](README.md)** — this file does not restate it.
 > gotchas you need to land in the right file on the first try.
 
 | Crate | Purpose | Read first |
-|---|---|---|
+| --- | --- | --- |
 | `crates/foundry-core` | Config, storage traits (SQLite), crypto signers, PKI, trust stores, Token Status List bitsets | [`crates/foundry-core/AGENTS.md`](crates/foundry-core/AGENTS.md) |
 | `crates/foundry-sd-jwt-vc` | SD-JWT VC builder + verifier (disclosures, KB-JWT) | [`crates/foundry-sd-jwt-vc/AGENTS.md`](crates/foundry-sd-jwt-vc/AGENTS.md) |
 | `crates/foundry-mdoc` | mdoc (`mso_mdoc`) CBOR builder + IssuerAuth/DeviceAuth verifier | [`crates/foundry-mdoc/AGENTS.md`](crates/foundry-mdoc/AGENTS.md) |
@@ -102,7 +102,7 @@ error codes, metadata fields, signing/encryption algorithms, and state
 transitions — MUST align with them.
 
 | Spec file | Governs |
-|---|---|
+| --- | --- |
 | [`openid-4-verifiable-credential-issuance-1_0.md`](docs/specs/openid-4-verifiable-credential-issuance-1_0.md) | OpenID4VCI — `foundry-issuer` and the issuer HTTP routes (offers, pre-auth codes, `/token`, `/nonce`, `/credential`, holder proofs, issuer metadata) |
 | [`openid-4-verifiable-presentations-1_0.md`](docs/specs/openid-4-verifiable-presentations-1_0.md) | OpenID4VP — `foundry-verifier` and the verifier HTTP routes (authorization/request objects, `vp_token`, response modes, JARM/JWE, DCQL, client ID schemes) |
 | [`openid4vc-high-assurance-interoperability-profile-1_0.md`](docs/specs/openid4vc-high-assurance-interoperability-profile-1_0.md) | HAIP — the profile that narrows both of the above (mandated SD-JWT VC / mdoc formats, required algorithms, key binding, trust mechanisms). Where HAIP is stricter, **HAIP wins.** |
@@ -322,7 +322,7 @@ When executing plans using subagents (e.g. via
 `superpowers:subagent-driven-development`), map roles to specialized agent types:
 
 | SDD Role | Agent `subagent_type` | Typical Scope / Model Tier |
-|---|---|---|
+| --- | --- | --- |
 | Implementer — transcription / 1–2 files | `mechanical-implementer` | Fast / cheap |
 | Implementer — multi-file / integration | `integration-implementer` | Standard |
 | Per-task reviewer (spec + quality gate) | `task-reviewer` | Standard |

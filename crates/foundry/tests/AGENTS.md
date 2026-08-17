@@ -28,7 +28,7 @@ cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ## Coverage Map
 
 | File | Covers | Exercises |
-|---|---|---|
+| --- | --- | --- |
 | `health.rs` | `/health` and `/ready` both return 200 | `server::health`, `server::ready` |
 | `console.rs` | `/console` returns HTML when enabled, 404 when disabled; QR SVG has explicit dimensions; the DC API trigger buttons and issuance status badge are present, and `.badge.offered` / `.badge.issued` are styled | `server::console_handler`, `admin.console_enabled` |
 | `issuer_offers.rs` | `POST /admin/issuance/offers` succeeds with a valid Bearer token, rejected without one; the response carries a `dc_api_offer` with inlined metadata; `GET /admin/issuance/offers/:id` reports `offered`, returns the `tx_code`, 404s on an unknown id, and **never** returns `pre_authorized_code` / `access_token` / `claims` | `server::create_offer_handler`, `server::get_issuance_offer_handler`, `require_api_key`, `foundry_issuer::create_offer` |
