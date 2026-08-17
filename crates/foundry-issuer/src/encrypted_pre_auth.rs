@@ -24,8 +24,35 @@ use crate::error::IssuanceError;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::crypto::jwe::{DecryptionKey, decrypt_compact_to_bytes};
+use foundry_core::storage::Storage;
 use josekit::jwk::Jwk;
 use josekit::jws::ES256;
+use sha2::{Digest, Sha256};
+
+/// The clock-skew tolerance for the inner JWS's `iat`. The same value and the
+/// same reasoning as `attestation.rs`'s `POP_CLOCK_SKEW_SECS` (ABCA §12.1:
+/// "clock skews between servers and clients may be large"). Never used to
+/// widen how far into the *past* an `iat` may be — that is `max_age_secs`.
+const ENVELOPE_CLOCK_SKEW_SECS: i64 = 60;
+
+/// KV storage namespace for `encrypted_pre-authorized_code` `jti` replay
+/// claims.
+///
+/// Deliberately **not** shared with `attestation.rs`'s
+/// `client_attestation_pop_jti`: a shared namespace would let a PoP `jti` and
+/// an envelope `jti` of the same value collide, so one artifact could deny
+/// service to the other.
+pub(crate) const ENVELOPE_JTI_NAMESPACE: &str = "encrypted_pre_auth_code_jti";
+
+/// The claims recovered from a verified `encrypted_pre-authorized_code`
+/// envelope.
+#[derive(Debug, Clone)]
+pub struct EncryptedCodeClaims {
+    pub iss: String,
+    pub jti: String,
+    pub iat: i64,
+    pub pre_authorized_code: String,
+}
 
 /// Decrypt the outer JWE and verify the inner JWS, returning its payload.
 ///
@@ -128,6 +155,199 @@ pub fn open_envelope(
             "encrypted_pre-authorized_code: inner JWS claims are not JSON: {e}"
         ))
     })
+}
+
+/// Validate the inner JWS payload (checks 8-13 and 15).
+///
+/// `attestation_iss` is `PopClaims.iss` — the `sub` of the Client Attestation
+/// that authenticated this request, which `validate_client_attestation_pop_jwt`
+/// already proved equal to the PoP's `iss`.
+///
+/// `expected_aud` is the **Token Endpoint URL**, not the Authorization Server's
+/// issuer identifier. The profile's worked example is explicit
+/// (`"aud": "https://authorization-server.example.com/token" // Token endpoint`)
+/// and this deliberately differs from the Client Attestation PoP's `aud`, which
+/// ABCA §9 rule 10 binds to the issuer identifier.
+///
+/// `skip_all` is mandatory: `payload` carries the pre-authorized code.
+#[tracing::instrument(skip_all)]
+pub fn validate_claims(
+    payload: &serde_json::Value,
+    attestation_iss: &str,
+    expected_aud: &str,
+    now_unix: i64,
+    max_age_secs: u64,
+) -> Result<EncryptedCodeClaims, IssuanceError> {
+    let str_claim = |name: &str| -> Result<String, IssuanceError> {
+        payload
+            .get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                IssuanceError::InvalidClient(format!(
+                    "encrypted_pre-authorized_code: missing or empty {name} claim"
+                ))
+            })
+    };
+
+    // Check 8: iss == sub. Both are the client_id.
+    let iss = str_claim("iss")?;
+    let sub = str_claim("sub")?;
+    if iss != sub {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: iss and sub disagree; both must be the client_id"
+                .into(),
+        ));
+    }
+
+    // Check 9: the envelope must name the client the attestation authenticated.
+    // Without this, any wallet holding any valid client attestation could
+    // submit an envelope claiming to be a different client -- the check that
+    // makes the signature mean something. Profile, inline in its example:
+    // "The client ID, must match the 'sub' in the attestation".
+    if iss != attestation_iss {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: iss does not match the wallet attestation's sub".into(),
+        ));
+    }
+
+    // Check 10: aud is the Token Endpoint URL. Exact match, no normalization --
+    // a prefix or case-insensitive match would weaken the binding, the same
+    // posture `attestation.rs` takes for the PoP's aud.
+    let aud = payload.get("aud").ok_or_else(|| {
+        IssuanceError::InvalidClient("encrypted_pre-authorized_code: missing aud claim".into())
+    })?;
+    let aud_matches = match aud {
+        serde_json::Value::String(s) => s == expected_aud,
+        serde_json::Value::Array(arr) => arr.iter().any(|v| v.as_str() == Some(expected_aud)),
+        _ => false,
+    };
+    if !aud_matches {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: aud does not match this Token Endpoint".into(),
+        ));
+    }
+
+    // Check 11.
+    let jti = str_claim("jti")?;
+
+    // Check 12: iat within the issuer's own window. Saturating arithmetic and
+    // `try_from` for the same two reasons documented in `attestation.rs`:
+    // `iat` originates off the wire, and `max_age_secs as i64` would be a lossy
+    // cast of a u64 config value (`u64::MAX as i64 == -1`).
+    let iat = payload.get("iat").and_then(|v| v.as_i64()).ok_or_else(|| {
+        IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: missing or non-integer iat claim".into(),
+        )
+    })?;
+    let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+    if iat.saturating_add(max_age) < now_unix {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: iat is too far in the past".into(),
+        ));
+    }
+    if iat.saturating_sub(ENVELOPE_CLOCK_SKEW_SECS) > now_unix {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: iat is in the future beyond the tolerable skew".into(),
+        ));
+    }
+
+    // Check 13. `exp` bounds the client's own intent; check 12 bounds the
+    // issuer's. Both apply -- a client may set an arbitrarily distant `exp`.
+    let exp = payload.get("exp").and_then(|v| v.as_i64()).ok_or_else(|| {
+        IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: missing or non-integer exp claim".into(),
+        )
+    })?;
+    if now_unix > exp {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: has expired".into(),
+        ));
+    }
+
+    // Check 15.
+    let pre_authorized_code = str_claim("pre-authorized_code")?;
+
+    Ok(EncryptedCodeClaims {
+        iss,
+        jti,
+        iat,
+        pre_authorized_code,
+    })
+}
+
+/// Check 14: claim this envelope's `jti` exactly once (atomic).
+///
+/// Mirrors `attestation.rs`'s `claim_pop_jti` deliberately — same `(iss, jti)`
+/// keying so one client cannot pre-claim another's values, same hashed key so
+/// the raw `jti` never appears in storage, same `iat`-relative `expires_at` so
+/// the row expires with the artifact rather than with the request — but over
+/// its own namespace and its own claims type.
+///
+/// `skip_all` is mandatory: `claims` carries the pre-authorized code.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn claim_envelope_jti(
+    storage: &dyn Storage,
+    claims: &EncryptedCodeClaims,
+    max_age_secs: u64,
+) -> Result<(), IssuanceError> {
+    let mut hasher = Sha256::new();
+    hasher.update(claims.iss.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(claims.jti.as_bytes());
+    let key = B64URL.encode(hasher.finalize());
+
+    let max_age = i64::try_from(max_age_secs).unwrap_or(i64::MAX);
+    let expires_at = claims
+        .iat
+        .saturating_add(max_age)
+        .saturating_add(ENVELOPE_CLOCK_SKEW_SECS);
+
+    let claimed = storage
+        .insert_kv_if_absent(ENVELOPE_JTI_NAMESPACE, &key, "1", Some(expires_at))
+        .await?;
+    if !claimed {
+        return Err(IssuanceError::InvalidClient(
+            "encrypted_pre-authorized_code: jti has already been used".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The module's single entry point: envelope in, pre-authorized code out.
+///
+/// Runs the profile's steps 3-7 plus the claim validation its numbered
+/// algorithm omits, then claims the `jti`. The caller receives a plain
+/// `String` and never learns encryption was involved.
+///
+/// `skip_all` is mandatory and total.
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all)]
+pub async fn resolve_encrypted_pre_authorized_code(
+    storage: &dyn Storage,
+    envelope: &str,
+    decryption_keys: &[DecryptionKey],
+    allowed_enc: &[String],
+    cnf_jwk: &Jwk,
+    attestation_iss: &str,
+    token_endpoint: &str,
+    now_unix: i64,
+    max_age_secs: u64,
+) -> Result<String, IssuanceError> {
+    let payload = open_envelope(envelope, decryption_keys, allowed_enc, cnf_jwk)?;
+    let claims = validate_claims(
+        &payload,
+        attestation_iss,
+        token_endpoint,
+        now_unix,
+        max_age_secs,
+    )?;
+    claim_envelope_jti(storage, &claims, max_age_secs).await?;
+
+    // No field carries a secret: this records only that the step succeeded.
+    tracing::info!("encrypted_pre-authorized_code accepted");
+    Ok(claims.pre_authorized_code)
 }
 
 #[cfg(test)]
@@ -335,5 +555,219 @@ mod tests {
         )
         .expect_err("a signature from an unattested key must be rejected");
         assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    // ---- claim validation (checks 8-13, 15) ----
+
+    const NOW: i64 = 1_700_000_000;
+    const AUD: &str = "https://issuer.example.com/token";
+
+    async fn test_storage() -> foundry_core::storage::SqliteStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("t.db");
+        // Keep the tempdir alive for the storage's lifetime -- dropping it
+        // would delete the SQLite file out from under the pool.
+        std::mem::forget(dir);
+        foundry_core::storage::SqliteStorage::connect(db.to_str().unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// Positive control for the claims half.
+    #[test]
+    fn valid_claims_yield_the_pre_authorized_code() {
+        let claims = validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW, 300)
+            .expect("a well-formed claim set must validate");
+
+        assert_eq!(claims.pre_authorized_code, "code-123");
+        assert_eq!(claims.iss, "GoogleWallet");
+        assert_eq!(claims.jti, "envelope-jti-1");
+        assert_eq!(claims.iat, NOW);
+    }
+
+    /// Check 8: iss must equal sub.
+    #[test]
+    fn rejects_claims_whose_iss_and_sub_disagree() {
+        let mut c = sample_claims();
+        c["sub"] = serde_json::json!("SomeoneElse");
+        let err = validate_claims(&c, "GoogleWallet", AUD, NOW, 300).unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 9 -- THE IMPERSONATION TEST. A perfectly signed envelope whose
+    /// `iss` names a different client than the attestation that authenticated
+    /// this request must be rejected. Without this check, any wallet holding
+    /// any valid client attestation could redeem another client's code.
+    #[test]
+    fn rejects_claims_naming_a_different_client_than_the_attestation() {
+        let err = validate_claims(&sample_claims(), "SomeOtherWallet", AUD, NOW, 300)
+            .expect_err("the envelope's iss must match the attestation's sub");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 10: aud is the TOKEN ENDPOINT URL, deliberately not the issuer
+    /// identifier the Client Attestation PoP uses (ABCA §9 rule 10). Two
+    /// artifacts, two audiences; conflating them breaks the profile as written.
+    #[test]
+    fn rejects_claims_addressed_to_another_audience() {
+        let err = validate_claims(
+            &sample_claims(),
+            "GoogleWallet",
+            "https://issuer.example.com",
+            NOW,
+            300,
+        )
+        .expect_err("the issuer identifier is not the token endpoint URL");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 11.
+    #[test]
+    fn rejects_claims_without_a_jti() {
+        let mut c = sample_claims();
+        c.as_object_mut().unwrap().remove("jti");
+        let err = validate_claims(&c, "GoogleWallet", AUD, NOW, 300).unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 12: iat outside the issuer's own sliding window. `exp` alone is
+    /// not enough -- a client can set an arbitrarily distant one -- so the
+    /// issuer keeps its own bound, exactly as `pop_max_age_secs` does.
+    #[test]
+    fn rejects_claims_whose_iat_is_older_than_max_age() {
+        let err = validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW + 301, 300)
+            .expect_err("an iat beyond max_age_secs must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    #[test]
+    fn accepts_claims_whose_iat_is_slightly_in_the_future_within_skew() {
+        validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW - 30, 300)
+            .expect("clock skew of 30s must be tolerated");
+    }
+
+    #[test]
+    fn rejects_claims_whose_iat_is_far_in_the_future() {
+        let err = validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW - 600, 300)
+            .expect_err("an iat far beyond the skew allowance must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 13. `exp` is 1_700_000_300, so a large max_age isolates the
+    /// rejection to `exp` rather than to check 12.
+    #[test]
+    fn rejects_expired_claims() {
+        validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW + 299, 3600)
+            .expect("one second before exp must still be accepted");
+
+        let err = validate_claims(&sample_claims(), "GoogleWallet", AUD, NOW + 301, 3600)
+            .expect_err("a claim set past its exp must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Check 15.
+    #[test]
+    fn rejects_claims_without_a_pre_authorized_code() {
+        let mut c = sample_claims();
+        c.as_object_mut().unwrap().remove("pre-authorized_code");
+        let err = validate_claims(&c, "GoogleWallet", AUD, NOW, 300).unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    #[test]
+    fn rejects_claims_whose_pre_authorized_code_is_empty() {
+        let mut c = sample_claims();
+        c["pre-authorized_code"] = serde_json::json!("");
+        let err = validate_claims(&c, "GoogleWallet", AUD, NOW, 300).unwrap_err();
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    // ---- check 14: replay ----
+
+    fn envelope_claims(iss: &str, jti: &str) -> EncryptedCodeClaims {
+        EncryptedCodeClaims {
+            iss: iss.to_string(),
+            jti: jti.to_string(),
+            iat: NOW,
+            pre_authorized_code: "code-123".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_first_claim_of_an_envelope_jti_succeeds() {
+        let storage = test_storage().await;
+        claim_envelope_jti(&storage, &envelope_claims("GoogleWallet", "jti-1"), 300)
+            .await
+            .expect("the first use of a jti must succeed");
+    }
+
+    #[tokio::test]
+    async fn a_replayed_envelope_jti_is_rejected() {
+        let storage = test_storage().await;
+        let claims = envelope_claims("GoogleWallet", "jti-1");
+        claim_envelope_jti(&storage, &claims, 300).await.unwrap();
+
+        let err = claim_envelope_jti(&storage, &claims, 300)
+            .await
+            .expect_err("a replayed envelope must be rejected");
+        assert!(matches!(err, IssuanceError::InvalidClient(_)));
+    }
+
+    /// Namespace separation: a Client Attestation PoP `jti` and an envelope
+    /// `jti` sharing a value must not collide. A shared namespace would let one
+    /// artifact deny service to the other.
+    #[tokio::test]
+    async fn an_envelope_jti_does_not_collide_with_a_pop_jti_of_the_same_value() {
+        let storage = test_storage().await;
+        let shared = "jti-shared";
+
+        crate::attestation::claim_pop_jti(
+            &storage,
+            &crate::attestation::PopClaims {
+                iss: "GoogleWallet".to_string(),
+                jti: shared.to_string(),
+                iat: NOW,
+                cnf_jwk: EcKeyPair::generate(EcCurve::P256)
+                    .unwrap()
+                    .to_jwk_public_key(),
+            },
+            300,
+        )
+        .await
+        .unwrap();
+
+        claim_envelope_jti(&storage, &envelope_claims("GoogleWallet", shared), 300)
+            .await
+            .expect("the two artifacts must use separate jti namespaces");
+    }
+
+    /// The raw jti must never be usable verbatim as a storage key -- the same
+    /// anti-leak property `claim_pop_jti` is tested for.
+    #[tokio::test]
+    async fn the_raw_envelope_jti_is_not_the_storage_key() {
+        use foundry_core::storage::Storage as _;
+        let storage = test_storage().await;
+        let claims = envelope_claims("GoogleWallet", "a-very-identifiable-jti");
+        claim_envelope_jti(&storage, &claims, 300).await.unwrap();
+
+        assert_eq!(
+            storage
+                .get_kv(ENVELOPE_JTI_NAMESPACE, &claims.jti)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    /// Same saturating-arithmetic guard `claim_pop_jti` carries: a boundary
+    /// `iat` must return a `Result`, not overflow.
+    #[tokio::test]
+    async fn claim_envelope_jti_does_not_overflow_on_boundary_iat() {
+        for iat in [i64::MIN, i64::MAX] {
+            let storage = test_storage().await;
+            let mut claims = envelope_claims("GoogleWallet", "jti-boundary");
+            claims.iat = iat;
+            let _ = claim_envelope_jti(&storage, &claims, u64::MAX).await;
+        }
     }
 }
