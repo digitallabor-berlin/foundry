@@ -348,12 +348,22 @@ pub fn verify_dpop_proof(
                     nonce,
                     now_unix,
                 )
-                .map_err(|_| {
+                .map_err(|failure| {
                     // §8: on a mismatch the server "MAY include a DPoP-Nonce HTTP
                     // header providing a new nonce value" -- the same response
                     // path as an absent nonce, so one error variant covers both.
                     // Never echoes the presented value (root `AGENTS.md` §4.5).
-                    tracing::warn!("dpop proof carried an unusable nonce");
+                    //
+                    // `reason` names WHICH of the four failures applied. The wire
+                    // response stays undifferentiated -- telling a client would be
+                    // an oracle -- but the server's own log is not the wire, and
+                    // the four causes have four different operator remedies.
+                    // `label()` is a fixed string: never the presented value, and
+                    // never the `Internal` message.
+                    tracing::warn!(
+                        reason = failure.label(),
+                        "dpop proof carried an unusable nonce"
+                    );
                     IssuanceError::UseDpopNonce(
                         "nonce is malformed, expired, or was not issued by this issuer".into(),
                     )

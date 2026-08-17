@@ -86,6 +86,30 @@ pub(crate) enum ChallengeFailure {
     Internal(String),
 }
 
+impl ChallengeFailure {
+    /// A fixed, operator-facing label naming which failure applied.
+    ///
+    /// The variants are deliberately indistinguishable **to a client** (see this
+    /// type's own docs); that argument does not extend to the server's own logs,
+    /// which no client sees. Without a label an interop failure reads as
+    /// "malformed, expired, or not issued here" -- three causes with three
+    /// different remedies (a wallet presenting a foreign value, a TTL shorter
+    /// than the wallet's cache lifetime, a value minted by a previous process)
+    /// collapsed into one line.
+    ///
+    /// A `&'static str` rather than a `Debug` rendering: `Internal` carries a
+    /// message, and a log field is an operator-facing name, not a dump.
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            ChallengeFailure::NotBase64Url => "not_base64url",
+            ChallengeFailure::WrongLength => "wrong_length",
+            ChallengeFailure::NotIssuedHere => "not_issued_here",
+            ChallengeFailure::Expired => "expired",
+            ChallengeFailure::Internal(_) => "internal",
+        }
+    }
+}
+
 /// Secret keying every domain's MAC.
 ///
 /// Generated once per process by [`NonceSecret::random`]. Outstanding values
@@ -366,6 +390,42 @@ mod tests {
         let a = mint(&s, Domain::AttestationChallenge, TTL, NOW).unwrap();
         let b = mint(&s, Domain::AttestationChallenge, TTL, NOW).unwrap();
         assert_ne!(a, b);
+    }
+
+    /// Every variant gets a distinct, fixed label. The point of the label is to
+    /// tell three different operator remedies apart in a log, so two variants
+    /// sharing a string would silently defeat it -- and `Internal`'s label must
+    /// not leak its message.
+    #[test]
+    fn every_failure_has_a_distinct_label_and_internal_leaks_nothing() {
+        let labels = [
+            ChallengeFailure::NotBase64Url.label(),
+            ChallengeFailure::WrongLength.label(),
+            ChallengeFailure::NotIssuedHere.label(),
+            ChallengeFailure::Expired.label(),
+            ChallengeFailure::Internal("secret detail".into()).label(),
+        ];
+        let mut sorted = labels;
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.iter().for_each(|l| assert!(!l.is_empty()));
+        let mut deduped = sorted.to_vec();
+        deduped.dedup();
+        assert_eq!(deduped.len(), before, "labels must be distinct: {labels:?}");
+        assert_eq!(
+            ChallengeFailure::Internal("secret detail".into()).label(),
+            "internal"
+        );
+    }
+
+    /// The labels are what an operator greps for, so they are pinned rather
+    /// than merely asserted distinct.
+    #[test]
+    fn the_labels_match_the_documented_strings() {
+        assert_eq!(ChallengeFailure::NotBase64Url.label(), "not_base64url");
+        assert_eq!(ChallengeFailure::WrongLength.label(), "wrong_length");
+        assert_eq!(ChallengeFailure::NotIssuedHere.label(), "not_issued_here");
+        assert_eq!(ChallengeFailure::Expired.label(), "expired");
     }
 
     #[test]
