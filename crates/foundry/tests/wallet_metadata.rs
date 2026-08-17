@@ -58,6 +58,8 @@ fn test_config() -> Config {
             dpop: DpopConfig::default(),
             request_encryption: None,
             response_encryption: None,
+            encrypted_pre_authorized_code: Default::default(),
+            access_token_ttl_secs: 600,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

@@ -215,6 +215,38 @@ impl Config {
             ));
         }
 
+        // Fail closed at load time, same reasoning as the android rule above.
+        // Google Wallet profile, §"token request field signing & encryption":
+        // the inner JWS is verified against the Client Attestation's `cnf.jwk`
+        // and the outer JWE is opened with the credential_request_encryption
+        // keys. Without either, every request carrying the member fails at
+        // request time -- a silent total outage of the Token Endpoint rather
+        // than a legible misconfiguration.
+        if self.issuer.encrypted_pre_authorized_code.mode != super::model::Mode::Disabled {
+            if self.issuer.wallet_attestation.mode == super::model::Mode::Disabled {
+                return Err(ConfigError::Validation(
+                    "issuer.encrypted_pre_authorized_code.mode is enabled but \
+                     issuer.wallet_attestation.mode is disabled: the inner JWS is verified \
+                     against the Client Attestation's cnf.jwk, so no request could ever \
+                     succeed"
+                        .into(),
+                ));
+            }
+            let has_keys = self
+                .issuer
+                .request_encryption
+                .as_ref()
+                .is_some_and(|re| !re.keys.is_empty());
+            if !has_keys {
+                return Err(ConfigError::Validation(
+                    "issuer.encrypted_pre_authorized_code.mode is enabled but \
+                     issuer.request_encryption has no keys: there would be nothing to \
+                     decrypt the outer JWE with"
+                        .into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }
@@ -401,6 +433,8 @@ mod tests {
                 dpop: DpopConfig::default(),
                 request_encryption: None,
                 response_encryption: None,
+                encrypted_pre_authorized_code: Default::default(),
+                access_token_ttl_secs: 600,
             },
             credential_types: Vec::new(),
             verifier: VerifierConfig {
@@ -698,6 +732,105 @@ mod tests {
             },
         );
         (cfg, dir)
+    }
+
+    /// `config_passing_keyref_check()` plus a second key entry that is not the
+    /// verifier's signing key, so it may legally be named as an encryption key.
+    fn cfg_with_enc_key() -> Config {
+        let mut cfg = config_passing_keyref_check();
+        cfg.keys.insert(
+            "req_dec".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "unused-enc.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg
+    }
+
+    /// The trap this guards: `Mode`'s own `Default` is `Optional`, so a bare
+    /// `#[serde(default)]` on a `Mode` field would silently switch this
+    /// feature ON for every deployment that never mentions it.
+    #[test]
+    fn encrypted_pre_authorized_code_defaults_to_disabled() {
+        assert_eq!(
+            crate::config::EncryptedPreAuthCodeConfig::default().mode,
+            Mode::Disabled
+        );
+        assert_eq!(
+            crate::config::EncryptedPreAuthCodeConfig::default().max_age_secs,
+            300
+        );
+    }
+
+    /// `Default::default()` being right is not enough if serde reaches a
+    /// different value for an omitted block.
+    #[test]
+    fn an_omitted_encrypted_pre_auth_block_deserializes_to_disabled() {
+        let cfg: crate::config::EncryptedPreAuthCodeConfig =
+            serde_yaml::from_str("{}").expect("an empty block must parse");
+        assert_eq!(cfg.mode, Mode::Disabled);
+        assert_eq!(cfg.max_age_secs, 300);
+    }
+
+    #[test]
+    fn encrypted_pre_auth_code_requires_wallet_attestation_to_be_enabled() {
+        let mut cfg = cfg_with_enc_key();
+        cfg.issuer.encrypted_pre_authorized_code.mode = Mode::Required;
+        cfg.issuer.wallet_attestation.mode = Mode::Disabled;
+        cfg.issuer.request_encryption = Some(req_enc(vec!["req_dec".to_string()]));
+
+        let err = cfg
+            .validate()
+            .expect_err("no wallet attestation means no cnf.jwk, so every request would fail");
+        assert!(
+            format!("{err}").contains("wallet_attestation"),
+            "the message must name the field an operator has to change, got: {err}"
+        );
+    }
+
+    #[test]
+    fn encrypted_pre_auth_code_requires_request_encryption_keys() {
+        let mut cfg = cfg_with_enc_key();
+        cfg.issuer.encrypted_pre_authorized_code.mode = Mode::Optional;
+        cfg.issuer.wallet_attestation.mode = Mode::Required;
+        cfg.issuer.request_encryption = None;
+
+        let err = cfg
+            .validate()
+            .expect_err("with no decryption keys the JWE could never be opened");
+        assert!(
+            format!("{err}").contains("request_encryption"),
+            "the message must name the field an operator has to change, got: {err}"
+        );
+    }
+
+    /// Deliberately legal: `required` here with `optional` wallet attestation
+    /// means a wallet presenting no attestation is rejected at the
+    /// encrypted-code step rather than at the attestation step. One knob
+    /// strengthens another; it does not replace it.
+    #[test]
+    fn encrypted_pre_auth_code_required_with_optional_wallet_attestation_is_legal() {
+        let mut cfg = cfg_with_enc_key();
+        cfg.issuer.encrypted_pre_authorized_code.mode = Mode::Required;
+        cfg.issuer.wallet_attestation.mode = Mode::Optional;
+        cfg.issuer.request_encryption = Some(req_enc(vec!["req_dec".to_string()]));
+
+        cfg.validate()
+            .expect("required + optional is a coherent, supported combination");
+    }
+
+    /// Disabled must not drag the two preconditions in with it.
+    #[test]
+    fn disabled_encrypted_pre_auth_code_imposes_no_preconditions() {
+        let mut cfg = cfg_with_enc_key();
+        cfg.issuer.encrypted_pre_authorized_code.mode = Mode::Disabled;
+        cfg.issuer.wallet_attestation.mode = Mode::Disabled;
+        cfg.issuer.request_encryption = None;
+
+        cfg.validate()
+            .expect("a disabled feature must not constrain unrelated configuration");
     }
 
     fn req_enc(keys: Vec<String>) -> crate::config::RequestEncryptionConfig {
