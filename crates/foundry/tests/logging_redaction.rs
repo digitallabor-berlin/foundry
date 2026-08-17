@@ -154,6 +154,8 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             dpop: DpopConfig::default(),
             request_encryption: None,
             response_encryption: None,
+            encrypted_pre_authorized_code: Default::default(),
+            access_token_ttl_secs: 600,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1224,6 +1226,8 @@ async fn setup_with_required_attestation() -> (
             dpop: DpopConfig::default(),
             request_encryption: None,
             response_encryption: None,
+            encrypted_pre_authorized_code: Default::default(),
+            access_token_ttl_secs: 600,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1842,5 +1846,69 @@ async fn display_metadata_never_reaches_the_log() {
             .iter()
             .map(|e| e.fields.clone())
             .collect::<Vec<_>>()
+    );
+}
+
+/// Root `AGENTS.md` §4.5: the `encrypted_pre-authorized_code` envelope — and
+/// therefore the pre-authorized code sealed inside it — must never reach a
+/// log, at any level, under any flag.
+///
+/// Driven against the default configuration, where the extension is
+/// `disabled`, so the request takes the rejection path: `resolve_code` refuses
+/// the member and `token_error_response` writes the one log record §4.5
+/// requires. That record must name the failure without quoting the artifact.
+///
+/// The envelope value is deliberately unlike anything a log line could contain
+/// by coincidence, so a substring search over the whole captured buffer is
+/// conclusive.
+#[tokio::test]
+async fn the_encrypted_pre_authorized_code_envelope_is_never_logged() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir) = setup().await;
+
+    const ENVELOPE: &str = "Qqxlm-Planted-Envelope-Value-7731";
+
+    let (guard, log) = capture_at_trace();
+    let res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/token")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code\
+                     &encrypted_pre-authorized_code={ENVELOPE}"
+                )))
+                .expect("token request"),
+        )
+        .await
+        .expect("token response");
+    drop(guard);
+
+    // The disabled mode rejects the member rather than ignoring it; a 200 here
+    // would mean the anti-downgrade rule silently fell back to the plaintext
+    // path and this test proved nothing about the rejection log record.
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    assert!(
+        !log.events().is_empty(),
+        "captured nothing; the negative assertion below would be vacuous"
+    );
+    assert!(
+        !log.contains_value(ENVELOPE),
+        "the encrypted_pre-authorized_code envelope leaked into the log"
+    );
+
+    // The positive control: the capture window really covered this request.
+    let saw_this_request = log
+        .events()
+        .iter()
+        .any(|e| e.fields.get("route").is_some_and(|r| r.contains("/token")));
+    assert!(
+        saw_this_request,
+        "the capture window must cover the /token request, else the negative \
+         assertion above proves nothing"
     );
 }

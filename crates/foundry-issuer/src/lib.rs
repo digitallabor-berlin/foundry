@@ -5,6 +5,7 @@ pub mod create_offer;
 pub mod credential;
 pub mod display_metadata;
 pub mod dpop;
+pub mod encrypted_pre_auth;
 pub mod error;
 pub mod keystore_proof;
 pub mod metadata;
@@ -28,6 +29,9 @@ pub use display_metadata::{DisplayStage, validate_display};
 pub use dpop::{
     DpopNoncePolicy, DpopPresentation, VerifiedDpopProof, access_token_hash, verify_dpop_proof,
 };
+pub use encrypted_pre_auth::{
+    EncryptedCodeClaims, open_envelope, resolve_encrypted_pre_authorized_code, validate_claims,
+};
 pub use error::IssuanceError;
 pub use metadata::{
     AuthorizationServerMetadata, CredentialConfigurationSupported, CredentialIssuerMetadata,
@@ -42,7 +46,7 @@ pub use offer::{
 };
 pub use proof::{ProofsRequest, VerifiedProof, verify_holder_proof};
 pub use status_index::allocate_status_index;
-pub use token::{TokenRequest, TokenResponse, handle_token_request};
+pub use token::{EncryptedCodePolicy, TokenRequest, TokenResponse, handle_token_request};
 pub use transaction::{
     IssuanceState, IssuanceTransaction, load_transaction, load_transaction_by_access_token,
     load_transaction_by_pre_auth_code, save_transaction, save_transaction_with_indices,

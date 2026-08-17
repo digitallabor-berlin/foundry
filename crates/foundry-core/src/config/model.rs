@@ -149,6 +149,22 @@ pub struct IssuerConfig {
     /// unrelated OpenID4VP authorization-response JWE.
     #[serde(default)]
     pub response_encryption: Option<ResponseEncryptionConfig>,
+    /// Google Wallet's `encrypted_pre-authorized_code` extension. Absent means
+    /// `disabled`, which reproduces foundry's behaviour before the extension
+    /// existed, byte for byte.
+    #[serde(default)]
+    pub encrypted_pre_authorized_code: EncryptedPreAuthCodeConfig,
+    /// Lifetime of a minted access token, in seconds. Drives **both** the
+    /// `expires_in` on the wire and the TTL of the issuance-transaction row the
+    /// token addresses — the row must outlive the token, and equal lifetimes is
+    /// the tightest correct choice.
+    ///
+    /// Distinct from `storage.transaction_ttl_secs`, which bounds how long an
+    /// **offer** stays redeemable before `/token` is ever called. The two
+    /// measure different phases of the flow; the similar names invite
+    /// conflation.
+    #[serde(default = "default_access_token_ttl_secs")]
+    pub access_token_ttl_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -271,6 +287,64 @@ impl Default for AndroidKeystoreConfig {
             key_mint_security_level: default_key_mint_security_level(),
         }
     }
+}
+
+/// Google Wallet's `encrypted_pre-authorized_code` Token Request extension:
+/// the pre-authorized code delivered as a JWS nested inside a JWE instead of
+/// as a plaintext parameter.
+///
+/// **Vendor profile, not a specification.** Its only source is the Google
+/// Wallet VCI 1.0 Profile, §"token request field signing & encryption"; no
+/// standards-track document defines this parameter. Root `AGENTS.md` §4.4
+/// therefore makes it accommodation, never conformance. Design:
+/// `docs/superpowers/specs/2026-08-17-encrypted-pre-authorized-code-design.md`.
+///
+/// - `disabled` (default) — the member is **rejected** if present. Not
+///   ignored: silently falling back to the plaintext parameter would be a
+///   downgrade against the exact property the extension exists to provide.
+/// - `optional` — either form is accepted, and exactly one of the two must be
+///   present. The migration rung.
+/// - `required` — the member is mandatory and a plaintext `pre-authorized_code`
+///   is rejected. The anti-downgrade rule, mirroring RFC 9449 §7.2's
+///   DPoP-bound-token-presented-as-Bearer rejection.
+///
+/// Enabling this (any mode but `disabled`) requires **both**
+/// `issuer.wallet_attestation.mode != disabled` (the inner JWS is verified
+/// against the Client Attestation's `cnf.jwk`) and a configured
+/// `issuer.request_encryption` (its keys decrypt the outer JWE).
+/// `Config::validate()` enforces both at load time.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct EncryptedPreAuthCodeConfig {
+    /// **Not `#[serde(default)]`.** `Mode`'s own `Default` is `Optional`, so
+    /// the bare attribute would switch this extension on for every deployment
+    /// that never mentions it. The explicit function is load-bearing.
+    #[serde(default = "default_disabled")]
+    pub mode: Mode,
+    /// Sliding window bounding how old the inner JWS's `iat` may be, and the
+    /// basis for the `jti` replay row's `expires_at`. The same role
+    /// `AttestationMode.pop_max_age_secs` plays for the Client Attestation PoP.
+    #[serde(default = "default_encrypted_pre_auth_code_max_age_secs")]
+    pub max_age_secs: u64,
+}
+
+fn default_encrypted_pre_auth_code_max_age_secs() -> u64 {
+    300
+}
+
+// Hand-written for the same reason `AndroidKeystoreConfig`'s is: a derived
+// `Default` would give `mode` the `Mode::default()` value (`Optional`) and
+// silently enable the extension for any code path using `..Default::default()`.
+impl Default for EncryptedPreAuthCodeConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_disabled(),
+            max_age_secs: default_encrypted_pre_auth_code_max_age_secs(),
+        }
+    }
+}
+
+fn default_access_token_ttl_secs() -> u64 {
+    600
 }
 
 /// RFC 9449 DPoP policy for the Token and Credential Endpoints.

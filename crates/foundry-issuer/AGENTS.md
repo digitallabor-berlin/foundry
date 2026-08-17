@@ -23,7 +23,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 ## Module Map
 
 | File | Responsibility |
-|---|---|
+| --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface (see below) |
 | `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()`, `build_dc_api_offer()` |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
@@ -38,6 +38,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `attestation.rs` | `WalletAttestationVerifier` / `KeyAttestationVerifier` traits + `DefaultAttestationVerifier`, gated by `foundry_core::config::Mode`. Also verifies the Client Attestation PoP JWT (`draft-ietf-oauth-attestation-based-client-auth` §5.2, GAP-VCI-14) via `validate_client_attestation_pop_jwt` — including, since 2026-08-04, ABCA §9 rule 8's `challenge` claim (check 10), gated on `issuer.wallet_attestation.challenge_mode` and implemented via `challenge.rs`'s `Domain::AttestationChallenge` — and owns anti-replay claiming of the PoP's `jti` via `claim_pop_jti` under KV namespace `client_attestation_pop_jti` |
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config`; `build_issuer_metadata` also takes the loaded request-decryption keys and populates `credential_request_encryption`/`credential_response_encryption` (both `Option`, omitted entirely when their config block is absent) |
 | `keystore_proof.rs` | Google Wallet `android_keystore_attestation` proof type: chain validation, `attestationChallenge` ↔ `c_nonce` binding, security-level policy, holder-key derivation |
+| `encrypted_pre_auth.rs` | Google Wallet's `encrypted_pre-authorized_code` extension (vendor profile, not a specification): opens the JWE-then-JWS envelope, validates its claims, and defends replay via `claim_envelope_jti` under KV namespace `encrypted_pre_auth_code_jti`. Entry point `resolve_encrypted_pre_authorized_code` — envelope in, plain code out |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
 
@@ -47,9 +48,9 @@ Entry point → the endpoint that drives it (routes defined in
 `crates/foundry/src/server.rs`):
 
 | Entry point | Endpoint | Listener |
-|---|---|---|
+| --- | --- | --- |
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
-| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix) -> TokenResponse` | `POST /token` | wallet-facing |
+| `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix, &EncryptedCodePolicy, access_token_ttl_secs) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
 | `issue_attestation_challenge(&NonceSecret, ttl_secs, now_unix) -> ChallengeResponse` | `POST /challenge` | wallet-facing, **unauthenticated**, registered only when `challenge_mode != Disabled` |
 | `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix, request_was_encrypted: bool) -> CredentialResponse` | `POST /credential` | wallet-facing |
@@ -120,8 +121,8 @@ This crate has **no `tests/` directory**.
 
 - **Unit coverage:** inline `#[cfg(test)]` modules in every module —
   `attestation.rs`, `challenge.rs`, `create_offer.rs`, `credential.rs`,
-  `dpop.rs`, `error.rs`, `metadata.rs`, `nonce.rs`, `offer.rs`, `proof.rs`,
-  `status_index.rs`, `token.rs`, `transaction.rs`.
+  `dpop.rs`, `encrypted_pre_auth.rs`, `error.rs`, `metadata.rs`, `nonce.rs`,
+  `offer.rs`, `proof.rs`, `status_index.rs`, `token.rs`, `transaction.rs`.
 - **Flow coverage** lives in `crates/foundry/tests/` — see
   [`../foundry/tests/AGENTS.md`](../foundry/tests/AGENTS.md). Most relevant:
   `issuer_offers.rs` (offer creation via the admin API), `wallet_issuance.rs`
@@ -134,6 +135,29 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 ```
 
 ## Gotchas
+
+- **The canonical parameter name is `encrypted_pre-authorized_code`.** The
+  Google Wallet profile's prose says that; its worked Token Request example
+  says `encrypted_pre-authorization_code`. The prose wins — it is the normative
+  statement, and it matches OpenID4VCI's own `pre-authorized_code` — and only
+  the canonical spelling is accepted. Raised with Google; see §9.2 of
+  `docs/superpowers/specs/2026-08-17-encrypted-pre-authorized-code-design.md`.
+- **`EncryptedPreAuthCodeConfig`'s `mode` needs an explicit `default =`
+  function.** `Mode`'s own `Default` is `Optional`, so a bare
+  `#[serde(default)]` would switch the extension on for every deployment that
+  never mentions it. Guarded by
+  `encrypted_pre_authorized_code_defaults_to_disabled` in `foundry-core`.
+- **The envelope's `aud` is the Token Endpoint URL, not the AS issuer
+  identifier.** The Client Attestation PoP uses the issuer identifier (ABCA §9
+  rule 10); the envelope uses the endpoint URL (Google Wallet profile example).
+  Two artifacts, two audiences — conflating them breaks interop.
+- **`encrypted_pre_auth.rs` has its own `jti` namespace.** Sharing
+  `attestation.rs`'s `client_attestation_pop_jti` would let a PoP `jti` and an
+  envelope `jti` of the same value collide, so one artifact could deny service
+  to the other.
+- **`disabled` rejects the encrypted member rather than ignoring it, and
+  `required` rejects the plaintext one.** Both are anti-downgrade rules: a
+  silent fallback in either direction would make the mode advisory.
 
 - **`CredentialOffer.display` and `CredentialResponse.display` are not
   OpenID4VCI members.** They carry EMVCo DPC display metadata per Schema

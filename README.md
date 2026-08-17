@@ -9,7 +9,7 @@
 Foundry is structured as a Rust cargo workspace comprising several modular crates:
 
 | Crate | Path | Description |
-|---|---|---|
+| --- | --- | --- |
 | `foundry` | `crates/foundry` | Main binary & HTTP service providing server startup, admin API, wallet endpoints, and PKI CLI commands. |
 | `foundry-core` | `crates/foundry-core` | Core data models, YAML configuration parser/validator, SQLite storage driver, PKI/cert handling, trust anchor validation, and Token Status List generation/verification. |
 | `foundry-issuer` | `crates/foundry-issuer` | Framework-agnostic OpenID4VCI business logic: metadata builders, transaction lifecycle, CSPRNG status-list index allocation, and offer creation. |
@@ -121,7 +121,7 @@ workspace-wide gates this repo requires before any change is considered done
 (see the root `AGENTS.md`).
 
 | Trigger | Tags produced |
-|---|---|
+| --- | --- |
 | push to `main` | `:latest`, `:sha-<short-sha>` |
 | push tag `vX.Y.Z` | `:vX.Y.Z`, `:X.Y`, `:X`, `:sha-<short-sha>` |
 | manual (`workflow_dispatch`) | whatever the current ref would produce |
@@ -136,7 +136,7 @@ variables → Actions*, matching the credentials already in
 `~/dev/dl-infra-k8s/foundry/regcred.yaml` for `containers.digitallabor.dev`:
 
 | Secret | Value |
-|---|---|
+| --- | --- |
 | `REGISTRY_USERNAME` | the registry username (`capmin`) |
 | `REGISTRY_PASSWORD` | the registry password |
 
@@ -789,6 +789,57 @@ each present only when the corresponding config block is set.
 
 ---
 
+## Encrypted Pre-Authorized Code (Google Wallet extension)
+
+Google Wallet's OpenID4VCI profile defines an `encrypted_pre-authorized_code`
+Token Request parameter: the pre-authorized code carried as a JWS nested inside
+a JWE instead of as a plaintext string. **This is a vendor profile, not a
+specification** — no OpenID4VCI, HAIP or OAuth document defines it — so it is
+off by default and a deployment that never mentions it behaves exactly as
+before.
+
+```yaml
+issuer:
+  encrypted_pre_authorized_code:
+    mode: disabled       # disabled (default) | optional | required
+    max_age_secs: 300    # how old the envelope's `iat` may be
+
+  # Access-token lifetime, in seconds. Default 600.
+  access_token_ttl_secs: 600
+```
+
+- **`mode: disabled`** (the default) — the parameter is **rejected** if
+  present, never silently ignored. Ignoring it would let a wallet believe its
+  code was protected when it was not.
+- **`mode: optional`** — either form is accepted, but **exactly one** must be
+  present. A request carrying both is rejected rather than resolved by
+  precedence: two codes in one request is a client bug, and picking a winner
+  hides it. This is the migration rung.
+- **`mode: required`** — the encrypted form is mandatory and a plaintext
+  `pre-authorized_code` is **rejected**. Without that rule `required` would be
+  advisory; it is the same anti-downgrade posture RFC 9449 §7.2 takes for a
+  DPoP-bound token presented as Bearer.
+
+Enabling the extension (`optional` or `required`) requires, and
+`Config::validate()` enforces at startup:
+
+- `issuer.wallet_attestation.mode` other than `disabled` — the envelope's inner
+  JWS is verified against the Client Attestation's `cnf.jwk`, so without a
+  verified attestation there is no key to check it with; and
+- `issuer.request_encryption` with at least one key — the profile reuses those
+  very keys ("the same key used to encrypt the request to the Credential
+  Endpoint"), so there is deliberately no second key list to configure or to
+  drift.
+
+`access_token_ttl_secs` is independent of the extension and applies to every
+grant. It drives both the `expires_in` on the wire and the lifetime of the
+transaction row that access token addresses — one value, so the record can
+never expire out from under a token still nominally valid. It is **not** the
+same knob as `storage.transaction_ttl_secs`, which bounds how long an *offer*
+stays redeemable before `/token` is ever called.
+
+---
+
 ## Credential Types & Claim Configuration
 
 Each entry under `credential_types` defines one Credential Configuration. Beyond
@@ -796,7 +847,7 @@ Each entry under `credential_types` defines one Credential Configuration. Beyond
 handling and credential lifetime.
 
 | Key | Required | Default | Meaning |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `validity_seconds` | no | `31536000` (365 days) | Credential lifetime in seconds. The issued credential's `exp` is its `iat` plus this value — for SD-JWT VC, and for the mdoc MSO's `validUntil`. Must be non-zero: a credential whose `exp` equals its `iat` is rejected at startup. |
 | `claims[].required` | no | `!selectively_disclosable` | Whether an offer must supply a value for this claim. Omit it to keep the historical rule — non-disclosable claims mandatory, disclosable ones optional. Set it explicitly for a claim that is **both** mandatory and selectively disclosable. |
 
@@ -845,7 +896,7 @@ Three sources can set the log level. They are resolved in this order, highest
 priority first:
 
 | Priority | Source | Example |
-|---|---|---|
+| --- | --- | --- |
 | 1 | `RUST_LOG` environment variable | `RUST_LOG=info,foundry_verifier=debug` |
 | 2 | `--log-level` CLI flag | `foundry --log-level debug serve --config config.yaml` |
 | 3 | `logging.level` in the config file | see below |
@@ -887,7 +938,7 @@ Every access record carries these fields. They are stable names — alerting and
 log queries can rely on them:
 
 | Field | Meaning |
-|---|---|
+| --- | --- |
 | `request_id` | Random per request; also returned in the `x-request-id` response header |
 | `method` | HTTP method |
 | `route` | The route **template** (`/vp/response/:id`), never the concrete path |
@@ -996,7 +1047,7 @@ Foundry carries a spec-conformance audit of the three protocol texts pinned in
 and the verdicts are backed by four test suites:
 
 | Command | Covers |
-|---|---|
+| --- | --- |
 | `cargo test -p foundry-issuer --test conformance_vci` | OpenID4VCI issuance engine (offers, `/token`, `/nonce`, `/credential`, holder proofs, attestations, issuer metadata) |
 | `cargo test -p foundry-verifier --test conformance_vp` | OpenID4VP verification engine (request objects, client identifier prefixes, DCQL, response encryption) |
 | `cargo test -p foundry --test conformance_http` | HTTP boundary in `crates/foundry/src/server.rs` (status codes, `Content-Type`, redirects, error bodies) |

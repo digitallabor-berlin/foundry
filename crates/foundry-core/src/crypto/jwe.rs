@@ -118,13 +118,17 @@ fn protected_header(jwe: &str) -> Result<Value, CryptoError> {
         .map_err(|e| CryptoError::Jwe(format!("protected header is not JSON: {e}")))
 }
 
-/// Decrypt a compact-serialization JWE Credential Request to its JWT claims set.
+/// Decrypt a compact-serialization JWE to its **raw plaintext bytes**.
 ///
-/// OpenID4VCI L1186 requires the message contents to be a JWT, so the returned
-/// value is the claims set — which *is* the Credential Request object.
+/// This is the primitive; [`decrypt_compact`] is the JSON-parsing wrapper over
+/// it. Two callers need two different plaintext shapes:
+///
+/// * the Credential Request (OpenID4VCI L1186) is a JWT claims set — JSON;
+/// * the Google Wallet profile's `encrypted_pre-authorized_code` is a nested
+///   compact JWS, which is not JSON and must not be parsed as such.
 ///
 /// Three header checks run **before** any key agreement, each a conformance
-/// clause:
+/// clause, and apply to both callers:
 ///
 /// * L1188 / VCI-0100 — the JWE `alg` MUST equal the `alg` of the chosen JWK,
 ///   and every published JWK carries `ECDH-ES`.
@@ -133,11 +137,11 @@ fn protected_header(jwe: &str) -> Result<Value, CryptoError> {
 ///   back to trial decryption; trial decryption would reduce `kid` to decoration
 ///   and mask a client bug.
 /// * VCI-0135 — `enc` must be one of the advertised values.
-pub fn decrypt_compact(
+pub fn decrypt_compact_to_bytes(
     jwe: &str,
     keys: &[DecryptionKey],
     allowed_enc: &[String],
-) -> Result<Value, CryptoError> {
+) -> Result<Vec<u8>, CryptoError> {
     if keys.is_empty() {
         return Err(CryptoError::Jwe(
             "no request-decryption keys are configured".to_string(),
@@ -186,10 +190,27 @@ pub fn decrypt_compact(
         .decrypter_from_jwk(&jwk)
         .map_err(|e| CryptoError::Jwe(format!("cannot build decrypter: {e}")))?;
 
-    let (payload, _header) = josekit::jwt::decode_with_decrypter(jwe, &decrypter)
+    let (payload, _header) = josekit::jwe::deserialize_compact(jwe, &decrypter)
         .map_err(|e| CryptoError::Jwe(e.to_string()))?;
 
-    serde_json::to_value(payload.claims_set())
+    Ok(payload)
+}
+
+/// Decrypt a compact-serialization JWE Credential Request to its JWT claims set.
+///
+/// OpenID4VCI L1186 requires the message contents to be a JWT, so the returned
+/// value is the claims set — which *is* the Credential Request object.
+///
+/// The conformance header checks live in [`decrypt_compact_to_bytes`], which
+/// this delegates to; the only thing added here is that the plaintext must
+/// parse as JSON.
+pub fn decrypt_compact(
+    jwe: &str,
+    keys: &[DecryptionKey],
+    allowed_enc: &[String],
+) -> Result<Value, CryptoError> {
+    let plaintext = decrypt_compact_to_bytes(jwe, keys, allowed_enc)?;
+    serde_json::from_slice(&plaintext)
         .map_err(|e| CryptoError::Jwe(format!("decrypted claims are not JSON: {e}")))
 }
 
@@ -519,5 +540,51 @@ mod tests {
             encrypt_compact(&json!({ "vp_token": "x" }), &public, "ECDH-ES", "A128GCM").unwrap();
         let header = protected_header(&jwe).unwrap();
         assert!(header.get("kid").is_none(), "header was {header}");
+    }
+
+    /// Test-only: encrypt arbitrary bytes to `recipient`, echoing its `kid`.
+    /// Production code only ever *decrypts* these, so this stays in tests.
+    fn encrypt_bytes_for_test(payload: &[u8], recipient: &DecryptionKey, enc: &str) -> String {
+        let pub_jwk =
+            Jwk::from_bytes(serde_json::to_vec(&recipient.published_jwk()).unwrap()).unwrap();
+        let encrypter = josekit::jwe::ECDH_ES.encrypter_from_jwk(&pub_jwk).unwrap();
+
+        let mut header = josekit::jwe::JweHeader::new();
+        header.set_algorithm("ECDH-ES");
+        header.set_content_encryption(enc);
+        header.set_key_id(recipient.kid());
+
+        josekit::jwe::serialize_compact(payload, &header, &encrypter).unwrap()
+    }
+
+    /// The nested-JWS case: the JWE plaintext is a compact JWS string, which is
+    /// NOT JSON and therefore cannot go through `decrypt_compact`.
+    #[test]
+    fn decrypt_compact_to_bytes_returns_a_non_json_plaintext_verbatim() {
+        let key = test_decryption_key();
+        let plaintext = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJhIn0.c2ln";
+        let jwe = encrypt_bytes_for_test(plaintext.as_bytes(), &key, "A128GCM");
+
+        let out = decrypt_compact_to_bytes(&jwe, std::slice::from_ref(&key), &both_gcm()).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), plaintext);
+
+        // And the JSON wrapper must reject the same input -- which is exactly
+        // why the byte-returning sibling has to exist.
+        assert!(decrypt_compact(&jwe, std::slice::from_ref(&key), &both_gcm()).is_err());
+    }
+
+    /// The three header checks are conformance clauses (L1188 / VCI-0101 /
+    /// VCI-0135), not an artifact of JSON parsing, so they must apply here too.
+    #[test]
+    fn decrypt_compact_to_bytes_enforces_the_same_header_checks() {
+        let key = test_decryption_key();
+        let jwe = encrypt_bytes_for_test(b"anything", &key, "A128GCM");
+
+        let only_256 = vec!["A256GCM".to_string()];
+        assert!(decrypt_compact_to_bytes(&jwe, std::slice::from_ref(&key), &only_256).is_err());
+        assert!(decrypt_compact_to_bytes(&jwe, &[], &both_gcm()).is_err());
+        assert!(
+            decrypt_compact_to_bytes("not.a.jwe", std::slice::from_ref(&key), &both_gcm()).is_err()
+        );
     }
 }
