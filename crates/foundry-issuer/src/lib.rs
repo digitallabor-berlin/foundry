@@ -7,6 +7,9 @@ pub mod display_metadata;
 pub mod dpop;
 pub mod encrypted_pre_auth;
 pub mod error;
+/// Crate-internal: see the module docs for why every inline-key JWS
+/// verification in this crate must go through it.
+pub(crate) mod jose;
 pub mod keystore_proof;
 pub mod metadata;
 pub mod nonce;

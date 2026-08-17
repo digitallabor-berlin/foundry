@@ -26,7 +26,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::crypto::jwe::{DecryptionKey, decrypt_compact_to_bytes};
 use foundry_core::storage::Storage;
 use josekit::jwk::Jwk;
-use josekit::jws::ES256;
 use sha2::{Digest, Sha256};
 
 /// The clock-skew tolerance for the inner JWS's `iat`. The same value and the
@@ -134,7 +133,11 @@ pub fn open_envelope(
     // Check 7: the signature MUST verify against the Client Attestation's
     // cnf.jwk -- "The JWS must be signed by the cnf.jwk found in the
     // OAuth-Client-Attestation JWT used for wallet attestation."
-    let verifier = ES256.verifier_from_jwk(cnf_jwk).map_err(|e| {
+    //
+    // Via `es256_verifier_from_inline_jwk` because the key is inline: a `kid`
+    // on the cnf.jwk must not become a demand for a `kid` on the inner JWS
+    // header, which the profile does not emit. See `crate::jose`.
+    let verifier = crate::jose::es256_verifier_from_inline_jwk(cnf_jwk).map_err(|e| {
         IssuanceError::InvalidClient(format!(
             "encrypted_pre-authorized_code: cannot build a verifier from the attestation's \
              cnf.jwk: {e}"
@@ -355,7 +358,7 @@ mod tests {
     use super::*;
     use josekit::jwe::JweHeader;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-    use josekit::jws::JwsSigner;
+    use josekit::jws::{ES256, JwsSigner};
 
     fn recipient_key() -> DecryptionKey {
         let kp = EcKeyPair::generate(EcCurve::P256).unwrap();
@@ -442,6 +445,35 @@ mod tests {
 
         assert_eq!(payload["pre-authorized_code"], "code-123");
         assert_eq!(payload["iss"], "GoogleWallet");
+    }
+
+    /// Regression (same defect class as `dpop.rs`, `proof.rs`, `attestation.rs`):
+    /// the `cnf.jwk` carried out of the Client Attestation may label itself
+    /// with a `kid`. The inner JWS is verified against that key directly, so
+    /// nothing requires the JWS header to repeat the label -- and Google's
+    /// profile does not put one there. josekit's `verifier_from_jwk` copies
+    /// the JWK's `kid` into the verifier, which then rejected the envelope
+    /// with "The JWS kid header claim is required".
+    #[test]
+    fn opens_an_envelope_whose_cnf_jwk_carries_its_own_kid() {
+        let recipient = recipient_key();
+        let signer_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        // `build_envelope` assembles the inner JWS header by hand: `alg` and
+        // `typ` only, never a kid.
+        let envelope = build_envelope(&sample_claims(), &signer_kp, &recipient, "A128GCM", None);
+
+        let mut cnf_jwk = signer_kp.to_jwk_public_key();
+        cnf_jwk.set_key_id("wallet-instance-key-1");
+
+        let payload = open_envelope(
+            &envelope,
+            std::slice::from_ref(&recipient),
+            &both_gcm(),
+            &cnf_jwk,
+        )
+        .expect("a kid on the cnf.jwk must not require a kid on the inner JWS header");
+
+        assert_eq!(payload["pre-authorized_code"], "code-123");
     }
 
     /// Check 2 (VCI-0135): `enc` must be advertised.

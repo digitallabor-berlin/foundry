@@ -7,7 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Mode;
 use foundry_core::trust::TrustStore;
 use josekit::jwk::Jwk;
-use josekit::jws::{ES256, JwsHeader};
+use josekit::jws::JwsHeader;
 use serde::{Deserialize, Serialize};
 
 /// Wire shape of the OpenID4VCI `proofs` request member.
@@ -209,20 +209,12 @@ pub fn verify_holder_proof(
         ));
     };
 
-    // josekit's `verifier_from_jwk` copies the JWK's own `kid` member into the
-    // verifier's `key_id`, which then makes `decode_with_verifier` require a
-    // matching `kid` *header* claim on the JWS itself. For an OpenID4VCI proof
-    // JWT the key is embedded inline (via `jwk` or resolved from
+    // Via `es256_verifier_from_inline_jwk` because the key is inline: for an
+    // OpenID4VCI proof JWT it is embedded (via `jwk`, or resolved from
     // `key_attestation`), so the outer JWS header legitimately has no `kid` —
-    // a `kid` on the JWK is just key metadata, not a signature requirement.
-    // Strip it before building the verifier so a wallet-supplied JWK `kid`
-    // doesn't spuriously fail proof verification.
-    let mut verifier_jwk = jwk.clone();
-    verifier_jwk.set_parameter("kid", None).map_err(|e| {
-        IssuanceError::InvalidProof(format!("unable to normalize jwk for verification: {e}"))
-    })?;
-
-    let verifier = ES256.verifier_from_jwk(&verifier_jwk).map_err(|e| {
+    // a `kid` on the JWK is key metadata, not a signature requirement. See
+    // `crate::jose`; this call site is where that defect was first found.
+    let verifier = crate::jose::es256_verifier_from_inline_jwk(&jwk).map_err(|e| {
         IssuanceError::InvalidProof(format!("unable to create verifier from jwk: {e}"))
     })?;
 
@@ -267,6 +259,7 @@ mod tests {
     use foundry_core::config::Mode;
     use foundry_core::trust::TrustStore;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
+    use josekit::jws::ES256;
     use josekit::jwt::{self, JwtPayload};
 
     const NOW: i64 = 1_700_000_000;

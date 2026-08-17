@@ -40,6 +40,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `keystore_proof.rs` | Google Wallet `android_keystore_attestation` proof type: chain validation, `attestationChallenge` ↔ `c_nonce` binding, security-level policy, holder-key derivation |
 | `encrypted_pre_auth.rs` | Google Wallet's `encrypted_pre-authorized_code` extension (vendor profile, not a specification): opens the JWE-then-JWS envelope, validates its claims, and defends replay via `claim_envelope_jti` under KV namespace `encrypted_pre_auth_code_jti`. Entry point `resolve_encrypted_pre_authorized_code` — envelope in, plain code out |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
+| `jose.rs` | **Crate-internal** (`pub(crate)`). `es256_verifier_from_inline_jwk` — the single way this crate builds a JWS verifier for a key that arrived *inline* with the message (a `jwk` header, a `cnf.jwk`). See Gotchas: josekit turns a `kid` on such a JWK into a demand for a `kid` on the JWS header |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
 
 ## Key Public Types & Entry Points
@@ -117,12 +118,18 @@ Other public surface:
 
 ## Tests
 
-This crate has **no `tests/` directory**.
-
 - **Unit coverage:** inline `#[cfg(test)]` modules in every module —
   `attestation.rs`, `challenge.rs`, `create_offer.rs`, `credential.rs`,
-  `dpop.rs`, `encrypted_pre_auth.rs`, `error.rs`, `metadata.rs`, `nonce.rs`,
-  `offer.rs`, `proof.rs`, `status_index.rs`, `token.rs`, `transaction.rs`.
+  `dpop.rs`, `encrypted_pre_auth.rs`, `error.rs`, `jose.rs`, `metadata.rs`,
+  `nonce.rs`, `offer.rs`, `proof.rs`, `status_index.rs`, `token.rs`,
+  `transaction.rs`.
+- **`tests/`** holds two integration files, neither of them a flow test:
+  `conformance_vci.rs`, and `inline_jwk_verifier_hygiene.rs` — a *structural*
+  guard (in the spirit of `crates/foundry/tests/instrumentation_hygiene.rs`)
+  asserting that no production code in this crate calls josekit's
+  `verifier_from_jwk` directly instead of `jose::es256_verifier_from_inline_jwk`.
+  See the first entry under Gotchas for why that rule is enforced rather than
+  documented.
 - **Flow coverage** lives in `crates/foundry/tests/` — see
   [`../foundry/tests/AGENTS.md`](../foundry/tests/AGENTS.md). Most relevant:
   `issuer_offers.rs` (offer creation via the admin API), `wallet_issuance.rs`
@@ -135,6 +142,21 @@ cargo test -p foundry --test wallet_issuance      # issuance flow
 ```
 
 ## Gotchas
+
+- **Never call `ES256.verifier_from_jwk` directly on a key that arrived inline
+  with the message it verifies — use `jose::es256_verifier_from_inline_jwk`.**
+  josekit copies the JWK's own `kid` member into the verifier, after which
+  `decode_with_verifier` *requires* a matching `kid` on the outer JWS header and
+  otherwise fails with `"The JWS kid header claim is required"`. A `kid` is an
+  optional member of any JWK (RFC 7517 §4.5) and no specification requires the
+  header to repeat it when the key is inline, so this rejects conformant
+  messages — it broke Google Wallet issuance at `/token` in production. Applies
+  to all four inline-key sites: `proof.rs` (`jwk` header), `dpop.rs` (RFC 9449
+  §4.2 `jwk` header), `attestation.rs` (the PoP against `cnf.jwk`) and
+  `encrypted_pre_auth.rs` (the inner JWS against the same `cnf.jwk`). It does
+  **not** apply to a key selected *by* `kid` out of a set, where the label is
+  load-bearing. Each site has its own regression test; the reasoning lives in
+  `jose.rs`'s module docs.
 
 - **The canonical parameter name is `encrypted_pre-authorized_code`.** The
   Google Wallet profile's prose says that; its worked Token Request example

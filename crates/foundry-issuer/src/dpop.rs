@@ -24,7 +24,6 @@ use foundry_core::config::Mode;
 use foundry_core::obs::thumbprint_bytes;
 use foundry_core::storage::Storage;
 use josekit::jwk::Jwk;
-use josekit::jws::ES256;
 use sha2::{Digest, Sha256};
 
 /// RFC 9449 §11.1: "To accommodate for clock offsets, the server MAY accept
@@ -212,7 +211,11 @@ pub fn verify_dpop_proof(
     // the jwk JOSE Header Parameter."
     let jwk: Jwk = serde_json::from_value(jwk_value.clone())
         .map_err(|e| IssuanceError::InvalidDpopProof(format!("invalid jwk header: {e}")))?;
-    let verifier = ES256.verifier_from_jwk(&jwk).map_err(|e| {
+    //
+    // Via `es256_verifier_from_inline_jwk` because the key is inline: a `kid`
+    // on the embedded JWK must not become a demand for a `kid` on the outer
+    // JWS header, which §4.2 never asks for. See `crate::jose`.
+    let verifier = crate::jose::es256_verifier_from_inline_jwk(&jwk).map_err(|e| {
         IssuanceError::InvalidDpopProof(format!(
             "unable to build a verifier from the jwk header: {e}"
         ))
@@ -464,7 +467,7 @@ pub(crate) async fn claim_dpop_jti(
 mod tests {
     use super::*;
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
-    use josekit::jws::JwsHeader;
+    use josekit::jws::{ES256, JwsHeader};
     use josekit::jwt::{self, JwtPayload};
 
     const HTU: &str = "https://issuer.example.com/token";
@@ -552,6 +555,60 @@ mod tests {
         assert_eq!(v.jti, "jti-1");
         assert_eq!(v.htu, HTU);
         assert!(!v.jkt.is_empty());
+    }
+
+    #[test]
+    fn verifies_a_proof_whose_embedded_jwk_carries_its_own_kid() {
+        // Regression (Google Wallet interop): the `jwk` header parameter is an
+        // RFC 7517 JWK (RFC 9449 §4.2, L407-409), and `kid` is an optional
+        // member of any JWK -- so a wallet may legitimately label the key it
+        // embedded. RFC 9449 §4.3 check 6 (L500) asks only that the signature
+        // verify "with the public key contained in the jwk JOSE Header
+        // Parameter"; no check anywhere requires a `kid` on the outer JWS
+        // header. josekit's `verifier_from_jwk` nonetheless copies the JWK's
+        // `kid` into the verifier, after which `decode_with_verifier` demanded
+        // a matching header `kid` and failed with "The JWS kid header claim is
+        // required" -- rejecting a conformant proof. Same defect, and same
+        // fix, as `proof.rs`'s embedded-jwk-with-kid regression test.
+        let kp = keypair();
+
+        // The kid goes on the *embedded public* JWK only. Signing with a
+        // kid-bearing private JWK would be a different (and vacuous) test:
+        // josekit's `serialize_compact` copies a signer's kid onto the header,
+        // which is precisely the header kid whose absence this reproduces.
+        let mut public_jwk = kp.to_jwk_public_key();
+        public_jwk.set_key_id("google-wallet-key-label");
+
+        let mut header = JwsHeader::new();
+        header.set_token_type("dpop+jwt");
+        header.set_jwk(public_jwk);
+
+        let mut payload = JwtPayload::new();
+        payload.set_claim("htm", Some("POST".into())).unwrap();
+        payload.set_claim("htu", Some(HTU.into())).unwrap();
+        payload.set_claim("iat", Some(NOW.into())).unwrap();
+        payload.set_claim("jti", Some("jti-kid".into())).unwrap();
+
+        let signer = ES256.signer_from_jwk(&kp.to_jwk_private_key()).unwrap();
+        let proof = jwt::encode_with_signer(&payload, &header, &signer).unwrap();
+
+        // Guard the setup itself: if josekit ever put a kid on the outer
+        // header, this test would pass for the wrong reason.
+        let header_json: serde_json::Value = serde_json::from_slice(
+            &B64URL
+                .decode(proof.split('.').next().unwrap())
+                .expect("header is base64url"),
+        )
+        .expect("header is JSON");
+        assert!(
+            header_json.get("kid").is_none(),
+            "the outer JWS header must carry no kid for this regression to be meaningful"
+        );
+        assert_eq!(header_json["jwk"]["kid"], "google-wallet-key-label");
+
+        let v = verify_dpop_proof(&proof, "POST", HTU, None, NOW, MAX_AGE, None)
+            .expect("a kid on the embedded jwk must not require a kid on the JWS header");
+        assert_eq!(v.jti, "jti-kid");
     }
 
     #[test]

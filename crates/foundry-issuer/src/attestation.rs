@@ -340,11 +340,16 @@ fn validate_client_attestation_pop_jwt(
     // against the public key in the Client Attestation JWT's cnf.jwk claim.
     // §9 rule 6's "cnf is not a private key" precondition is enforced upstream
     // in validate_wallet_attestation_jwt, where the cnf.jwk is first parsed.
-    let verifier = ES256.verifier_from_jwk(&attestation.cnf_jwk).map_err(|e| {
-        IssuanceError::InvalidClient(format!(
+    //
+    // Via `es256_verifier_from_inline_jwk` because the key is inline: a `kid`
+    // on the cnf.jwk must not become a demand for a `kid` on the PoP's own
+    // header, which ABCA never asks for. See `crate::jose`.
+    let verifier =
+        crate::jose::es256_verifier_from_inline_jwk(&attestation.cnf_jwk).map_err(|e| {
+            IssuanceError::InvalidClient(format!(
             "client attestation pop: unable to build a verifier from the attestation's cnf.jwk: {e}"
         ))
-    })?;
+        })?;
     josekit::jwt::decode_with_verifier(pop_jwt, &verifier).map_err(|e| {
         IssuanceError::InvalidClient(format!(
             "client attestation pop: signature verification failed: {e}"
@@ -2134,6 +2139,43 @@ mod tests {
         assert_eq!(claims.iss, POP_TEST_SUB);
         assert_eq!(claims.jti, "jti-1");
         assert_eq!(claims.iat, now);
+    }
+
+    #[test]
+    fn accepts_a_pop_whose_attestation_cnf_jwk_carries_its_own_kid() {
+        // Regression (same defect class as `dpop.rs` and `proof.rs`): a Client
+        // Attestation's `cnf.jwk` is an RFC 7517 JWK, so it may carry a `kid`
+        // labelling the wallet instance key. ABCA §5.2 r3 / §9 rule 7 require
+        // only that the PoP verify against that key -- nothing requires the
+        // PoP's own JWS header to repeat the label. josekit's
+        // `verifier_from_jwk` copies the cnf.jwk's `kid` into the verifier,
+        // which then rejected such a PoP with "The JWS kid header claim is
+        // required".
+        let (mut attestation, signer) = pop_attestation_and_signer();
+        attestation.cnf_jwk.set_key_id("wallet-instance-key-1");
+
+        let now = now_secs();
+        // `pop_header` builds the header by hand and never emits a kid.
+        let header = pop_header("ES256", "oauth-client-attestation-pop+jwt");
+        let payload = pop_payload(
+            POP_TEST_SUB,
+            serde_json::json!(POP_TEST_AUD),
+            "jti-kid",
+            now,
+        );
+        let jwt = sign_pop(&header, &payload, &signer);
+
+        let claims = validate_client_attestation_pop_jwt(
+            &jwt,
+            &attestation,
+            POP_TEST_AUD,
+            now,
+            300,
+            Mode::Disabled,
+            &challenge_secret(),
+        )
+        .expect("a kid on the attestation's cnf.jwk must not require a kid on the PoP header");
+        assert_eq!(claims.jti, "jti-kid");
     }
 
     #[test]
