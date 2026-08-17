@@ -807,6 +807,32 @@ async fn token_handler(
         ath: None,
     };
 
+    // Google Wallet VCI 1.0 Profile (vendor accommodation, root AGENTS.md
+    // §4.4): the extension reuses the Credential Request decryption keys
+    // verbatim, so no second key configuration exists to drift from this one.
+    // `enc_values_supported` likewise comes from `request_encryption` -- the
+    // same list published in issuer metadata, so a wallet never has to guess
+    // which content-encryption algorithms this endpoint accepts.
+    //
+    // `Config::validate()` already forbids enabling the extension without
+    // `request_encryption`, so an empty slice here can only accompany
+    // `Mode::Disabled`, where it is never read.
+    let allowed_enc: &[String] = state
+        .config
+        .issuer
+        .request_encryption
+        .as_ref()
+        .map(|re| re.enc_values_supported.as_slice())
+        .unwrap_or(&[]);
+    let encrypted_code = foundry_issuer::EncryptedCodePolicy {
+        cfg: &state.config.issuer.encrypted_pre_authorized_code,
+        decryption_keys: &state.request_decryption_keys,
+        allowed_enc,
+        // The same `htu` the DPoP proof above is bound to, derived from
+        // configuration rather than the Host header for the identical reason.
+        token_endpoint: &htu,
+    };
+
     let res = foundry_issuer::handle_token_request(
         state.storage.as_ref(),
         &req,
@@ -818,6 +844,8 @@ async fn token_handler(
         state.nonce_secret.as_ref(),
         &issuer_identifier,
         now,
+        &encrypted_code,
+        state.config.issuer.access_token_ttl_secs,
     )
     .await
     .map_err(|e| token_error_response(&state, now, &e))?;
