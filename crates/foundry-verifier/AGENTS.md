@@ -115,12 +115,13 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   [AGENTS.md](../../AGENTS.md) §4.1.
 - **`VerificationResult` and friends are `utoipa::ToSchema`** — changing them
   changes `openapi-wallet.json` — root [AGENTS.md](../../AGENTS.md) §6.
-- **Gates are scoped by default:** per task, run `cargo test -p foundry-verifier
-  -p foundry` (the integration suite lives in `crates/foundry/tests`), plus
-  `cargo clippy -p foundry-verifier --all-targets -- -D warnings` and
-  `cargo fmt --check`. Save `cargo test --workspace` for the end of a
-  development cycle or when unsure of the blast radius — **not** between tasks.
-  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
+- **One gate, always the whole workspace:** `cargo fmt`, then
+  `cargo nextest run --workspace --no-fail-fast --status-level fail`, then
+  `cargo clippy --workspace --all-targets -- -D warnings`. There is no scoped
+  tier — the suite runs in seconds, so running less than all of it only reduces
+  coverage. It also means this crate's flow coverage in `crates/foundry/tests`
+  is never something you have to remember to include. **Do not use
+  `cargo test`.** Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 
@@ -132,8 +133,9 @@ most relevant: `wallet_verification.rs`, `e2e_full_flow.rs`,
 `wallet_status_list_route.rs`.
 
 ```bash
-cargo test -p foundry-verifier
-cargo test -p foundry --test wallet_verification
+cargo nextest run --workspace --no-fail-fast --status-level fail  # the gate (§5.1)
+cargo nextest run -p foundry-verifier                             # unit loop, while iterating
+cargo nextest run -p foundry --test wallet_verification           # verification flow only
 ```
 
 ## Gotchas

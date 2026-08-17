@@ -219,136 +219,86 @@ section of [`README.md`](README.md).
 
 ## 5. Verification Gates
 
-The workspace suite is **deliberately slow** (real crypto, subprocess E2E flows,
-status-list fixtures). Testing is therefore **scoped by default**; a full run is
-a deliberate checkpoint, not a reflex. Running `--workspace` after every edit is
-a process defect, not diligence.
+**`cargo nextest run` is this repository's test runner. Do not use `cargo test`.**
 
-### 5.1 Scoped Gate — the default, at every task boundary
+The full workspace suite runs in **seconds** under nextest — every crate, every
+test, in about the time a single scoped run used to spend linking. There is
+therefore **no scoped gate and no cheaper tier**: always run the whole
+workspace. Hand-picking a subset of crates to save time is no longer a saving,
+only reduced coverage.
 
-For **each individual task**, run only what the change can plausibly break:
+Install it with `cargo install cargo-nextest --locked` (see
+<https://nexte.st/docs/installation/>).
 
-```bash
-cargo test -p <crate>                                # every crate you touched
-cargo test -p <dependent>                            # + affected dependents (§5.2)
-cargo clippy -p <crate> --all-targets -- -D warnings
-cargo fmt --check                                    # cheap; keep it workspace-wide
-```
+### 5.1 The Gate
 
-This — and only this — is the gate for finishing a task, marking a `TaskUpdate`
-as `completed`, or handing work to a per-task reviewer. **Do not run
-`cargo test --workspace` at the end of, or between, individual tasks.**
-
-**Don't re-run a gate that already ran.** If the task immediately before this
-one already ran the scoped gate for the crates you're about to touch and it
-came back clean, carry that result forward — do not re-run it again at the
-start of the next task as a reflexive sanity check. Only run it again when the
-new task touches crates the prior gate didn't cover, or when you've made
-further edits since it last ran.
-
-### 5.2 Which Crates Count as "Affected"
-
-Derive the set from the layering in §3: a change can only break the crate itself
-and the crates **below** it in that diagram.
-
-| You touched | Also test |
-|---|---|
-| `foundry` | — (nothing depends on it) |
-| `foundry-issuer` / `foundry-verifier` | `foundry` (integration suite) |
-| `foundry-sd-jwt-vc` / `foundry-mdoc` | whichever engine consumes the changed format (`foundry-issuer` and/or `foundry-verifier`), then `foundry` |
-| `foundry-core` | the direct consumers of the changed module only — e.g. `crypto/` → both engines; `storage/` → `foundry`; `status_list` → `foundry-verifier` + `foundry` |
-| `crates/foundry/tests/` | `cargo test -p foundry` (narrow further with `--test <file>` while iterating) |
-
-Purely local edits — a doc comment, a test-only helper, a rename confined to one
-private module — need only the owning crate.
-
-### 5.3 Full Gate — reserved for these cases
+Run this before finishing a task, marking a `TaskUpdate` as `completed`,
+handing work to a reviewer, committing, opening a PR, or merging — every time,
+without tiers or exceptions:
 
 ```bash
-cargo fmt                                                    # apply formatting first
-cargo fmt --check                                            # verify (no-op after the line above)
-cargo test --workspace
-cargo test -p foundry --test e2e_full_flow -- --ignored      # E2E: only here, never in the scoped gate
+cargo fmt
+cargo nextest run --workspace --no-fail-fast --status-level fail
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Run this, **once**, when either of the following holds:
+- `cargo fmt` **applies** formatting rather than checking it, and runs first, so
+  the suite runs against an already-formatted tree instead of failing on style
+  alone.
+- `--no-fail-fast` reports *every* failure instead of stopping at the first, so
+  a single run tells you everything there is to fix.
+- `--status-level fail` prints only failures plus a one-line summary. A green
+  full-workspace run is roughly ten lines, so nothing is lost to the agent
+  harness's output truncation and there is no need to capture it to disk. Drop
+  the flag when you want to watch individual tests go by.
 
-- **The user explicitly asks for it.**
-- **You are finishing a development branch** — every task of a plan or feature
-  is done and you are about to open a PR, request the final whole-branch
-  review, or merge.
+A run ends with one line naming the totals, in this shape:
 
-These are the **only** two triggers. A scoped run passing is not, by itself,
-a reason to escalate — "not confident" or "just to be safe" is not an
-exception. If a scoped result feels insufficient (a cross-cutting refactor, a
-`foundry-core` signature change, a shared trait or serde shape, a scoped run
-that failed in a way that hints at wider breakage), the answer is to **widen
-the scoped set** — one more `-p <crate>`, or the layer above per §5.2 — not to
-escalate to `--workspace`. If widening repeatedly still leaves you unsure,
-say so to the user rather than defaulting to a full run.
-
-The E2E suite (`e2e_full_flow`, `#[ignore]`d by default — see
-[`crates/foundry/tests/AGENTS.md`](crates/foundry/tests/AGENTS.md)) follows
-the same rule: it runs **only** as part of this Full Gate, never inside a
-scoped, per-task gate.
-
-Always run `cargo fmt` (applying, not just checking) before the rest of this
-gate, so the full suite runs against an already-formatted tree instead of
-failing — or silently drifting — on style alone.
-
-### 5.4 Never Re-Run the Full Suite After Merging
-
-Once work has been merged back to `main`, **do not run `cargo test --workspace`
-again to "confirm" the merge.** The full gate of §5.3 was already run once, at
-the end of the development cycle, as part of the final review / pre-PR
-checkpoint. Re-running it post-merge re-pays the most expensive gate in the
-repository for information already established.
-
-- After a merge, the correct action is **none** — report the gate that was
-  already run (§5.5 honesty rule) and stop.
-- The only exception is a merge that **actually changed the tree beyond the
-  reviewed branch** — a non-trivial conflict resolution, or `main` having moved
-  in a way that touches the same crates. Then run the **scoped** gate of §5.1
-  over the conflicted crates, not the full suite.
-- "Just to be safe" is not an exception. If the branch was green and the merge
-  was a fast-forward or a clean auto-merge, there is nothing new to verify.
-
-### 5.5 Honesty Rule
-
-Never claim work is complete, fixed, or passing without having run the gate that
-actually applies and seen it pass. When reporting, **name the gate you ran** —
-e.g. "scoped: `cargo test -p foundry-verifier -p foundry` green" — so the reader
-knows what was and was not covered. Claiming a full gate you did not run is
-worse than running none.
-
-### 5.6 Avoid Truncated Output on Large Runs (agent-harness note)
-
-The agent harness's shell tool truncates command output to roughly the last
-2000 lines / 50KB. `cargo test --workspace` routinely exceeds both — a plain
-`cargo test --workspace 2>&1 | tail -N` can silently drop an earlier binary's
-result, including a `FAILED`, off the top of what you actually see. This has
-happened in this repository. Never rely on a bare `tail` of a full-workspace
-run as your only evidence of green.
-
-Instead, capture the whole run to disk and then grep it, so nothing is lost
-to the harness's truncation even if a single terminal view would be:
-
-```bash
-cargo test --workspace 2>&1 | tee /tmp/test-output.log
-grep -c "FAILED" /tmp/test-output.log        # 0 (or no output) means none found
-grep "^test result:" /tmp/test-output.log    # one short line per binary — always fits
+```
+     Summary [   <elapsed>] <N> tests run: <N> passed, <M> skipped
 ```
 
-`tee` preserves the complete log on disk even when the tool's own display of
-it is truncated. `grep "^test result:"` is the cheap, complete summary: one
-line per test binary (`ok`/failed/ignored counts), reliably short enough to
-read in full, so every binary's outcome is visible even when the raw stdout
-is not. Apply the same pattern to `cargo clippy --workspace --all-targets`
-and any other command whose output can plausibly exceed the truncation
-limit. This is what "seen it pass" in §5.5 actually requires for a
-full-workspace run — every binary's result line, not just whatever the last
-N lines happened to contain.
+That line is the evidence §5.3 asks for.
+
+### 5.2 The E2E Suite
+
+`e2e_full_flow` is `#[ignore]`d — it binds real OS ports and drives subprocess
+flows, so it stays out of the default run (see
+[`crates/foundry/tests/AGENTS.md`](crates/foundry/tests/AGENTS.md)). nextest
+skips ignored tests unless asked for them explicitly:
+
+```bash
+cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
+```
+
+Run it before opening a PR or merging — not on every task. To run the whole
+workspace including ignored tests, use `--run-ignored all`.
+
+### 5.3 Honesty Rule
+
+Never claim work is complete, fixed, or passing without having run the gate and
+seen it pass. When reporting, **name what you ran and quote the summary line**
+— e.g. "`cargo nextest run --workspace`: all passed, ignored tests skipped" —
+so the reader knows what was and was not covered. Claiming a gate you did not run is
+worse than running none.
+
+### 5.4 nextest Gotchas
+
+- **nextest does not run doctests.** `cargo nextest run` silently ignores them.
+  Nothing is lost today — the only fenced blocks in this workspace's doc
+  comments are ` ```text ` and ` ```cddl `, which rustdoc never compiles. But if
+  you write a real Rust doctest, running it is on you: add `cargo test --doc`,
+  because nothing else will.
+- **Every test gets its own process.** A test can no longer depend on a sibling
+  in the same binary having initialised global state first, and process-global
+  caches are no longer shared between tests. This is why nextest is structurally
+  immune to the class of flake recorded in
+  `docs/superpowers/changes/2026-08-02-tracing-callsite-interest-flake.md` — and
+  equally, why a test that silently *relied* on such sharing will now fail
+  honestly.
+- **Filters are positional; there is no `--` separator.** Write
+  `cargo nextest run -p foundry --test wallet_issuance full_issuance_flow_end_to_end`.
+- **`--nocapture` is spelled `--no-capture`.**
 
 ---
 
@@ -384,12 +334,14 @@ When executing plans using subagents (e.g. via
 `AGENTS.md` first** — it starts with fresh context and will not have this root
 file's routing table.
 
-**Tell each implementer and per-task reviewer which gate applies.** They run the
-**scoped** gate of §5.1 — the touched crate plus its affected dependents — and
-must not run `cargo test --workspace`. The full gate of §5.3 is run exactly
-once, by the `final-reviewer` at the end of the branch (or by you, before
-opening the PR). A subagent that reports "workspace green" per task has burned
-minutes it should not have.
+**Tell every implementer and reviewer that the gate is §5.1, and that the runner
+is `cargo nextest run`, not `cargo test`.** There is one gate and it is the
+whole workspace — a subagent has no cheaper tier to pick and no affected-crate
+set to derive. A subagent starting with fresh context will reach for
+`cargo test -p <crate>` out of habit unless told otherwise, and will then be
+waiting minutes for an answer that nextest returns in seconds. The
+`final-reviewer` additionally runs the E2E suite of §5.2 at the end of the
+branch.
 
 ### Task Tracking (`pi-tasks`)
 

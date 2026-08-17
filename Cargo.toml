@@ -49,7 +49,7 @@ utoipa-swagger-ui = { version = "6", features = ["axum"] }
 # Most of the debug-info bloat (and the linker time it costs) comes from
 # large dependency graphs (openssl-sys, sqlx, tokio, rustls, ...), not from
 # our own crates. Workspace crates keep full debug info (no override here),
-# so `cargo test`/`cargo build` still give useful backtraces and line info
+# so test and build runs still give useful backtraces and line info
 # for foundry's own code, while dependency debug info is dropped to speed
 # up compilation and linking of test binaries.
 [profile.dev.package."*"]

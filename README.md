@@ -115,7 +115,7 @@ docker inspect foundry:latest --format '{{.Architecture}}'   # must print: amd64
 `containers.digitallabor.dev/foundry/foundry` on a GitHub-hosted
 `ubuntu-latest` runner — genuinely amd64, not emulated, which is exactly why
 this exists (see the segfault discussion above). It runs `cargo fmt --check` +
-`cargo clippy --workspace --all-targets -- -D warnings` + `cargo test
+`cargo clippy --workspace --all-targets -- -D warnings` + `cargo nextest run
 --workspace` first and only builds/pushes if those pass — mirroring the
 workspace-wide gates this repo requires before any change is considered done
 (see the root `AGENTS.md`).
@@ -450,7 +450,7 @@ scripted equivalent that needs no wallet at all, the end-to-end test boots the
 real binary and drives both flows over HTTP:
 
 ```bash
-cargo test -p foundry --test e2e_full_flow -- --ignored
+cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ```
 
 See [End-to-End Test](#end-to-end-test-real-subprocess-issue--verify--revoke--re-verify)
@@ -1001,11 +1001,11 @@ A full end-to-end test spawns the real `foundry` binary (`quickstart` then
 creates a credential offer, issues an SD-JWT VC `pid` credential, verifies it
 via OpenID4VP (happy path), revokes it via `foundry status-list set`, and
 re-verifies to confirm `verified: false` with `status_check` failing. It is
-excluded from the default `cargo test --workspace` run (slower, binds real OS
-ports) — run it explicitly:
+`#[ignore]`d, so it is excluded from the default `cargo nextest run --workspace`
+run (slower, binds real OS ports) — run it explicitly:
 
 ```bash
-cargo test -p foundry --test e2e_full_flow -- --ignored
+cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ```
 
 See `docs/superpowers/specs/2026-07-23-foundry-e2e-full-flow-design.md` for
@@ -1013,21 +1013,41 @@ the design rationale.
 
 ## Testing
 
-Run all unit and integration tests across the workspace:
+Foundry's test runner is [cargo-nextest](https://nexte.st). Install it with:
 
 ```bash
-cargo test --workspace
+cargo install cargo-nextest --locked
 ```
 
-Run tests for a specific crate:
+Run all unit and integration tests across the workspace — this is the gate, and
+it takes seconds, so there is no reason to run anything narrower before
+committing:
 
 ```bash
-cargo test -p foundry-issuer
-cargo test -p foundry-sd-jwt-vc
-cargo test -p foundry-mdoc
-cargo test -p foundry-core
-cargo test -p foundry
+cargo nextest run --workspace --no-fail-fast --status-level fail
 ```
+
+`--no-fail-fast` reports every failure rather than stopping at the first;
+`--status-level fail` prints only failures plus a one-line summary. Drop both to
+watch every test go by.
+
+While iterating you can narrow to a single crate, a single test binary, or a
+single test — note that nextest takes filters positionally, with no `--`
+separator:
+
+```bash
+cargo nextest run -p foundry-issuer
+cargo nextest run -p foundry-sd-jwt-vc
+cargo nextest run -p foundry-mdoc
+cargo nextest run -p foundry-core
+cargo nextest run -p foundry
+cargo nextest run -p foundry --test wallet_issuance full_issuance_flow_end_to_end
+```
+
+> **nextest does not run doctests.** This workspace has none — the only fenced
+> blocks in its doc comments are ` ```text ` and ` ```cddl `, which rustdoc never
+> compiles — so nothing is currently lost. If you add a real Rust doctest, run
+> `cargo test --doc` as well; nextest will not.
 
 Run code formatting and linter checks:
 
@@ -1048,19 +1068,17 @@ and the verdicts are backed by four test suites:
 
 | Command | Covers |
 | --- | --- |
-| `cargo test -p foundry-issuer --test conformance_vci` | OpenID4VCI issuance engine (offers, `/token`, `/nonce`, `/credential`, holder proofs, attestations, issuer metadata) |
-| `cargo test -p foundry-verifier --test conformance_vp` | OpenID4VP verification engine (request objects, client identifier prefixes, DCQL, response encryption) |
-| `cargo test -p foundry --test conformance_http` | HTTP boundary in `crates/foundry/src/server.rs` (status codes, `Content-Type`, redirects, error bodies) |
-| `cargo test -p foundry --test conformance_report` | The report itself — parses the Markdown and enforces its internal consistency |
+| `cargo nextest run -p foundry-issuer --test conformance_vci` | OpenID4VCI issuance engine (offers, `/token`, `/nonce`, `/credential`, holder proofs, attestations, issuer metadata) |
+| `cargo nextest run -p foundry-verifier --test conformance_vp` | OpenID4VP verification engine (request objects, client identifier prefixes, DCQL, response encryption) |
+| `cargo nextest run -p foundry --test conformance_http` | HTTP boundary in `crates/foundry/src/server.rs` (status codes, `Content-Type`, redirects, error bodies) |
+| `cargo nextest run -p foundry --test conformance_report` | The report itself — parses the Markdown and enforces its internal consistency |
 
-All four are ordinary integration tests, so `cargo test --workspace` already
-includes them. To run just the conformance suites:
+All four are ordinary integration tests, so `cargo nextest run --workspace`
+already includes them. To run just the conformance suites, select all four
+binaries with one nextest filterset:
 
 ```bash
-cargo test -p foundry-issuer   --test conformance_vci \
-  && cargo test -p foundry-verifier --test conformance_vp \
-  && cargo test -p foundry          --test conformance_http \
-  && cargo test -p foundry          --test conformance_report
+cargo nextest run -E 'binary(/^conformance_/)'
 ```
 
 #### Known gaps are `#[ignore]`d and expected to fail
@@ -1073,19 +1091,26 @@ marked `#[ignore]` with a reason string citing its gap ID:
 ```
 
 These are **deliberately failing tests describing behaviour foundry does not yet
-have** — not broken tests. A default `cargo test` run skips them, which is why
+have** — not broken tests. A default `cargo nextest run` skips them, which is why
 the suite is green. Running them surfaces the open gaps, and they *should* fail:
 
 ```bash
 # Expect failures — at least one per unclosed gap
-cargo test --workspace -- --ignored
+cargo nextest run --workspace --run-ignored ignored-only
 ```
 
-To review the open gaps *without* running them, note that a normal (green) run
-already prints each reason string next to the skipped test:
+To enumerate the gap tests *without* running them:
 
 ```bash
-cargo test --workspace 2>&1 | grep 'ignored,'
+cargo nextest list --workspace --run-ignored ignored-only
+```
+
+Unlike `cargo test`, nextest does **not** echo each `#[ignore = "..."]` reason
+string, so that listing gives you test names only. Most names carry their gap ID
+(`gap_vci_12_…`); to read the reasons themselves, go to the source:
+
+```bash
+rg -n '#\[ignore = ' crates/*/tests/ crates/foundry/tests/
 ```
 
 Two things to know when reading those results:
@@ -1111,7 +1136,7 @@ passing), and that the summary counts match the clause inventory.
 2. Remove the `#[ignore]` attribute — the test should now pass.
 3. Update that clause's row and the summary counts in
    `docs/conformance/openid4vc-conformance.md`, and drop its Gap Register entry.
-4. Run `cargo test -p foundry --test conformance_report` to confirm the report is
+4. Run `cargo nextest run -p foundry --test conformance_report` to confirm the report is
    still self-consistent.
 
 The report is a living document, not a historical record — see

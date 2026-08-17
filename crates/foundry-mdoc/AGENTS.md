@@ -63,7 +63,10 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 - Expiry rejection (MSO validity window).
 - Untrusted issuer root rejection.
 
-**Run**: `cargo test -p foundry-mdoc`
+**Run**: `cargo nextest run -p foundry-mdoc` while iterating. The gate is always
+the whole workspace — `cargo nextest run --workspace --no-fail-fast
+--status-level fail` — per root [AGENTS.md](../../AGENTS.md) §5. Do not use
+`cargo test`.
 
 ---
 

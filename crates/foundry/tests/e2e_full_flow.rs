@@ -9,7 +9,8 @@
 //! literal `"1"` today (see `foundry-issuer/src/credential.rs`), not the
 //! credential type id.
 //!
-//! Run with: `cargo test -p foundry --test e2e_full_flow -- --ignored`
+//! Run with:
+//! `cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only`
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;

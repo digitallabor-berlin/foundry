@@ -89,13 +89,13 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **Never widen a status/trust helper into reporting success it did not verify.**
   `foundry-verifier` derives its `verified` verdict from these results — full
   rule: root [AGENTS.md](../../AGENTS.md) §4.2.
-- **Gates are scoped by default:** per task, run `cargo test -p foundry-core`
-  plus the direct consumers of the module you changed (`crypto/` → both engines;
-  `storage/` → `foundry`; `status_list` → `foundry-verifier` + `foundry`), with
-  `cargo clippy -p foundry-core --all-targets -- -D warnings` and
-  `cargo fmt --check`. `cargo test --workspace` is for the end of a development
-  cycle or when a change is cross-cutting (trait/type signature) — **not**
-  between tasks. Full rule: root [AGENTS.md](../../AGENTS.md) §5.
+- **One gate, always the whole workspace:** `cargo fmt`, then
+  `cargo nextest run --workspace --no-fail-fast --status-level fail`, then
+  `cargo clippy --workspace --all-targets -- -D warnings`. There is no scoped
+  tier and no affected-crate set to derive — the suite runs in seconds, so
+  running less than all of it only reduces coverage. This matters most here:
+  `foundry-core` sits under every other crate. **Do not use `cargo test`.**
+  Full rule: root [AGENTS.md](../../AGENTS.md) §5.
 
 ## Tests
 
@@ -109,7 +109,8 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
     `bad-missing-keyref.yaml`.
 
 ```bash
-cargo test -p foundry-core
+cargo nextest run --workspace --no-fail-fast --status-level fail  # the gate (§5.1)
+cargo nextest run -p foundry-core                                 # narrow, while iterating
 ```
 
 ## Gotchas

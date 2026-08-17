@@ -63,7 +63,10 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 - KB audience mismatch.
 - Disclosure tampering (detected via sd_hash).
 
-**Run**: `cargo test -p foundry-sd-jwt-vc`
+**Run**: `cargo nextest run -p foundry-sd-jwt-vc` while iterating. The gate is
+always the whole workspace — `cargo nextest run --workspace --no-fail-fast
+--status-level fail` — per root [AGENTS.md](../../AGENTS.md) §5. Do not use
+`cargo test`.
 
 ---
 
