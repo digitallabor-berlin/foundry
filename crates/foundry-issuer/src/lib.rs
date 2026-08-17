@@ -5,6 +5,7 @@ pub mod create_offer;
 pub mod credential;
 pub mod display_metadata;
 pub mod dpop;
+pub mod encrypted_pre_auth;
 pub mod error;
 pub mod keystore_proof;
 pub mod metadata;
