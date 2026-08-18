@@ -252,7 +252,9 @@ pub async fn verify_vp_response(
     }
 
     match do_verify_vp_response(config, tx, encrypted_jwe_str, resolver).await {
-        Ok(result) => {
+        Ok(outcome) => {
+            let VerifyOutcome { result, deferred } = outcome;
+
             tx.state = if result.verified {
                 VerificationState::Verified
             } else {
@@ -288,7 +290,17 @@ pub async fn verify_vp_response(
             }
 
             tx.result = Some(result.clone());
-            Ok(result)
+
+            match deferred {
+                None => Ok(result),
+                // The result is already persisted, so the operator keeps every
+                // other credential's verdict while the wallet still gets the
+                // retryable status code.
+                Some(err) => {
+                    tx.state = VerificationState::Failed;
+                    Err(err)
+                }
+            }
         }
         Err(err) => {
             tx.state = VerificationState::Failed;
@@ -861,13 +873,30 @@ fn check_requested_credentials_answered(
     }
 }
 
+/// What `do_verify_vp_response` produces: always a result, plus optionally an
+/// error that still has to reach the wallet as a status code.
+///
+/// A status-list fetch failure is a network fault, so root AGENTS.md §4.3 makes
+/// it HTTP 502 rather than a policy `passed: false`. Propagating it with `?` from
+/// inside the per-credential loop would throw away every check already
+/// collected, and the wrapper's `Err` arm would rebuild `tx.result` from
+/// scratch -- leaving the operator with none of the other credentials' verdicts,
+/// which is the whole reason a precise 502 is worth having. So the error travels
+/// beside the result instead of replacing it.
+struct VerifyOutcome {
+    result: VerificationResult,
+    /// Only ever `StatusUnavailable`. Every other error still returns `Err`
+    /// directly, because nothing partial is worth reporting for those.
+    deferred: Option<VerificationError>,
+}
+
 #[tracing::instrument(skip_all)]
 async fn do_verify_vp_response(
     config: &Config,
     tx: &VerificationTransaction,
     encrypted_jwe_str: &str,
     resolver: &dyn StatusListResolver,
-) -> Result<VerificationResult, VerificationError> {
+) -> Result<VerifyOutcome, VerificationError> {
     // 1. JWE Decryption
     let jwk_str = serde_json::to_string(&tx.ephem_private_jwk)
         .map_err(|e| VerificationError::Decryption(e.to_string()))?;
@@ -1007,19 +1036,27 @@ async fn do_verify_vp_response(
         credentials.push(credential);
     }
 
-    // Today's behaviour: propagate. Task 5 makes this non-lossy by carrying the
-    // partial result alongside the error.
-    if let Some(err) = deferred {
-        return Err(err);
-    }
-
     // 4. Set-level policy: did every requested credential query get answered?
     checks.push(check_requested_credentials_answered(
         &tx.dcql_query,
         &credentials,
     ));
 
-    // 5. Overall verdict: the conjunction over EVERY check, at both levels
+    // 5. A credential whose status fetch was unavailable pushed NO status_check
+    //    record, because unavailability is not a policy failure. On its own that
+    //    leaves the conjunction computing `true` and persists `verified: true` on
+    //    a transaction that returned 502 -- a lie the admin console would render
+    //    faithfully. Record the fault as a check so the verdict stays derived and
+    //    honest, exactly as the wrapper's error arm already does.
+    if let Some(ref err) = deferred {
+        checks.push(CheckResult {
+            check: check_name_for(err).to_string(),
+            passed: false,
+            detail: Some(foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX)),
+        });
+    }
+
+    // 6. Overall verdict: the conjunction over EVERY check, at both levels
     //    (root AGENTS.md §4.2). Derived, never assigned.
     let mut result = VerificationResult {
         verified: false,
@@ -1027,7 +1064,8 @@ async fn do_verify_vp_response(
         credentials,
     };
     result.verified = result.derive_verified();
-    Ok(result)
+
+    Ok(VerifyOutcome { result, deferred })
 }
 
 #[cfg(test)]
@@ -2631,6 +2669,123 @@ mod tests {
         assert!(
             !check.passed,
             "an unreadable query must fail closed, never pass"
+        );
+    }
+
+    /// An unreachable status list keeps its HTTP 502 -- "I could not determine
+    /// whether this is revoked" is not "this is revoked", and collapsing the two
+    /// would invite a relying party to treat an unreachable list as a clean bill
+    /// of health (root AGENTS.md §4.3).
+    ///
+    /// But it must not be lossy: `tx.result` has to retain the OTHER credential's
+    /// verdict, which is the entire reason for keeping the 502 precise. And the
+    /// persisted `verified` must be `false` -- the trap here is that an
+    /// unavailable status pushes NO `status_check` record, so a naive
+    /// `all(passed)` computes `true` and persists `verified: true` on a
+    /// transaction that just returned 502.
+    ///
+    /// `MockResolver { token: None }` already fails every fetch with
+    /// `StatusUnavailable`, so it *is* the unreachable-endpoint resolver; a
+    /// separate type would only duplicate it.
+    #[tokio::test]
+    async fn an_unavailable_status_list_returns_502_without_discarding_other_credentials() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+
+        // `pid` carries a status claim, so its check hits the failing resolver.
+        let (holder_signer, holder_pub) = holder();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let pid_claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: Some(7),
+            status_list_uri: Some("https://localhost:8443/statuslist/1".to_string()),
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let pid_issuer =
+            build_sd_jwt_vc(pid_claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let client_id = expected_client_id(&config);
+        let pid = attach_kb_jwt(pid_issuer, &holder_signer, &client_id, &tx.nonce, None).unwrap();
+
+        // `diploma` carries no status claim, so its own checks all pass.
+        let diploma = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("degree", serde_json::json!("MSc"))],
+        );
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [pid], "diploma": [diploma]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
+            .await
+            .expect_err("an unreachable status list is a network fault, so HTTP 502");
+
+        assert!(
+            matches!(err, VerificationError::StatusUnavailable(_)),
+            "must stay StatusUnavailable so the HTTP layer maps it to 502, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("pid"),
+            "must name WHICH credential's status list was unreachable: {err}"
+        );
+
+        // Non-lossy: the operator keeps the other credential's verdict.
+        let persisted = tx.result.as_ref().expect(
+            "the error path must populate tx.result, or the admin console shows a \
+             bare red failure with no explanation",
+        );
+        assert_eq!(tx.state, VerificationState::Failed);
+        assert!(
+            !persisted.verified,
+            "verified must be false on a transaction that returned 502 -- an \
+             unavailable status pushes no status_check, so a naive all(passed) \
+             would have computed true here"
+        );
+        assert_eq!(
+            persisted.credentials.len(),
+            2,
+            "both credentials' records survive: {:?}",
+            persisted.credentials
+        );
+        let diploma_record = persisted
+            .credentials
+            .iter()
+            .find(|c| c.query_id == "diploma")
+            .expect("the healthy credential must still be reported");
+        assert!(
+            diploma_record.checks.iter().all(|c| c.passed),
+            "the healthy credential's own checks all passed: {:?}",
+            diploma_record.checks
+        );
+        assert!(
+            persisted
+                .checks
+                .iter()
+                .any(|c| c.check == "status_check" && !c.passed),
+            "the fault is recorded as a check so the verdict stays derived: {:?}",
+            persisted.checks
         );
     }
 
