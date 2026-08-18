@@ -420,6 +420,26 @@ vP5vWUL28PymIi7FZin3ExljHeW+S4QiHVbOkeJ0
         validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs()).unwrap();
     }
 
+    /// The regression this pins: `pki` stamps cert validity from the wall clock,
+    /// while callers pass their own `now_unix` here. A caller that captured
+    /// `now` just before generating a chain must still be able to validate it --
+    /// otherwise chain validation fails intermittently, whenever generation
+    /// crosses a second boundary, with a misleading "not yet valid".
+    #[test]
+    fn freshly_issued_chain_validates_against_a_slightly_lagging_clock() {
+        let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "issuer.dev.local",
+            &["issuer.dev.local".to_string()],
+            365,
+        )
+        .unwrap();
+        let store = TrustStore::from_pems(&[ca.cert_pem.clone().into_bytes()]).unwrap();
+        validate_chain(leaf.cert_pem.as_bytes(), &[], &store, now_secs() - 1).unwrap();
+    }
+
     #[test]
     fn self_signed_leaf_is_rejected() {
         let ca = new_ca("Foundry Dev Root CA", 3650).unwrap();

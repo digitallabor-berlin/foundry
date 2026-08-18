@@ -42,6 +42,21 @@ pub struct CertMaterial {
 }
 
 /// Generate a self-signed CA certificate (BasicConstraints CA; keyCertSign + cRLSign).
+/// How far `not_before` is backdated on every certificate this module generates.
+///
+/// A certificate stamped `not_before = now` is rejected by any verifier whose
+/// clock is even a fraction of a second behind the issuing instant -- and in
+/// X.509 the field has one-second resolution, so "a fraction behind" becomes "a
+/// whole second behind" whenever generation crosses a second boundary. Callers
+/// routinely capture a `now` timestamp and only *then* generate certificates
+/// (every attestation fixture in this workspace does), which makes that
+/// crossing a live race rather than a theoretical one.
+///
+/// Backdating is the standard X.509 answer to clock skew. Five minutes is
+/// generous enough to cover real skew between hosts while staying far shorter
+/// than any validity period this module issues.
+pub const CLOCK_SKEW_BACKDATE_SECS: i64 = 300;
+
 pub fn new_ca(common_name: &str, days: i64) -> Result<CertMaterial, CryptoError> {
     let key = KeyPair::generate().map_err(|e| CryptoError::Generation(e.to_string()))?;
 
@@ -53,7 +68,11 @@ pub fn new_ca(common_name: &str, days: i64) -> Result<CertMaterial, CryptoError>
     params.distinguished_name = dn;
 
     let now = OffsetDateTime::now_utc();
-    params.not_before = now;
+    // Backdated: a verifier whose clock lags the issuing instant -- including a
+    // caller that captured its own `now` moments before this call -- must still
+    // accept the certificate. See `CLOCK_SKEW_BACKDATE_SECS`. `not_after` is
+    // measured from `now`, so the validity period is not shortened.
+    params.not_before = now - Duration::seconds(CLOCK_SKEW_BACKDATE_SECS);
     params.not_after = now + Duration::days(days);
 
     let cert = params
@@ -93,7 +112,11 @@ pub fn issue_leaf(
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
 
     let now = OffsetDateTime::now_utc();
-    params.not_before = now;
+    // Backdated: a verifier whose clock lags the issuing instant -- including a
+    // caller that captured its own `now` moments before this call -- must still
+    // accept the certificate. See `CLOCK_SKEW_BACKDATE_SECS`. `not_after` is
+    // measured from `now`, so the validity period is not shortened.
+    params.not_before = now - Duration::seconds(CLOCK_SKEW_BACKDATE_SECS);
     params.not_after = now + Duration::days(days);
 
     let leaf = params
@@ -109,6 +132,48 @@ pub fn issue_leaf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    /// Every generated certificate must be usable by a verifier whose clock
+    /// lags the issuing instant. Without backdating, `not_before` lands on the
+    /// generation instant, so a caller that captured `now` a moment earlier --
+    /// the shape every attestation fixture here uses -- intermittently gets
+    /// "certificate is not yet valid" whenever key generation happens to cross
+    /// a second boundary.
+    #[test]
+    fn generated_certs_backdate_not_before_for_clock_skew() {
+        let ca = new_ca("Skew Test Root CA", 3650).unwrap();
+        let leaf = issue_leaf(
+            &ca.cert_pem,
+            &ca.key_pem,
+            "skew.example.com",
+            &["skew.example.com".to_string()],
+            365,
+        )
+        .unwrap();
+        // Captured AFTER generation, so it is an upper bound on the instant the
+        // certs were stamped.
+        let after_generation = now_unix();
+
+        for (label, pem) in [
+            ("ca", ca.cert_pem.as_bytes()),
+            ("leaf", leaf.cert_pem.as_bytes()),
+        ] {
+            let cert = crate::trust::parse_cert_pem(pem).unwrap();
+            let (not_before, _not_after) = crate::trust::validity_window(&cert);
+            assert!(
+                (not_before as i64) <= after_generation - CLOCK_SKEW_BACKDATE_SECS,
+                "{label}: not_before {not_before} is not backdated by at least \
+                 {CLOCK_SKEW_BACKDATE_SECS}s relative to generation ({after_generation})"
+            );
+        }
+    }
     use crate::crypto::{FileSigner, SignatureAlgorithm, Signer};
     use crate::trust::{is_self_signed, parse_cert_pem, san_dns_names};
 

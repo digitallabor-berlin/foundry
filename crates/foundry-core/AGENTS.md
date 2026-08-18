@@ -144,6 +144,22 @@ cargo nextest run -p foundry-core                                 # narrow, whil
   carry no EKU — setting a purpose would reject every Google Wallet chain.
   Covered by
   `real_android_attestation_chain_validates_against_the_configured_google_root`.
+- **`new_ca` / `issue_leaf` backdate `not_before` by
+  `pki::CLOCK_SKEW_BACKDATE_SECS` (300s).** Not cosmetic: cert validity comes
+  from the wall clock, while `validate_chain` compares it against a `now_unix`
+  the *caller* supplies. Callers routinely capture `now` and only then generate
+  the chain (every attestation fixture here does), so with `not_before = now`
+  the two differ by one whole second whenever generation crosses a second
+  boundary -- X.509 stores `not_before` at one-second resolution -- and OpenSSL
+  rejects a perfectly good chain as "not yet valid". That was a real
+  intermittent failure of `foundry-issuer`'s ABCA `client_id` tests, diagnosed
+  as an ABCA fault for a while because the surfaced error was a trust error
+  rather than the expected `InvalidClient`. Do not remove the backdate to
+  "tighten" validity; `not_after` is still measured from `now`, so nothing is
+  lengthened. Covered by
+  `generated_certs_backdate_not_before_for_clock_skew`,
+  `freshly_issued_chain_validates_against_a_slightly_lagging_clock`, and
+  `attestation_verifies_against_a_clock_lagging_cert_generation`.
 - **`X509VerifyFlags::PARTIAL_CHAIN` is required,** not optional: a configured
   trust anchor may be an intermediate rather than a self-signed root. Covered by
   `an_intermediate_pinned_as_the_anchor_validates_the_leaf`.

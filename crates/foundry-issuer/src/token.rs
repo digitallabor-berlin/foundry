@@ -2224,6 +2224,67 @@ mod tests {
         assert!(!res.access_token.is_empty());
     }
 
+    /// Regression for an intermittent failure of the ABCA `client_id` tests
+    /// below. They capture `now` and only *then* generate the attestation
+    /// chain, whose `notBefore` came from the wall clock with no backdating --
+    /// so whenever CA + leaf generation happened to cross a second boundary,
+    /// `notBefore` landed one second *after* `now` and `validate_chain`
+    /// rejected a perfectly good attestation as "not yet valid". The symptom
+    /// was never an ABCA fault: `client_id_matching_sub_and_iss_is_accepted`
+    /// failed its `expect`, and `client_id_mismatched_is_rejected` got a trust
+    /// error instead of `InvalidClient`.
+    ///
+    /// `foundry_core::pki::CLOCK_SKEW_BACKDATE_SECS` fixes it at the source.
+    /// This pins the symptom deterministically by verifying against a clock
+    /// that lags certificate generation, which is what that race produced by
+    /// chance.
+    #[tokio::test]
+    async fn attestation_verifies_against_a_clock_lagging_cert_generation() {
+        let storage = test_storage().await;
+        let tx = sample_tx("tx-pop-skew");
+        save_transaction_with_indices(&storage, &tx, 600, now_secs())
+            .await
+            .unwrap();
+
+        // One second behind the wall clock the certs below are stamped with --
+        // the deterministic form of the boundary crossing.
+        let now = now_secs() - 1;
+        let (attestation_jwt, pop_jwt, ca_pem) =
+            signed_attestation_and_pop(now, ISSUER_ID, "jti-skew-1");
+        let (_dir, mode) = required_attestation_mode(&ca_pem);
+
+        let req = TokenRequest {
+            grant_type: "urn:ietf:params:oauth:grant-type:pre-authorized_code".to_string(),
+            pre_authorized_code: Some("code-123".to_string()),
+            tx_code: Some("4242".to_string()),
+            code: None,
+            redirect_uri: None,
+            client_id: Some(WALLET_SUB.to_string()),
+            code_verifier: None,
+            encrypted_pre_authorized_code: None,
+        };
+
+        handle_token_request(
+            &storage,
+            &req,
+            &mode,
+            Some(&attestation_jwt),
+            Some(&pop_jwt),
+            &dpop_cfg(Mode::Optional),
+            &no_dpop(),
+            &test_nonce_secret(),
+            ISSUER_ID,
+            now,
+            &no_encrypted_code(),
+            600,
+        )
+        .await
+        .expect(
+            "a chain generated a moment after `now` must still validate; \
+             pki backdates notBefore for exactly this case",
+        );
+    }
+
     /// ABCA §6.3: a matching client_id must be accepted.
     #[tokio::test]
     async fn client_id_matching_sub_and_iss_is_accepted() {
