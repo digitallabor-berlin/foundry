@@ -19,11 +19,62 @@ pub struct CheckResult {
     pub detail: Option<String>,
 }
 
+/// One credential presented in a `vp_token`, with the checks run against it and
+/// the claims it disclosed.
+///
+/// Claims are held **per credential** and never merged into a single map.
+/// Merging is not a presentation choice but a correctness bug: `check_status`
+/// reads `status.status_list` out of the map it is handed, so a merged map lets
+/// one credential's `status` claim displace another's and runs a revocation
+/// check against the wrong status list -- silently, with a passing
+/// `status_check`. Two credentials disclosing the same claim name collide the
+/// same way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PresentedCredential {
+    /// The DCQL credential query id this presentation answered
+    /// (OpenID4VP 1.0 L1166).
+    pub query_id: String,
+    /// The credential format the answered query **declared**: `dc+sd-jwt` or
+    /// `mso_mdoc`. Never inferred from the payload's JSON type.
+    pub format: String,
+    /// This credential's disclosed claims only.
+    pub claims: serde_json::Value,
+    /// Checks scoped to this credential: its format-specific signature check,
+    /// `dcql_match`, `status_check`, and `transaction_data_binding` when the
+    /// request carried `transaction_data`.
+    pub checks: Vec<CheckResult>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationResult {
     pub verified: bool,
+    /// **Cross-cutting checks only** -- `jwe_decryption` and
+    /// `requested_credentials_answered`. Per-credential checks live in
+    /// `credentials[i].checks`.
     pub checks: Vec<CheckResult>,
-    pub claims: serde_json::Value,
+    /// One entry per credential the `vp_token` answered, in DCQL declaration
+    /// order (not `vp_token` key order, which depends on serde_json's map type).
+    pub credentials: Vec<PresentedCredential>,
+}
+
+impl VerificationResult {
+    /// Every `CheckResult` in this result: the top-level `checks` followed by
+    /// each credential's `checks`.
+    ///
+    /// Root AGENTS.md §4.2 requires `verified` to be the conjunction over **all**
+    /// of these. Iterating only `self.checks` is satisfiable while a
+    /// per-credential check fails, so use this rather than `self.checks` anywhere
+    /// the question is "did everything pass".
+    pub fn all_checks(&self) -> impl Iterator<Item = &CheckResult> {
+        self.checks
+            .iter()
+            .chain(self.credentials.iter().flat_map(|c| c.checks.iter()))
+    }
+
+    /// The §4.2 verdict, derived. Never assign `verified` a literal; assign this.
+    pub fn derive_verified(&self) -> bool {
+        self.all_checks().all(|c| c.passed)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -128,7 +179,12 @@ mod tests {
                 passed: true,
                 detail: Some("valid signature".to_string()),
             }],
-            claims: serde_json::json!({"given_name": "Alice"}),
+            credentials: vec![PresentedCredential {
+                query_id: "c1".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                claims: serde_json::json!({"given_name": "Alice"}),
+                checks: Vec::new(),
+            }],
         });
 
         save_verification_transaction(&storage, &tx, 600, 1_700_000_005)
@@ -151,6 +207,59 @@ mod tests {
             .await
             .unwrap();
         assert!(loaded.is_none());
+    }
+
+    /// Root AGENTS.md §4.2 after multi-credential support: `verified` MUST equal
+    /// the conjunction over EVERY `CheckResult` in the result -- the top-level
+    /// `checks` AND every `credentials[i].checks` entry. Checking only
+    /// `self.checks` is satisfiable while a per-credential check fails, which is
+    /// precisely the defect these helpers exist to make unrepresentable.
+    #[test]
+    fn all_checks_spans_both_levels_and_derives_the_verdict() {
+        let pass = |name: &str| CheckResult {
+            check: name.to_string(),
+            passed: true,
+            detail: None,
+        };
+
+        let mut result = VerificationResult {
+            verified: false,
+            checks: vec![pass("jwe_decryption")],
+            credentials: vec![
+                PresentedCredential {
+                    query_id: "pid".to_string(),
+                    format: "dc+sd-jwt".to_string(),
+                    claims: serde_json::json!({"given_name": "Alice"}),
+                    checks: vec![pass("sd_jwt_vc_signature_and_kb_jwt"), pass("dcql_match")],
+                },
+                PresentedCredential {
+                    query_id: "mdl".to_string(),
+                    format: "mso_mdoc".to_string(),
+                    claims: serde_json::json!({}),
+                    checks: vec![pass("mdoc_issuer_auth_and_device_signature")],
+                },
+            ],
+        };
+
+        assert_eq!(
+            result.all_checks().count(),
+            4,
+            "all_checks must span the top level and every credential"
+        );
+        assert!(result.derive_verified(), "every check passed");
+
+        // A failure buried in the SECOND credential must still sink the verdict.
+        // A top-level-only `all(passed)` would report this result as verified.
+        result.credentials[1].checks[0].passed = false;
+        assert!(
+            !result.derive_verified(),
+            "a failed per-credential check must sink the overall verdict"
+        );
+        assert!(
+            result.checks.iter().all(|c| c.passed),
+            "and it must do so even though every TOP-LEVEL check still passes -- \
+             this is the case a single-level all(passed) gets wrong"
+        );
     }
 
     #[test]

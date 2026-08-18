@@ -327,7 +327,7 @@ async fn full_verification_flow_end_to_end() {
     let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
 
     assert!(verify_result.verified);
-    assert_eq!(verify_result.claims["given_name"], "Alice");
+    assert_eq!(verify_result.credentials[0].claims["given_name"], "Alice");
 
     // 7. Admin GET /admin/verification/requests/{id}
     let get_tx_req = Request::builder()
@@ -348,7 +348,7 @@ async fn full_verification_flow_end_to_end() {
     assert_eq!(tx.state, VerificationState::Verified);
     let tx_res = tx.result.expect("result should be present");
     assert!(tx_res.verified);
-    assert_eq!(tx_res.claims["given_name"], "Alice");
+    assert_eq!(tx_res.credentials[0].claims["given_name"], "Alice");
 }
 
 #[tokio::test]
@@ -472,7 +472,7 @@ async fn dc_api_response_via_admin_endpoint_succeeds() {
     let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
 
     assert!(verify_result.verified);
-    assert_eq!(verify_result.claims["given_name"], "Alice");
+    assert_eq!(verify_result.credentials[0].claims["given_name"], "Alice");
 
     // 5. Admin GET /admin/verification/requests/{id} reflects Verified.
     let get_tx_req = Request::builder()
@@ -1090,8 +1090,7 @@ async fn dcql_vct_mismatch_is_rejected() {
     assert!(!verify_result.verified, "DCQL vct mismatch must not verify");
     assert!(
         verify_result
-            .checks
-            .iter()
+            .all_checks()
             .any(|c| c.check == "dcql_match" && !c.passed)
     );
 }
@@ -1220,8 +1219,7 @@ async fn revoked_credential_is_rejected() {
     assert!(!result.verified, "revoked credential must not verify");
     assert!(
         result
-            .checks
-            .iter()
+            .all_checks()
             .any(|c| c.check == "status_check" && !c.passed)
     );
 }
@@ -1233,17 +1231,15 @@ async fn valid_non_revoked_credential_succeeds() {
     assert!(result.verified, "checks={:?}", result.checks);
     assert!(
         result
-            .checks
-            .iter()
+            .all_checks()
             .any(|c| c.check == "status_check" && c.passed)
     );
     assert!(
         result
-            .checks
-            .iter()
+            .all_checks()
             .any(|c| c.check == "dcql_match" && c.passed)
     );
-    assert_eq!(result.claims["given_name"], "Alice");
+    assert_eq!(result.credentials[0].claims["given_name"], "Alice");
 }
 
 #[tokio::test]
@@ -1393,13 +1389,12 @@ async fn mdoc_presentation_is_accepted() {
 
     assert!(verify_result.verified, "checks={:?}", verify_result.checks);
     assert_eq!(
-        verify_result.claims["org.iso.18013.5.1"]["given_name"],
+        verify_result.credentials[0].claims["org.iso.18013.5.1"]["given_name"],
         "John"
     );
     assert!(
         verify_result
-            .checks
-            .iter()
+            .all_checks()
             .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed)
     );
 }
@@ -1613,12 +1608,12 @@ async fn form_encoded_response_parameter_is_accepted() {
 
     let result: VerificationResult = serde_json::from_str(&body).unwrap();
     assert!(result.verified, "expected a verified result, got: {body}");
-    assert_eq!(result.claims["given_name"], "Alice");
+    assert_eq!(result.credentials[0].claims["given_name"], "Alice");
 
     // Assert the named checks, not just `verified`. Per root AGENTS.md §4.2 an
     // omitted CheckResult silently drops out of `all(passed)` and can turn a
     // failure into a pass, so `verified: true` alone cannot detect a lost check.
-    let names: Vec<&str> = result.checks.iter().map(|c| c.check.as_str()).collect();
+    let names: Vec<&str> = result.all_checks().map(|c| c.check.as_str()).collect();
     for expected in [
         "jwe_decryption",
         "sd_jwt_vc_signature_and_kb_jwt",
@@ -1630,7 +1625,7 @@ async fn form_encoded_response_parameter_is_accepted() {
             "missing check '{expected}' in {names:?}"
         );
     }
-    assert!(result.checks.iter().all(|c| c.passed));
+    assert!(result.all_checks().all(|c| c.passed));
 }
 
 /// The pre-fix convention — a bare JWE as the whole request body — is no longer

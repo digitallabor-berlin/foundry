@@ -4,7 +4,8 @@ use crate::error::VerificationError;
 use crate::request::verifier_x5c_leaf_pem;
 use crate::status::{StatusListResolver, check_status};
 use crate::transaction::{
-    CheckResult, VerificationResult, VerificationState, VerificationTransaction,
+    CheckResult, PresentedCredential, VerificationResult, VerificationState,
+    VerificationTransaction,
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
@@ -291,11 +292,15 @@ pub async fn verify_vp_response(
                 passed: false,
                 detail: Some(foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX)),
             }];
-            tx.result = Some(VerificationResult {
-                verified: checks.iter().all(|c| c.passed),
+            let mut result = VerificationResult {
+                verified: false,
                 checks,
-                claims: serde_json::Value::Null,
-            });
+                // Nothing was verified, so there is no credential to report.
+                credentials: Vec::new(),
+            };
+            // Still derived: one check, not passed (root AGENTS.md §4.2).
+            result.verified = result.derive_verified();
+            tx.result = Some(result);
 
             tracing::warn!(
                 tx_id = %tx.id,
@@ -822,13 +827,31 @@ async fn do_verify_vp_response(
     //    A network failure fetching the token propagates as a hard error.
     checks.push(check_status(&claims_value, &trust_store, resolver, now_unix).await?);
 
-    // 6. Overall verdict is the AND of every check performed.
-    let verified = checks.iter().all(|c| c.passed);
-    Ok(VerificationResult {
-        verified,
-        checks,
+    // 6. One credential per `vp_token` today; Task 4 turns this into a loop.
+    //    Every check above is scoped to this credential, so it belongs in the
+    //    record rather than at the top level -- only `jwe_decryption` is
+    //    cross-cutting.
+    let jwe_check_count = 1;
+    let per_credential_checks = checks.split_off(jwe_check_count);
+
+    let credential = PresentedCredential {
+        query_id: answered_query_id,
+        format: match presented_format {
+            PresentedFormat::SdJwtVc => "dc+sd-jwt".to_string(),
+            PresentedFormat::MsoMdoc => "mso_mdoc".to_string(),
+        },
         claims: claims_value,
-    })
+        checks: per_credential_checks,
+    };
+
+    let mut result = VerificationResult {
+        verified: false,
+        checks,
+        credentials: vec![credential],
+    };
+    // Derived, never assigned (root AGENTS.md §4.2).
+    result.verified = result.derive_verified();
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1081,15 +1104,13 @@ mod tests {
 
         assert!(res.verified);
         assert_eq!(tx.state, VerificationState::Verified);
-        assert_eq!(res.claims["given_name"], "Alice");
+        assert_eq!(res.credentials[0].claims["given_name"], "Alice");
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "jwe_decryption" && c.passed)
         );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed)
         );
     }
@@ -1252,8 +1273,7 @@ mod tests {
             res.checks
         );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "transaction_data_binding" && !c.passed),
             "the missing binding must be recorded as a failed check: {:?}",
             res.checks
@@ -1338,8 +1358,7 @@ mod tests {
             res.checks
         );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "transaction_data_binding" && c.passed),
             "the binding check must be recorded as passed: {:?}",
             res.checks
@@ -1414,8 +1433,7 @@ mod tests {
 
         assert!(!res.verified, "checks={:?}", res.checks);
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "transaction_data_binding" && !c.passed)
         );
     }
@@ -1493,8 +1511,7 @@ mod tests {
 
         assert!(!res.verified, "checks={:?}", res.checks);
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "transaction_data_binding" && !c.passed)
         );
     }
@@ -1558,8 +1575,7 @@ mod tests {
 
         assert!(res.verified, "checks={:?}", res.checks);
         assert!(
-            !res.checks
-                .iter()
+            !res.all_checks()
                 .any(|c| c.check == "transaction_data_binding")
         );
     }
@@ -1684,7 +1700,7 @@ mod tests {
             .as_ref()
             .expect("the failure reason must be persisted, not discarded");
         assert!(!result.verified);
-        assert_eq!(result.checks.len(), 1, "checks={:?}", result.checks);
+        assert_eq!(result.all_checks().count(), 1, "checks={:?}", result.checks);
         let check = &result.checks[0];
         assert_eq!(check.check, "jwe_decryption");
         assert!(!check.passed);
@@ -1694,7 +1710,7 @@ mod tests {
         // Root AGENTS.md §4.2: `verified` is derived, never hardcoded.
         assert_eq!(
             result.verified,
-            result.checks.iter().all(|c| c.passed),
+            result.all_checks().all(|c| c.passed),
             "verified must equal the conjunction of the checks"
         );
     }
@@ -1906,12 +1922,11 @@ mod tests {
             .unwrap();
         assert!(!res.verified, "DCQL vct mismatch must not verify");
         assert_eq!(tx.state, VerificationState::Failed);
-        let dcql = res.checks.iter().find(|c| c.check == "dcql_match").unwrap();
+        let dcql = res.all_checks().find(|c| c.check == "dcql_match").unwrap();
         assert!(!dcql.passed);
         // The signature check still passed and is still reported for transparency.
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed)
         );
     }
@@ -2184,20 +2199,20 @@ mod tests {
             .unwrap();
 
         assert!(res.verified, "checks={:?}", res.checks);
-        assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
+        assert_eq!(
+            res.credentials[0].claims["org.iso.18013.5.1"]["given_name"],
+            "John"
+        );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "mdoc_issuer_auth_and_device_signature" && c.passed)
         );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "dcql_match" && c.passed)
         );
         assert!(
-            res.checks
-                .iter()
+            res.all_checks()
                 .any(|c| c.check == "status_check" && c.passed)
         );
     }

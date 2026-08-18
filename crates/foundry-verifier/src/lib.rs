@@ -14,7 +14,7 @@ pub use request::{
 };
 pub use status::{HttpStatusListResolver, StatusListResolver, check_status};
 pub use transaction::{
-    CheckResult, VerificationResult, VerificationState, VerificationTransaction,
-    load_verification_transaction, save_verification_transaction,
+    CheckResult, PresentedCredential, VerificationResult, VerificationState,
+    VerificationTransaction, load_verification_transaction, save_verification_transaction,
 };
 pub use verify::verify_vp_response;

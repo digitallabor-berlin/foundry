@@ -124,6 +124,13 @@
   .checks li .mark { font-weight: 700; }
   .checks li.pass .mark { color: var(--green); }
   .checks li.fail .mark { color: var(--red); }
+  /* One stacked section per presented credential. Stacked rather than accordions
+     or tabs: both of those hide a FAILING credential behind a collapsed control,
+     and surfacing failures without a click is the whole job of this panel. */
+  .credentials.hidden { display: none; }
+  .credential { border-top: 1px solid rgba(255,255,255,0.10); margin-top: 12px; padding-top: 8px; }
+  .credential h4 { font-size: 13px; margin: 0 0 4px; }
+  .credential h4 .fmt { font-weight: 400; margin-left: 6px; color: var(--muted); }
   .error-banner {
     background: rgba(224,86,86,0.12); border: 1px solid var(--red); color: #ffb3b3;
     border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-top: 12px;
@@ -262,7 +269,7 @@
       </details>
       <p>Status: <span class="badge pending" id="verification-status">pending</span></p>
       <ul class="checks hidden" id="verification-checks"></ul>
-      <pre class="json hidden" id="verification-claims"></pre>
+      <div class="credentials hidden" id="verification-credentials"></div>
     </div>
   </section>
 </main>
@@ -2814,14 +2821,10 @@ var qrcode = function() {
   function renderVerificationResult(tx) {
     const statusEl = document.getElementById('verification-status');
     const checksEl = document.getElementById('verification-checks');
-    const claimsEl = document.getElementById('verification-claims');
+    const credsEl = document.getElementById('verification-credentials');
 
-    statusEl.textContent = tx.state;
-    statusEl.className = 'badge ' + tx.state;
-
-    if (tx.result) {
-      checksEl.innerHTML = '';
-      tx.result.checks.forEach(function (check) {
+    function appendChecksTo(listEl, checks) {
+      checks.forEach(function (check) {
         const li = document.createElement('li');
         li.className = check.passed ? 'pass' : 'fail';
 
@@ -2833,12 +2836,49 @@ var qrcode = function() {
         const label = check.detail ? check.check + ' \u2014 ' + check.detail : check.check;
         li.appendChild(document.createTextNode(' ' + label));
 
-        checksEl.appendChild(li);
+        listEl.appendChild(li);
       });
+    }
+
+    statusEl.textContent = tx.state;
+    statusEl.className = 'badge ' + tx.state;
+
+    if (tx.result) {
+      // Cross-cutting checks only: jwe_decryption, requested_credentials_answered.
+      checksEl.innerHTML = '';
+      appendChecksTo(checksEl, tx.result.checks);
       checksEl.classList.remove('hidden');
 
-      claimsEl.textContent = JSON.stringify(tx.result.claims, null, 2);
-      claimsEl.classList.remove('hidden');
+      // One stacked section per credential, in the order the server sent them
+      // (DCQL declaration order). Claims are rendered per credential and never
+      // merged: a merged map would let one credential's `status` claim displace
+      // another's, which is the correctness bug this shape exists to prevent.
+      credsEl.innerHTML = '';
+      (tx.result.credentials || []).forEach(function (cred) {
+        const wrap = document.createElement('div');
+        wrap.className = 'credential';
+
+        const h = document.createElement('h4');
+        h.textContent = cred.query_id;
+        const fmt = document.createElement('span');
+        fmt.className = 'fmt';
+        fmt.textContent = cred.format;
+        h.appendChild(fmt);
+        wrap.appendChild(h);
+
+        const ul = document.createElement('ul');
+        ul.className = 'checks';
+        appendChecksTo(ul, cred.checks);
+        wrap.appendChild(ul);
+
+        const pre = document.createElement('pre');
+        pre.className = 'json';
+        pre.textContent = JSON.stringify(cred.claims, null, 2);
+        wrap.appendChild(pre);
+
+        credsEl.appendChild(wrap);
+      });
+      credsEl.classList.remove('hidden');
     }
   }
 
@@ -3135,7 +3175,7 @@ var qrcode = function() {
         document.getElementById('verification-status').textContent = 'pending';
         document.getElementById('verification-status').className = 'badge pending';
         document.getElementById('verification-checks').classList.add('hidden');
-        document.getElementById('verification-claims').classList.add('hidden');
+        document.getElementById('verification-credentials').classList.add('hidden');
         resultEl.classList.remove('hidden');
 
         pollVerification(body.verification_id, errorEl);

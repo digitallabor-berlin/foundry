@@ -27,6 +27,7 @@ use utoipa::OpenApi;
         foundry_verifier::VerificationTransaction,
         foundry_verifier::VerificationState,
         foundry_verifier::VerificationResult,
+        foundry_verifier::PresentedCredential,
         foundry_verifier::CheckResult,
         crate::server::AdminDcApiResponseBody,
     ))
@@ -70,6 +71,7 @@ pub fn generate_admin_openapi_spec() -> String {
         foundry_issuer::IssuedCredential,
         foundry_issuer::ProofsRequest,
         foundry_verifier::VerificationResult,
+        foundry_verifier::PresentedCredential,
         foundry_verifier::CheckResult,
         crate::server::VpResponseForm,
     ))
