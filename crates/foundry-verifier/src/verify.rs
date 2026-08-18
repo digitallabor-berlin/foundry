@@ -513,6 +513,354 @@ fn check_transaction_data_binding(
     }
 }
 
+/// Inputs shared by every credential in one `vp_token`, computed once.
+///
+/// `base_url` and `client_id` are carried here because the mdoc
+/// SessionTranscript is built from them; they are derived once in
+/// `do_verify_vp_response` and are identical for every credential.
+struct CredentialVerifyCtx<'a> {
+    config: &'a Config,
+    tx: &'a VerificationTransaction,
+    trust_store: &'a TrustStore,
+    expected_audiences: &'a [String],
+    now_unix: u64,
+    base_url: &'a str,
+    client_id: &'a str,
+}
+
+/// Verify one credential from a `vp_token` and collect its checks.
+///
+/// Returns the credential record plus, when the status-list fetch was
+/// unavailable, its detail message. That is deliberately **not** an `Err`: the
+/// caller verifies every credential before deciding anything (a bad signature on
+/// one credential must not hide another's verdict), and a network fault still
+/// has to become HTTP 502 afterwards rather than a policy `passed: false` --
+/// "I could not determine whether this is revoked" is not "this is revoked".
+async fn verify_one_credential(
+    ctx: &CredentialVerifyCtx<'_>,
+    query_id: &str,
+    selected: SelectedPresentation<'_>,
+    resolver: &dyn StatusListResolver,
+) -> Result<(PresentedCredential, Option<String>), VerificationError> {
+    let presented_format = selected.format();
+    let mut checks: Vec<CheckResult> = Vec::new();
+    let mut disclosed_claims = serde_json::Map::new();
+    // Populated only for SD-JWT VC presentations, whose Key Binding JWT carries
+    // `transaction_data_hashes` (L3144). An mdoc presentation has no KB-JWT, so
+    // this stays `None` for that format -- checked below.
+    let mut kb_jwt_payload: Option<Value> = None;
+
+    let doc_type: Option<String> = match selected {
+        SelectedPresentation::SdJwtVc(jwt_str) => {
+            let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
+                jwt_str,
+                ctx.trust_store,
+                ctx.expected_audiences,
+                &ctx.tx.nonce,
+                ctx.now_unix,
+            )
+            .map_err(|e| VerificationError::Failed(e.to_string()))?;
+
+            checks.push(CheckResult {
+                check: "sd_jwt_vc_signature_and_kb_jwt".to_string(),
+                passed: true,
+                detail: None,
+            });
+
+            // Say out loud when a presentation was only accepted because the
+            // operator enabled the draft-24 accommodation, so the flag can be
+            // turned off again once the wallets in play have caught up. This
+            // is an Origin -- a public identifier, not a payload -- so it is
+            // logged unconditionally (root AGENTS.md §4.5).
+            if let Some(aud) = verified
+                .kb_jwt_payload
+                .get("aud")
+                .and_then(|v| v.as_str())
+                .filter(|aud| aud.starts_with(LEGACY_WEB_ORIGIN_PREFIX))
+            {
+                tracing::warn!(
+                    audience = %aud,
+                    "KB-JWT bound to the superseded OpenID4VP draft 24 `web-origin:` audience \
+                     prefix; accepted only because \
+                     verifier.dc_api_accept_legacy_web_origin_audience is enabled -- OpenID4VP \
+                     1.0 L2543 mandates `origin:`"
+                );
+            }
+
+            kb_jwt_payload = Some(verified.kb_jwt_payload);
+            if let Value::Object(map) = verified.claims {
+                for (k, v) in map {
+                    disclosed_claims.insert(k, v);
+                }
+            }
+            None
+        }
+        SelectedPresentation::MsoMdoc {
+            mdoc_b64,
+            device_signature_b64,
+        } => {
+            let mdoc_bytes = B64URL
+                .decode(mdoc_b64)
+                .map_err(|e| VerificationError::Failed(format!("mdoc base64 decode: {e}")))?;
+            let dev_sig_bytes = B64URL.decode(device_signature_b64).map_err(|e| {
+                VerificationError::Failed(format!("device_signature base64 decode: {e}"))
+            })?;
+
+            // OpenID4VP L2870 (redirects) / L2999 (DC API): the third
+            // `…HandoverInfo` element is the RFC 7638 thumbprint of the
+            // Verifier's response-encryption public key when the response is
+            // encrypted, and CBOR `null` when it is not. An unrecognised
+            // Response Mode is an error rather than a silent `None`: guessing
+            // would build a transcript that fails to verify for a reason no
+            // operator could diagnose.
+            let jwk_thumbprint: Option<[u8; 32]> = match ctx.tx.response_mode.as_str() {
+                "dc_api.jwt" | "direct_post.jwt" => Some(
+                    foundry_core::obs::thumbprint_bytes(&ctx.tx.ephem_public_jwk).map_err(|e| {
+                        VerificationError::Failed(format!(
+                            "cannot compute the response-encryption key thumbprint: {e}"
+                        ))
+                    })?,
+                ),
+                "dc_api" | "direct_post" => None,
+                other => {
+                    return Err(VerificationError::Failed(format!(
+                        "unsupported response_mode for the mdoc SessionTranscript: {other}"
+                    )));
+                }
+            };
+
+            // The invocation method selects the Handover structure: the DC API
+            // binds to the request's Origin (L2959-L2999), every other
+            // transport binds to the Client Identifier and response URI
+            // (L2829-L2873). Building the wrong one yields a transcript no
+            // conformant wallet's Device Signature can verify against.
+            //
+            // The Origin sits *inside* the hashed `OpenID4VPDCAPIHandoverInfo`,
+            // so unlike the KB-JWT audience above — which is compared against a
+            // list — the verifier cannot compare here. It must *pick* an Origin
+            // before it can verify anything, and a deployment may legitimately
+            // serve several. Each configured Origin therefore yields a
+            // candidate transcript, and the Device Signature decides which one
+            // the wallet actually used.
+            let candidates: Vec<SessionTranscriptParams> = if ctx.tx.transport == "dc_api" {
+                let origins: Vec<String> = if ctx.config.verifier.dc_api_expected_origins.is_empty()
+                {
+                    vec![ctx.base_url.to_string()]
+                } else {
+                    ctx.config.verifier.dc_api_expected_origins.clone()
+                };
+                origins
+                    .into_iter()
+                    // L2997: the Origin element MUST NOT carry the `origin:`
+                    // prefix. That prefix belongs to the KB-JWT audience — a
+                    // different mechanism that happens to name the same value.
+                    .map(|origin| SessionTranscriptParams::DcApi {
+                        origin,
+                        nonce: ctx.tx.nonce.clone(),
+                        jwk_thumbprint,
+                    })
+                    .collect()
+            } else {
+                vec![SessionTranscriptParams::Redirect {
+                    client_id: ctx.client_id.to_string(),
+                    nonce: ctx.tx.nonce.clone(),
+                    jwk_thumbprint,
+                    response_uri: format!("{}/vp/response/{}", ctx.base_url, ctx.tx.id),
+                }]
+            };
+
+            let mut accepted = None;
+            let mut last_err = None;
+            for params in &candidates {
+                let session_transcript = build_session_transcript(params)
+                    .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
+                match foundry_mdoc::verifier::verify_mdoc(
+                    &mdoc_bytes,
+                    ctx.trust_store,
+                    &session_transcript,
+                    &dev_sig_bytes,
+                    ctx.now_unix,
+                ) {
+                    Ok(res) => {
+                        accepted = Some(res);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(VerificationError::Failed(format!(
+                            "mdoc verification failed: {e}"
+                        )))
+                    }
+                }
+            }
+
+            // `candidates` is never empty, so `last_err` is always populated on
+            // the failure path. The fallback message exists only so that this
+            // cannot become a panic if that ever stops holding.
+            let mdoc_res = match accepted {
+                Some(res) => res,
+                None => {
+                    return Err(last_err.unwrap_or_else(|| {
+                        VerificationError::Failed(
+                            "mdoc verification failed: no SessionTranscript candidate".to_string(),
+                        )
+                    }));
+                }
+            };
+
+            checks.push(CheckResult {
+                check: "mdoc_issuer_auth_and_device_signature".to_string(),
+                passed: true,
+                detail: None,
+            });
+
+            for (ns, elements) in mdoc_res.claims {
+                let mut ns_obj = serde_json::Map::new();
+                for (k, v) in elements {
+                    ns_obj.insert(k, v);
+                }
+                disclosed_claims.insert(ns, Value::Object(ns_obj));
+            }
+            Some(mdoc_res.doc_type)
+        }
+    };
+
+    let claims_value = Value::Object(disclosed_claims);
+
+    // Transaction Data binding (OpenID4VP L1523/L3144), only when the Verifier
+    // requested transaction_data for this transaction. Already multi-credential
+    // aware: it filters entries by whether their `credential_ids` array contains
+    // this credential's query id, so an entry scoped elsewhere imposes nothing
+    // here.
+    if let Some(ref entries) = ctx.tx.transaction_data {
+        match &kb_jwt_payload {
+            Some(kb_payload) => {
+                checks.push(check_transaction_data_binding(
+                    entries, query_id, kb_payload,
+                ));
+            }
+            // mdoc: no KB-JWT exists to carry the binding. The Verifier asked
+            // for one it cannot confirm, so this must not report success.
+            None => {
+                checks.push(CheckResult {
+                    check: "transaction_data_binding".to_string(),
+                    passed: false,
+                    detail: Some("mdoc transaction_data binding is not implemented".to_string()),
+                });
+            }
+        }
+    }
+
+    // DCQL satisfaction, bound to the credential query this presentation
+    // ANSWERED -- not to any query of the presented format, so a presentation
+    // cannot be credited against a query it does not answer.
+    checks.push(check_dcql_match(
+        &ctx.tx.dcql_query,
+        query_id,
+        presented_format,
+        &claims_value,
+        doc_type.as_deref(),
+    ));
+
+    // Token Status List revocation, against THIS credential's claims. Handing it
+    // a map merged across credentials would read one credential's
+    // `status.status_list` while reporting another's verdict.
+    let status_unavailable =
+        match check_status(&claims_value, ctx.trust_store, resolver, ctx.now_unix).await {
+            Ok(check) => {
+                checks.push(check);
+                None
+            }
+            Err(VerificationError::StatusUnavailable(detail)) => Some(detail),
+            Err(other) => return Err(other),
+        };
+
+    let credential = PresentedCredential {
+        query_id: query_id.to_string(),
+        format: match presented_format {
+            PresentedFormat::SdJwtVc => "dc+sd-jwt".to_string(),
+            PresentedFormat::MsoMdoc => "mso_mdoc".to_string(),
+        },
+        claims: claims_value,
+        checks,
+    };
+
+    Ok((credential, status_unavailable))
+}
+
+/// Did the wallet answer every credential query the request asked for?
+///
+/// OpenID4VP 1.0 L993: with `credential_sets` absent -- the only case foundry
+/// implements -- "the Verifier requests presentations for all Credentials in
+/// `credentials`", so every credential query is non-optional. L1007-1008: "If
+/// the Wallet cannot deliver all non-optional Credentials requested by the
+/// Verifier according to these rules, it MUST NOT return any Credential(s)."
+///
+/// A subset `vp_token` is therefore a **wallet MUST-violation**. It is
+/// nonetheless reported as a policy verdict (HTTP 200, `verified: false`) rather
+/// than a structural 400: the spec constrains the wallet here, not the
+/// verifier's status code; the response is well-formed, so root AGENTS.md §4.3's
+/// structural category does not fit; and naming the missing credential query is
+/// far more actionable for whoever has to diagnose the wallet than an opaque
+/// `invalid_request`.
+///
+/// Never returns `Err` -- fail-closed, matching `check_dcql_match`.
+fn check_requested_credentials_answered(
+    dcql_query: &Value,
+    answered: &[PresentedCredential],
+) -> CheckResult {
+    const CHECK: &str = "requested_credentials_answered";
+
+    let query: DcqlQuery = match serde_json::from_value(dcql_query.clone()) {
+        Ok(q) => q,
+        // Not reachable through the request path -- `select_presentations` has
+        // already parsed this query successfully, and `create_verification_request`
+        // validated it before persisting. Fail closed rather than pass on a query
+        // this function cannot read.
+        Err(e) => {
+            let reason = format!("dcql_query is not a valid DCQL query: {e}");
+            tracing::warn!(check = CHECK, reason = %reason, "cannot evaluate requested credentials");
+            return CheckResult {
+                check: CHECK.to_string(),
+                passed: false,
+                detail: Some(reason),
+            };
+        }
+    };
+
+    let missing: Vec<&str> = query
+        .credentials()
+        .iter()
+        .map(|cq| cq.id())
+        .filter(|id| !answered.iter().any(|c| c.query_id == *id))
+        .collect();
+
+    if missing.is_empty() {
+        return CheckResult {
+            check: CHECK.to_string(),
+            passed: true,
+            detail: None,
+        };
+    }
+
+    // Attribute the fault to the wallet. Without this an operator reads the
+    // failure as foundry having asked for something unusual, when in fact
+    // L1007-1008 required the wallet to return nothing at all rather than a
+    // partial set. Credential query ids are operator-authored request structure,
+    // not holder values, so naming them is safe (root AGENTS.md §4.5).
+    let reason = format!(
+        "wallet returned no presentation for credential query [{}]; OpenID4VP 1.0 \
+         requires a wallet that cannot deliver all non-optional Credentials to \
+         return none at all, so this response is not conformant",
+        missing.join(", ")
+    );
+    tracing::warn!(check = CHECK, reason = %reason, "not every requested credential was answered");
+    CheckResult {
+        check: CHECK.to_string(),
+        passed: false,
+        detail: Some(reason),
+    }
+}
+
 #[tracing::instrument(skip_all)]
 async fn do_verify_vp_response(
     config: &Config,
@@ -621,256 +969,63 @@ async fn do_verify_vp_response(
         .map_err(|e| VerificationError::Crypto(e.to_string()))?
         .as_secs();
 
-    // 3. Credential-format-specific signature/binding verification + disclosure.
-    //    The format is taken from the answered DCQL credential query, never
-    //    inferred from the shape of the payload.
-    // Task 4 turns this into a loop over every entry. Taking the first keeps
-    // this task's diff to selection alone. `select_presentations` returns `Err`
-    // rather than an empty `Vec`, so `remove(0)` is the panic-free form here --
-    // no `unwrap`/`expect` is needed or wanted (root AGENTS.md §4.1).
-    let mut selected_all = select_presentations(vp_token, &tx.dcql_query)?;
-    let (answered_query_id, selected) = selected_all.remove(0);
-    let presented_format = selected.format();
-    let mut disclosed_claims = serde_json::Map::new();
-    // Populated only for SD-JWT VC presentations, whose Key Binding JWT carries
-    // `transaction_data_hashes` (L3144). An mdoc presentation has no KB-JWT, so
-    // this stays `None` for that format -- checked below.
-    let mut kb_jwt_payload: Option<Value> = None;
-
-    let doc_type: Option<String> = match selected {
-        SelectedPresentation::SdJwtVc(jwt_str) => {
-            let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
-                jwt_str,
-                &trust_store,
-                &expected_audiences,
-                &tx.nonce,
-                now_unix,
-            )
-            .map_err(|e| VerificationError::Failed(e.to_string()))?;
-
-            checks.push(CheckResult {
-                check: "sd_jwt_vc_signature_and_kb_jwt".to_string(),
-                passed: true,
-                detail: None,
-            });
-
-            // Say out loud when a presentation was only accepted because the
-            // operator enabled the draft-24 accommodation, so the flag can be
-            // turned off again once the wallets in play have caught up. This
-            // is an Origin -- a public identifier, not a payload -- so it is
-            // logged unconditionally (root AGENTS.md §4.5).
-            if let Some(aud) = verified
-                .kb_jwt_payload
-                .get("aud")
-                .and_then(|v| v.as_str())
-                .filter(|aud| aud.starts_with(LEGACY_WEB_ORIGIN_PREFIX))
-            {
-                tracing::warn!(
-                    audience = %aud,
-                    "KB-JWT bound to the superseded OpenID4VP draft 24 `web-origin:` audience \
-                     prefix; accepted only because \
-                     verifier.dc_api_accept_legacy_web_origin_audience is enabled -- OpenID4VP \
-                     1.0 L2543 mandates `origin:`"
-                );
-            }
-
-            kb_jwt_payload = Some(verified.kb_jwt_payload);
-            if let Value::Object(map) = verified.claims {
-                for (k, v) in map {
-                    disclosed_claims.insert(k, v);
-                }
-            }
-            None
-        }
-        SelectedPresentation::MsoMdoc {
-            mdoc_b64,
-            device_signature_b64,
-        } => {
-            let mdoc_bytes = B64URL
-                .decode(mdoc_b64)
-                .map_err(|e| VerificationError::Failed(format!("mdoc base64 decode: {e}")))?;
-            let dev_sig_bytes = B64URL.decode(device_signature_b64).map_err(|e| {
-                VerificationError::Failed(format!("device_signature base64 decode: {e}"))
-            })?;
-
-            // OpenID4VP L2870 (redirects) / L2999 (DC API): the third
-            // `…HandoverInfo` element is the RFC 7638 thumbprint of the
-            // Verifier's response-encryption public key when the response is
-            // encrypted, and CBOR `null` when it is not. An unrecognised
-            // Response Mode is an error rather than a silent `None`: guessing
-            // would build a transcript that fails to verify for a reason no
-            // operator could diagnose.
-            let jwk_thumbprint: Option<[u8; 32]> = match tx.response_mode.as_str() {
-                "dc_api.jwt" | "direct_post.jwt" => Some(
-                    foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).map_err(|e| {
-                        VerificationError::Failed(format!(
-                            "cannot compute the response-encryption key thumbprint: {e}"
-                        ))
-                    })?,
-                ),
-                "dc_api" | "direct_post" => None,
-                other => {
-                    return Err(VerificationError::Failed(format!(
-                        "unsupported response_mode for the mdoc SessionTranscript: {other}"
-                    )));
-                }
-            };
-
-            // The invocation method selects the Handover structure: the DC API
-            // binds to the request's Origin (L2959-L2999), every other
-            // transport binds to the Client Identifier and response URI
-            // (L2829-L2873). Building the wrong one yields a transcript no
-            // conformant wallet's Device Signature can verify against.
-            //
-            // The Origin sits *inside* the hashed `OpenID4VPDCAPIHandoverInfo`,
-            // so unlike the KB-JWT audience above — which is compared against a
-            // list — the verifier cannot compare here. It must *pick* an Origin
-            // before it can verify anything, and a deployment may legitimately
-            // serve several. Each configured Origin therefore yields a
-            // candidate transcript, and the Device Signature decides which one
-            // the wallet actually used.
-            let candidates: Vec<SessionTranscriptParams> = if tx.transport == "dc_api" {
-                let origins: Vec<String> = if config.verifier.dc_api_expected_origins.is_empty() {
-                    vec![base_url.to_string()]
-                } else {
-                    config.verifier.dc_api_expected_origins.clone()
-                };
-                origins
-                    .into_iter()
-                    // L2997: the Origin element MUST NOT carry the `origin:`
-                    // prefix. That prefix belongs to the KB-JWT audience — a
-                    // different mechanism that happens to name the same value.
-                    .map(|origin| SessionTranscriptParams::DcApi {
-                        origin,
-                        nonce: tx.nonce.clone(),
-                        jwk_thumbprint,
-                    })
-                    .collect()
-            } else {
-                vec![SessionTranscriptParams::Redirect {
-                    client_id: client_id.clone(),
-                    nonce: tx.nonce.clone(),
-                    jwk_thumbprint,
-                    response_uri: format!("{base_url}/vp/response/{}", tx.id),
-                }]
-            };
-
-            let mut accepted = None;
-            let mut last_err = None;
-            for params in &candidates {
-                let session_transcript = build_session_transcript(params)
-                    .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
-                match foundry_mdoc::verifier::verify_mdoc(
-                    &mdoc_bytes,
-                    &trust_store,
-                    &session_transcript,
-                    &dev_sig_bytes,
-                    now_unix,
-                ) {
-                    Ok(res) => {
-                        accepted = Some(res);
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = Some(VerificationError::Failed(format!(
-                            "mdoc verification failed: {e}"
-                        )))
-                    }
-                }
-            }
-
-            // `candidates` is never empty, so `last_err` is always populated on
-            // the failure path. The fallback message exists only so that this
-            // cannot become a panic if that ever stops holding.
-            let mdoc_res = match accepted {
-                Some(res) => res,
-                None => {
-                    return Err(last_err.unwrap_or_else(|| {
-                        VerificationError::Failed(
-                            "mdoc verification failed: no SessionTranscript candidate".to_string(),
-                        )
-                    }));
-                }
-            };
-
-            checks.push(CheckResult {
-                check: "mdoc_issuer_auth_and_device_signature".to_string(),
-                passed: true,
-                detail: None,
-            });
-
-            for (ns, elements) in mdoc_res.claims {
-                let mut ns_obj = serde_json::Map::new();
-                for (k, v) in elements {
-                    ns_obj.insert(k, v);
-                }
-                disclosed_claims.insert(ns, Value::Object(ns_obj));
-            }
-            Some(mdoc_res.doc_type)
-        }
+    // 3. Per-credential verification. Verify-all, never fail-fast: root
+    //    AGENTS.md §4.2 defines `verified` as the conjunction of the checks
+    //    performed, which is only meaningful when they were all performed, and
+    //    "PID signature bad, mDL fine" is a far more useful operator verdict
+    //    than "PID signature bad, mDL unknown".
+    let selected = select_presentations(vp_token, &tx.dcql_query)?;
+    let ctx = CredentialVerifyCtx {
+        config,
+        tx,
+        trust_store: &trust_store,
+        expected_audiences: &expected_audiences,
+        now_unix,
+        base_url,
+        client_id: &client_id,
     };
 
-    let claims_value = Value::Object(disclosed_claims);
+    let mut credentials = Vec::with_capacity(selected.len());
+    let mut deferred: Option<VerificationError> = None;
 
-    // 3b. Transaction Data binding (OpenID4VP L1523/L3144), only when the
-    // Verifier actually requested transaction_data for this transaction.
-    if let Some(ref entries) = tx.transaction_data {
-        match &kb_jwt_payload {
-            Some(kb_payload) => {
-                checks.push(check_transaction_data_binding(
-                    entries,
-                    &answered_query_id,
-                    kb_payload,
-                ));
-            }
-            // mdoc: no KB-JWT exists to carry the binding. The Verifier asked
-            // for one it cannot confirm, so this must not report success.
-            None => {
-                checks.push(CheckResult {
-                    check: "transaction_data_binding".to_string(),
-                    passed: false,
-                    detail: Some("mdoc transaction_data binding is not implemented".to_string()),
-                });
-            }
+    for (query_id, payload) in selected {
+        let (credential, status_unavailable) =
+            verify_one_credential(&ctx, &query_id, payload, resolver).await?;
+
+        // First unavailability wins; the rest of the loop still runs so the
+        // operator keeps every other credential's verdict. Naming the credential
+        // matters: with N credentials a bare "status list unreachable" does not
+        // say whose.
+        if deferred.is_none()
+            && let Some(detail) = status_unavailable
+        {
+            deferred = Some(VerificationError::StatusUnavailable(format!(
+                "credential query '{query_id}': {detail}"
+            )));
         }
+
+        credentials.push(credential);
     }
 
-    // 4. DCQL query satisfaction (shared across credential formats).
-    checks.push(check_dcql_match(
+    // Today's behaviour: propagate. Task 5 makes this non-lossy by carrying the
+    // partial result alongside the error.
+    if let Some(err) = deferred {
+        return Err(err);
+    }
+
+    // 4. Set-level policy: did every requested credential query get answered?
+    checks.push(check_requested_credentials_answered(
         &tx.dcql_query,
-        &answered_query_id,
-        presented_format,
-        &claims_value,
-        doc_type.as_deref(),
+        &credentials,
     ));
 
-    // 5. Token Status List revocation check (shared across credential formats).
-    //    A network failure fetching the token propagates as a hard error.
-    checks.push(check_status(&claims_value, &trust_store, resolver, now_unix).await?);
-
-    // 6. One credential per `vp_token` today; Task 4 turns this into a loop.
-    //    Every check above is scoped to this credential, so it belongs in the
-    //    record rather than at the top level -- only `jwe_decryption` is
-    //    cross-cutting.
-    let jwe_check_count = 1;
-    let per_credential_checks = checks.split_off(jwe_check_count);
-
-    let credential = PresentedCredential {
-        query_id: answered_query_id,
-        format: match presented_format {
-            PresentedFormat::SdJwtVc => "dc+sd-jwt".to_string(),
-            PresentedFormat::MsoMdoc => "mso_mdoc".to_string(),
-        },
-        claims: claims_value,
-        checks: per_credential_checks,
-    };
-
+    // 5. Overall verdict: the conjunction over EVERY check, at both levels
+    //    (root AGENTS.md §4.2). Derived, never assigned.
     let mut result = VerificationResult {
         verified: false,
         checks,
-        credentials: vec![credential],
+        credentials,
     };
-    // Derived, never assigned (root AGENTS.md §4.2).
     result.verified = result.derive_verified();
     Ok(result)
 }
@@ -2235,6 +2390,247 @@ mod tests {
         assert!(
             res.all_checks()
                 .any(|c| c.check == "status_check" && c.passed)
+        );
+    }
+
+    // --- Multi-credential verification (Task 4) ---
+
+    /// Build an SD-JWT VC presentation disclosing `disclose`, bound to `tx`'s
+    /// nonce and the redirect-transport audience. Each call mints its own holder
+    /// key, so the credentials are independently key-bound exactly as two
+    /// separately-issued credentials would be.
+    fn sd_jwt_presentation_for(
+        config: &Config,
+        tx: &VerificationTransaction,
+        leaf_cert: &[u8],
+        issuer_signer: &FileSigner,
+        disclose: &[(&str, serde_json::Value)],
+    ) -> String {
+        let (holder_signer, holder_pub) = holder();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut select = serde_json::Map::new();
+        for (k, v) in disclose {
+            select.insert((*k).to_string(), v.clone());
+        }
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+
+        let issuer_pres =
+            build_sd_jwt_vc(claims, issuer_signer, Some(vec![der_b64(leaf_cert)])).unwrap();
+        let client_id = expected_client_id(config);
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &tx.nonce, None).unwrap()
+    }
+
+    fn two_sd_jwt_tx() -> (VerificationTransaction, Jwk) {
+        let (mut tx, pub_jwk) = sample_tx();
+        tx.dcql_query = serde_json::json!({"credentials": [
+            {"id": "pid", "format": "dc+sd-jwt"},
+            {"id": "diploma", "format": "dc+sd-jwt"}
+        ]});
+        (tx, pub_jwk)
+    }
+
+    /// Two credentials in one `vp_token` both verify, and each appears as its own
+    /// record in DCQL declaration order.
+    #[tokio::test]
+    async fn verifies_two_credentials_in_one_vp_token() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+        let pid = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+        let diploma = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("degree", serde_json::json!("MSc"))],
+        );
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [pid], "diploma": [diploma]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .unwrap();
+
+        assert!(res.verified, "both credentials are valid: {:?}", res.checks);
+        assert_eq!(res.credentials.len(), 2);
+        assert_eq!(res.credentials[0].query_id, "pid");
+        assert_eq!(res.credentials[1].query_id, "diploma");
+        assert_eq!(res.credentials[0].claims["given_name"], "Alice");
+        assert_eq!(res.credentials[1].claims["degree"], "MSc");
+        assert_eq!(tx.state, VerificationState::Verified);
+    }
+
+    /// The claim-collision bug, pinned. Two credentials disclosing the SAME claim
+    /// name must not overwrite each other -- a single flat claims map reported one
+    /// value as if both credentials agreed on it.
+    #[tokio::test]
+    async fn per_credential_claims_do_not_collide_on_a_shared_claim_name() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+        let first = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+        let second = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Bob"))],
+        );
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [first], "diploma": [second]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .unwrap();
+
+        assert_eq!(res.credentials[0].claims["given_name"], "Alice");
+        assert_eq!(
+            res.credentials[1].claims["given_name"], "Bob",
+            "each credential keeps its own value; a merged map would report one twice"
+        );
+    }
+
+    /// A subset `vp_token` violates OpenID4VP L1007-1008 but is well-formed, so
+    /// it is a policy verdict (HTTP 200, verified: false), not a structural 400
+    /// (root AGENTS.md §4.3). The credential that DID arrive is still verified.
+    ///
+    /// This is deliberately **non-conformant wallet input**: a wallet that cannot
+    /// deliver all non-optional credentials is required to return none at all.
+    #[tokio::test]
+    async fn a_subset_vp_token_is_a_policy_verdict_naming_the_missing_credential() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+        let pid = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [pid]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .expect("a subset is a policy verdict, not a structural error");
+
+        assert!(!res.verified, "a missing requested credential is a failure");
+
+        let answered = res
+            .checks
+            .iter()
+            .find(|c| c.check == "requested_credentials_answered")
+            .expect("the set-level check must be recorded");
+        assert!(!answered.passed);
+        let detail = answered.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("diploma"),
+            "must name the credential query that went unanswered: {detail}"
+        );
+
+        // The credential that arrived is still fully verified and reported.
+        assert_eq!(res.credentials.len(), 1);
+        assert_eq!(res.credentials[0].query_id, "pid");
+        assert!(
+            res.credentials[0].checks.iter().all(|c| c.passed),
+            "the answered credential's own checks all pass: {:?}",
+            res.credentials[0].checks
+        );
+    }
+
+    /// `check_requested_credentials_answered` is fail-closed and never errors,
+    /// matching `check_dcql_match`'s contract.
+    #[test]
+    fn requested_credentials_answered_passes_when_every_query_is_answered() {
+        let query = serde_json::json!({"credentials": [
+            {"id": "pid", "format": "dc+sd-jwt"},
+            {"id": "mdl", "format": "mso_mdoc"}
+        ]});
+        let answered = vec![
+            PresentedCredential {
+                query_id: "pid".to_string(),
+                format: "dc+sd-jwt".to_string(),
+                claims: serde_json::json!({}),
+                checks: Vec::new(),
+            },
+            PresentedCredential {
+                query_id: "mdl".to_string(),
+                format: "mso_mdoc".to_string(),
+                claims: serde_json::json!({}),
+                checks: Vec::new(),
+            },
+        ];
+
+        let check = check_requested_credentials_answered(&query, &answered);
+        assert_eq!(check.check, "requested_credentials_answered");
+        assert!(check.passed);
+    }
+
+    #[test]
+    fn requested_credentials_answered_fails_closed_on_an_unreadable_query() {
+        let check = check_requested_credentials_answered(&serde_json::json!({}), &[]);
+        assert!(
+            !check.passed,
+            "an unreadable query must fail closed, never pass"
         );
     }
 
