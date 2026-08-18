@@ -85,6 +85,7 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
             named_queries: vec![],
             webhook: None,
             dc_api_expected_origins: Vec::new(),
+            dc_api_accept_legacy_web_origin_audience: false,
         },
         logging: LoggingConfig::default(),
     }

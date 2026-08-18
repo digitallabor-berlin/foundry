@@ -172,6 +172,21 @@ cargo nextest run -p foundry --test wallet_verification           # verification
 - **`jwe_decryption` is seeded as `passed: true`, never as a failure.** JWE
   failure is an early `Err(Decryption(..))` → 400, so a `verified: false` result
   will never carry a failed `jwe_decryption` record.
+- **The DC API audience prefix has two accepted spellings, and only one is
+  on by default.** OpenID4VP 1.0 (L618, L2543) mandates `origin:<origin>`;
+  OpenID4VP **draft 24** Appendix A.2 spelled the same thing
+  `web-origin:<origin>` (it was the "synthetic Client Identifier Scheme" of an
+  unsigned DC API request, and the KB-JWT `aud` was that Client Identifier).
+  Wallets still implementing draft 24 are in the field — real Google Wallet as
+  of 2026-08 — so `verifier.dc_api_accept_legacy_web_origin_audience` adds the
+  legacy spelling to `expected_audiences`. It is **opt-in and defaults to
+  false**: accepting a superseded draft's audience unconditionally would turn
+  VP-0265 into a silent deviation for every deployment. It relaxes the
+  **prefix only** — the Origin half is still matched against
+  `dc_api_expected_origins`, so the flag never widens the set of acceptable
+  Origins, and `do_verify_vp_response` emits a `warn` naming the audience each
+  time a presentation is accepted on it. Do not "simplify" this by always
+  pushing both prefixes.
 - **`client_id` is derived, not configured:** `x509_hash:<base64url(SHA-256(DER leaf))>`
   (HAIP OpenID4VP L256 / OpenID4VP L616), computed by
   `foundry_core::trust::x509_hash_client_id_value` and re-derived independently by

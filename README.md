@@ -444,6 +444,43 @@ from each side: the wallet's attested Origin (CMWallet logs it as
 `GetCredentialActivity: origin <value>`, readable via `adb logcat`) against this
 config key — or, when it is unset, against `public_base_url`.
 
+##### Wallets Still on OpenID4VP draft 24 (`web-origin:`)
+
+The same `KB-JWT audience mismatch` also appears when the Origin is **already
+correct**, because the wallet spells the prefix the old way.
+
+OpenID4VP **draft 24**, Appendix A.2 composed the effective Client Identifier of
+an unsigned DC API request from "a synthetic Client Identifier Scheme of
+`web-origin` and the Origin itself", and the KB-JWT `aud` was that Client
+Identifier — so a draft-24 wallet signs `web-origin:https://site.example`.
+OpenID4VP **1.0** renamed the prefix to `origin:`. foundry implements 1.0 and
+rejects the draft-24 spelling by default.
+
+Real Google Wallet (observed 2026-08) accepts the `openid4vp-v1-unsigned`
+protocol the console requests and then answers with a draft-24 audience. To
+interoperate with it, opt in:
+
+```yaml
+verifier:
+  dc_api_expected_origins: ["https://verifier-site.example"]
+  dc_api_accept_legacy_web_origin_audience: true
+```
+
+This relaxes the **prefix only**. The Origin half is still matched against
+`dc_api_expected_origins`, so no additional Origin becomes acceptable and the
+audience binding OpenID4VP requires is preserved. Both spellings are accepted
+while it is on, so a 1.0-conformant wallet is unaffected. Every presentation
+accepted on the legacy prefix logs:
+
+```text
+WARN KB-JWT bound to the superseded OpenID4VP draft 24 `web-origin:` audience prefix …
+```
+
+Watch for that line disappearing — that is when the wallets in play have caught
+up and the flag can go back off. It is off by default because accepting a
+superseded draft's audience unconditionally would make every deployment deviate
+from OpenID4VP 1.0 silently.
+
 The console plus a real wallet app is the supported way to drive an issuance
 or presentation by hand — foundry ships no wallet client of its own. For a
 scripted equivalent that needs no wallet at all, the end-to-end test boots the

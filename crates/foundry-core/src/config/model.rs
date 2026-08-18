@@ -876,4 +876,26 @@ pub struct VerifierConfig {
     /// single-origin dev/test deployments working unconfigured.
     #[serde(default)]
     pub dc_api_expected_origins: Vec<String>,
+    /// Also accept the superseded `web-origin:` audience prefix over the DC
+    /// API transport, alongside the `origin:` prefix OpenID4VP 1.0 mandates.
+    ///
+    /// OpenID4VP **draft 24** Appendix A.2 composed the effective Client
+    /// Identifier of an unsigned DC API request from "a synthetic Client
+    /// Identifier Scheme of `web-origin` and the Origin itself", and its
+    /// KB-JWT `aud` was that Client Identifier -- so a draft-24 wallet signs
+    /// `web-origin:<origin>`. OpenID4VP **1.0** renamed the prefix to
+    /// `origin:` (L618, L2543) and foundry implements 1.0, so the draft-24
+    /// spelling is rejected by default.
+    ///
+    /// Enabling this does **not** widen the trust boundary: the origin half is
+    /// still matched against [`Self::dc_api_expected_origins`], so only the
+    /// spelling of the prefix is relaxed and no additional Origin becomes
+    /// acceptable. It is opt-in rather than unconditional because accepting a
+    /// superseded draft's audience by default would make every deployment
+    /// silently deviate from L2543; as a flag it is a recorded operator
+    /// choice. Turn it off again once the wallets in play have caught up --
+    /// `do_verify_vp_response` logs a `warn` each time a presentation is
+    /// accepted on the legacy prefix, so the log says when that has happened.
+    #[serde(default)]
+    pub dc_api_accept_legacy_web_origin_audience: bool,
 }

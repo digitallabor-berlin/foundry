@@ -149,6 +149,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             named_queries: vec![],
             webhook: None,
             dc_api_expected_origins: Vec::new(),
+            dc_api_accept_legacy_web_origin_audience: false,
         },
         logging: LoggingConfig::default(),
     };
@@ -836,6 +837,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             named_queries: vec![],
             webhook: None,
             dc_api_expected_origins: Vec::new(),
+            dc_api_accept_legacy_web_origin_audience: false,
         },
         logging: LoggingConfig::default(),
     };
@@ -1000,6 +1002,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             named_queries: vec![],
             webhook: None,
             dc_api_expected_origins: Vec::new(),
+            dc_api_accept_legacy_web_origin_audience: false,
         },
         logging: LoggingConfig::default(),
     };
@@ -1487,6 +1490,7 @@ async fn setup_pop_test_app_with_modes(
             named_queries: vec![],
             webhook: None,
             dc_api_expected_origins: Vec::new(),
+            dc_api_accept_legacy_web_origin_audience: false,
         },
         logging: LoggingConfig::default(),
     };

@@ -391,6 +391,16 @@ verifier:
   # unconfigured single-origin deployment working but is only appropriate
   # when the DC API caller and this server share an origin.
   # dc_api_expected_origins: ["https://wallet-relying-party.example"]
+  # OpenID4VP draft 24 Appendix A.2 spelled that same audience
+  # `web-origin:<origin>`; 1.0 renamed the prefix to `origin:`. Wallets still
+  # implementing draft 24 (real Google Wallet, as of 2026-08) therefore fail
+  # with "KB-JWT audience mismatch" even when the Origin above is correct.
+  # Enable the line below to also accept the draft-24 spelling. It relaxes the
+  # PREFIX only -- the Origin is still matched against the list above, so no
+  # additional Origin becomes acceptable. Off by default, because accepting a
+  # superseded draft's audience unconditionally would make every deployment
+  # deviate from L2543 silently.
+  # dc_api_accept_legacy_web_origin_audience: true
   named_queries:
     # `credentials` must be non-empty (OpenID4VP 1.0 §6, enforced when a
     # verification request is created). The shipped `pid` type has no

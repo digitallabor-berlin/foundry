@@ -385,6 +385,7 @@ mod tests {
                 named_queries: vec![],
                 webhook: None,
                 dc_api_expected_origins: Vec::new(),
+                dc_api_accept_legacy_web_origin_audience: false,
             },
             logging: LoggingConfig::default(),
         }

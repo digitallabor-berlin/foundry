@@ -15,6 +15,14 @@ use josekit::jwk::Jwk;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Audience prefix OpenID4VP **draft 24** Appendix A.2 gave the effective
+/// Client Identifier of an unsigned DC API request, superseded by `origin:`
+/// in OpenID4VP 1.0 (L618, L2543).
+///
+/// Only ever consulted when `verifier.dc_api_accept_legacy_web_origin_audience`
+/// is enabled; foundry implements 1.0 and rejects this spelling by default.
+const LEGACY_WEB_ORIGIN_PREFIX: &str = "web-origin:";
+
 /// The single presentation selected from a `vp_token`, already destructured
 /// according to the credential format the DCQL query declared.
 ///
@@ -553,22 +561,36 @@ async fn do_verify_vp_response(
     // `public_base_url`, which keeps existing single-origin dev/test setups
     // working without requiring the new config field.
     let expected_audiences: Vec<String> = if tx.transport == "dc_api" {
-        if config.verifier.dc_api_expected_origins.is_empty() {
-            let fallback = format!("origin:{base_url}");
+        let origins: Vec<String> = if config.verifier.dc_api_expected_origins.is_empty() {
             tracing::debug!(
-                fallback_origin = %fallback,
+                fallback_origin = %base_url,
                 "verifier.dc_api_expected_origins is unset; falling back to an origin derived \
                  from public_base_url"
             );
-            vec![fallback]
+            vec![base_url.to_string()]
         } else {
-            config
-                .verifier
-                .dc_api_expected_origins
-                .iter()
-                .map(|origin| format!("origin:{origin}"))
-                .collect()
+            config.verifier.dc_api_expected_origins.clone()
+        };
+
+        // OpenID4VP **draft 24** Appendix A.2 derived the effective Client
+        // Identifier of an unsigned DC API request from "a synthetic Client
+        // Identifier Scheme of `web-origin` and the Origin itself", and its
+        // KB-JWT `aud` was that Client Identifier -- so a draft-24 wallet
+        // signs `web-origin:<origin>` where 1.0 (L618, L2543) says
+        // `origin:<origin>`. Wallets still implementing draft 24 are in the
+        // field, so an operator may opt into the older spelling. The
+        // accommodation adds a prefix to the accepted set and never an
+        // Origin: `origins` above is still the whole allow-list, so an
+        // unlisted Origin stays rejected under either prefix and the
+        // audience-binding property L2543 exists to provide is preserved.
+        let mut audiences = Vec::with_capacity(origins.len() * 2);
+        for origin in &origins {
+            audiences.push(format!("origin:{origin}"));
+            if config.verifier.dc_api_accept_legacy_web_origin_audience {
+                audiences.push(format!("{LEGACY_WEB_ORIGIN_PREFIX}{origin}"));
+            }
         }
+        audiences
     } else {
         vec![client_id.clone()]
     };
@@ -605,6 +627,26 @@ async fn do_verify_vp_response(
                 passed: true,
                 detail: None,
             });
+
+            // Say out loud when a presentation was only accepted because the
+            // operator enabled the draft-24 accommodation, so the flag can be
+            // turned off again once the wallets in play have caught up. This
+            // is an Origin -- a public identifier, not a payload -- so it is
+            // logged unconditionally (root AGENTS.md §4.5).
+            if let Some(aud) = verified
+                .kb_jwt_payload
+                .get("aud")
+                .and_then(|v| v.as_str())
+                .filter(|aud| aud.starts_with(LEGACY_WEB_ORIGIN_PREFIX))
+            {
+                tracing::warn!(
+                    audience = %aud,
+                    "KB-JWT bound to the superseded OpenID4VP draft 24 `web-origin:` audience \
+                     prefix; accepted only because \
+                     verifier.dc_api_accept_legacy_web_origin_audience is enabled -- OpenID4VP \
+                     1.0 L2543 mandates `origin:`"
+                );
+            }
 
             kb_jwt_payload = Some(verified.kb_jwt_payload);
             if let Value::Object(map) = verified.claims {
@@ -952,6 +994,7 @@ mod tests {
                 // this file; every other test here uses `direct_post` (see
                 // `sample_tx`), so this default is inert for them.
                 dc_api_expected_origins: vec!["https://verifier-website.example".to_string()],
+                dc_api_accept_legacy_web_origin_audience: false,
             },
             logging: LoggingConfig::default(),
         };
@@ -2648,6 +2691,188 @@ mod tests {
             matches!(err, VerificationError::Failed(_)),
             "an audience matching neither a configured origin nor the fallback must be rejected, \
              got: {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // OpenID4VP draft 24 `web-origin:` audience accommodation
+    // (`verifier.dc_api_accept_legacy_web_origin_audience`).
+    //
+    // Draft 24 Appendix A.2 composed the effective Client Identifier of an
+    // unsigned DC API request from "a synthetic Client Identifier Scheme of
+    // `web-origin` and the Origin itself", and its KB-JWT `aud` was that
+    // Client Identifier. OpenID4VP 1.0 renamed the prefix to `origin:`
+    // (L618, L2543). Real wallets still in the field sign the draft-24
+    // spelling, so foundry can be told to accept it -- but only when asked,
+    // and never at the cost of the Origin allow-list.
+    // -----------------------------------------------------------------------
+
+    /// Build a `dc_api` presentation bound to `audience`, ready to hand to
+    /// `verify_vp_response`. Shared by the four `web-origin` tests below,
+    /// which differ only in the audience string and the config flag.
+    fn dc_api_presentation_with_audience(
+        leaf_cert: &[u8],
+        leaf_key: &[u8],
+        tx: &mut VerificationTransaction,
+        audience: &str,
+    ) -> String {
+        let issuer_signer = FileSigner::from_pem(leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        tx.transport = "dc_api".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(leaf_cert)])).unwrap();
+        let presentation =
+            attach_kb_jwt(issuer_pres, &holder_signer, audience, &tx.nonce, None).unwrap();
+
+        encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap()
+    }
+
+    /// Default posture is strict OpenID4VP 1.0: the draft-24 `web-origin:`
+    /// spelling is rejected even when the Origin half names a configured
+    /// origin, because L2543 mandates the `origin:` prefix. Accepting it by
+    /// default would make every deployment silently deviate.
+    #[tokio::test]
+    async fn dc_api_legacy_web_origin_audience_is_rejected_by_default() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        assert!(
+            !config.verifier.dc_api_accept_legacy_web_origin_audience,
+            "the accommodation must be off unless an operator asks for it"
+        );
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        let jwe_str = dc_api_presentation_with_audience(
+            &leaf_cert,
+            &leaf_key,
+            &mut tx,
+            // The very value real Google Wallet sends: right Origin, draft-24 prefix.
+            "web-origin:https://verifier-website.example",
+        );
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Failed(_)),
+            "the draft-24 `web-origin:` audience must be rejected while the accommodation is off, \
+             got: {err:?}"
+        );
+    }
+
+    /// With the accommodation enabled, the draft-24 spelling of a *configured*
+    /// Origin verifies -- this is the switch that unblocks a wallet still
+    /// implementing OpenID4VP draft 24 Appendix A.2.
+    #[tokio::test]
+    async fn dc_api_legacy_web_origin_audience_accepted_when_flag_enabled() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (mut config, _trust_dir) = test_config(&ca_str);
+        config.verifier.dc_api_accept_legacy_web_origin_audience = true;
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        let jwe_str = dc_api_presentation_with_audience(
+            &leaf_cert,
+            &leaf_key,
+            &mut tx,
+            "web-origin:https://verifier-website.example",
+        );
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "a draft-24 `web-origin:` audience naming a configured origin must verify once the \
+             accommodation is enabled: {:?}",
+            res.checks
+        );
+    }
+
+    /// The accommodation relaxes the *prefix*, never the Origin allow-list.
+    /// An unlisted Origin must still be rejected under the flag -- otherwise
+    /// the flag would widen the trust boundary rather than just its spelling.
+    #[tokio::test]
+    async fn dc_api_legacy_web_origin_flag_still_enforces_the_origin_allow_list() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (mut config, _trust_dir) = test_config(&ca_str);
+        config.verifier.dc_api_accept_legacy_web_origin_audience = true;
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        let jwe_str = dc_api_presentation_with_audience(
+            &leaf_cert,
+            &leaf_key,
+            &mut tx,
+            "web-origin:https://some-other-site.example",
+        );
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::Failed(_)),
+            "the accommodation must relax only the prefix; an unlisted Origin must still be \
+             rejected, got: {err:?}"
+        );
+    }
+
+    /// Enabling the accommodation ADDS the legacy spelling; it must not
+    /// replace the conformant one, or turning it on would break every wallet
+    /// that already implements OpenID4VP 1.0.
+    #[tokio::test]
+    async fn dc_api_conformant_origin_audience_still_accepted_when_legacy_flag_enabled() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (mut config, _trust_dir) = test_config(&ca_str);
+        config.verifier.dc_api_accept_legacy_web_origin_audience = true;
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        let jwe_str = dc_api_presentation_with_audience(
+            &leaf_cert,
+            &leaf_key,
+            &mut tx,
+            "origin:https://verifier-website.example",
+        );
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "the OpenID4VP 1.0 `origin:` audience must keep verifying with the accommodation \
+             enabled: {:?}",
+            res.checks
         );
     }
 
