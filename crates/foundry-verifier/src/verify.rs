@@ -2314,7 +2314,10 @@ mod tests {
         assert_eq!(selected[0].0, "pid");
         assert_eq!(selected[1].0, "mdl");
         assert!(matches!(selected[0].1, SelectedPresentation::SdJwtVc(_)));
-        assert!(matches!(selected[1].1, SelectedPresentation::MsoMdoc { .. }));
+        assert!(matches!(
+            selected[1].1,
+            SelectedPresentation::MsoMdoc { .. }
+        ));
     }
 
     /// Declaration order, not `vp_token` key order. Depending on the wallet's
@@ -2358,7 +2361,10 @@ mod tests {
             "surprise": ["x"]
         });
         let msg = rejection_of(vp, &two_credential_dcql());
-        assert!(msg.contains("surprise"), "must name the unexpected id: {msg}");
+        assert!(
+            msg.contains("surprise"),
+            "must name the unexpected id: {msg}"
+        );
         assert!(msg.contains("did not ask for"), "{msg}");
     }
 
