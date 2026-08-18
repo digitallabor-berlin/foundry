@@ -263,6 +263,13 @@ pub async fn verify_vp_response(
 
             // One record per check, so an operator can see which stage rejected a
             // presentation without reading the JSON verdict.
+            //
+            // Both levels, and per-credential records name their credential:
+            // with N credentials `check=dcql_match passed=false` alone does not
+            // say whose. A DCQL credential query id is operator-authored request
+            // structure, not a holder value, so naming it is safe -- the same
+            // reasoning `dcql.rs` records for naming claim paths in a mismatch
+            // (root AGENTS.md §4.5).
             for check in &result.checks {
                 if check.passed {
                     tracing::info!(check = %check.check, passed = true, "verification check");
@@ -275,16 +282,55 @@ pub async fn verify_vp_response(
                     );
                 }
             }
+            for credential in &result.credentials {
+                for check in &credential.checks {
+                    if check.passed {
+                        tracing::info!(
+                            credential = %credential.query_id,
+                            check = %check.check,
+                            passed = true,
+                            "verification check"
+                        );
+                    } else {
+                        tracing::warn!(
+                            credential = %credential.query_id,
+                            check = %check.check,
+                            passed = false,
+                            detail = %check.detail.as_deref().unwrap_or(""),
+                            "verification check failed"
+                        );
+                    }
+                }
+            }
 
             // A policy failure (DCQL mismatch, revoked credential) is a 200 with
             // verified: false, so `warn` — not `error` — is the right level: the
             // service behaved correctly.
+            //
+            // `credentials_requested` / `credentials_answered` are COUNTS, never
+            // identifiers, so they carry no request structure at all. The count
+            // pair is what makes a subset response visible at a glance.
+            let credentials_requested = serde_json::from_value::<DcqlQuery>(tx.dcql_query.clone())
+                .map(|q| q.credentials().len())
+                .unwrap_or(0);
+            let credentials_answered = result.credentials.len();
+
             if result.verified {
-                tracing::info!(verified = true, "vp response verified");
+                tracing::info!(
+                    verified = true,
+                    credentials_requested,
+                    credentials_answered,
+                    "vp response verified"
+                );
             } else {
                 tracing::warn!(
                     verified = false,
-                    failed_checks = result.checks.iter().filter(|c| !c.passed).count(),
+                    // BOTH levels: after multi-credential support most checks are
+                    // per-credential, so a top-level-only count under-reports and
+                    // would read as zero failures on a failed verification.
+                    failed_checks = result.all_checks().filter(|c| !c.passed).count(),
+                    credentials_requested,
+                    credentials_answered,
                     "vp response not verified"
                 );
             }
