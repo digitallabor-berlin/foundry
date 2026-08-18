@@ -64,8 +64,8 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Select the one presentation to verify from an OpenID4VP 1.0 section 8.1
-/// `vp_token`.
+/// Select every presentation to verify from an OpenID4VP 1.0 `vp_token`
+/// (Response Parameters, L1161; the `vp_token` parameter itself at L1166).
 ///
 /// `vp_token` is a JSON object keyed by DCQL credential query id whose values are
 /// **arrays** of presentations — the same shape for every credential format. The
@@ -74,16 +74,25 @@ fn json_type_name(value: &Value) -> &'static str {
 /// is exactly what made a conformant SD-JWT VC presentation report the
 /// misleading `mdoc vp_token missing 'mdoc'`.
 ///
-/// Returns the answered credential query id with the destructured payload. Every
-/// failure here is structural (HTTP 400), never a policy verdict.
-fn select_presentation<'a>(
+/// Returns one entry per answered credential query, in **DCQL declaration
+/// order** — never `vp_token` key order, which depends on the wallet's
+/// serialization and on whether `serde_json` was built with `preserve_order`.
+///
+/// Every failure here is structural (HTTP 400), never a policy verdict. In
+/// particular a `vp_token` answering only *some* of the requested credential
+/// queries is **accepted** here: it violates L1007-1008 ("If the Wallet cannot
+/// deliver all non-optional Credentials requested by the Verifier according to
+/// these rules, it MUST NOT return any Credential(s)"), but it is well-formed,
+/// so the verdict belongs to `check_requested_credentials_answered`
+/// (root AGENTS.md §4.3).
+fn select_presentations<'a>(
     vp_token: &'a Value,
     dcql_query: &Value,
-) -> Result<(String, SelectedPresentation<'a>), VerificationError> {
+) -> Result<Vec<(String, SelectedPresentation<'a>)>, VerificationError> {
     let entries = vp_token.as_object().ok_or_else(|| {
         VerificationError::Failed(format!(
             "vp_token must be a JSON object keyed by DCQL credential query id \
-             (OpenID4VP 1.0 section 8.1), got {}",
+             (OpenID4VP 1.0 L1166), got {}",
             json_type_name(vp_token)
         ))
     })?;
@@ -97,117 +106,124 @@ fn select_presentation<'a>(
         ))
     })?;
 
-    let mut answering = query
-        .credentials()
-        .iter()
-        .filter(|cq| entries.contains_key(cq.id()));
-    let cq = match (answering.next(), answering.next()) {
-        (Some(cq), None) => cq,
-        (None, _) => {
-            let received: Vec<&str> = entries.keys().map(String::as_str).collect();
-            let expected: Vec<&str> = query.credentials().iter().map(|c| c.id()).collect();
+    let requested: Vec<&str> = query.credentials().iter().map(|cq| cq.id()).collect();
+
+    // An id the request never asked for is a contract violation with no possible
+    // verdict attached: there is no credential query to verify it against, so it
+    // cannot be reported as a policy outcome the way a *missing* one can.
+    for key in entries.keys() {
+        if !requested.contains(&key.as_str()) {
             return Err(VerificationError::Failed(format!(
-                "vp_token names no credential query from this request: got [{}], \
-                 expected one of [{}]",
-                received.join(", "),
-                expected.join(", ")
+                "vp_token names credential query '{}', which this request did not ask \
+                 for; expected one of [{}]",
+                key,
+                requested.join(", ")
             )));
         }
-        (Some(_), Some(_)) => {
-            let matched: Vec<&str> = query
-                .credentials()
-                .iter()
-                .filter(|c| entries.contains_key(c.id()))
-                .map(|c| c.id())
-                .collect();
-            return Err(VerificationError::Failed(format!(
-                "vp_token answers several credential queries ([{}]); this verifier \
-                 verifies a single credential per vp_token",
-                matched.join(", ")
-            )));
-        }
-    };
+    }
 
-    let value = entries.get(cq.id()).unwrap_or(&Value::Null);
-    let presentations = value.as_array().ok_or_else(|| {
-        VerificationError::Failed(format!(
-            "vp_token['{}'] must be an array of presentations \
-             (OpenID4VP 1.0 section 8.1), got {}",
-            cq.id(),
-            json_type_name(value)
-        ))
-    })?;
+    let mut selected = Vec::with_capacity(requested.len());
+    for cq in query.credentials() {
+        let Some(value) = entries.get(cq.id()) else {
+            // Not answered. Whether that is acceptable is a POLICY question
+            // (L1007-1008 makes it a wallet violation), decided by
+            // `check_requested_credentials_answered` -- not a structural one.
+            continue;
+        };
 
-    // Exactly one: silently taking [0] of a longer array would verify part of a
-    // presentation set while reporting the whole set as satisfied.
-    let presentation = match presentations.as_slice() {
-        [single] => single,
-        other => {
-            return Err(VerificationError::Failed(format!(
-                "vp_token['{}'] must contain exactly one presentation, got {}",
+        let presentations = value.as_array().ok_or_else(|| {
+            VerificationError::Failed(format!(
+                "vp_token['{}'] must be an array of presentations \
+                 (OpenID4VP 1.0 L1166), got {}",
                 cq.id(),
-                other.len()
-            )));
-        }
-    };
+                json_type_name(value)
+            ))
+        })?;
 
-    let selected = match cq.format() {
-        CredentialFormat::DcSdJwt => {
-            SelectedPresentation::SdJwtVc(presentation.as_str().ok_or_else(|| {
-                VerificationError::Failed(format!(
-                    "credential query '{}' declares format dc+sd-jwt, so its \
-                     presentation must be an SD-JWT VC string, got {}",
+        // L1166: "When `multiple` is omitted, or set to `false`, the array MUST
+        // contain only one Presentation." foundry ignores `multiple` (an unknown
+        // property per VP-0090), so it never requests more than one and the
+        // one-presentation rule always applies. Silently taking [0] of a longer
+        // array would verify part of a presentation set while reporting the
+        // whole set as satisfied.
+        let presentation = match presentations.as_slice() {
+            [single] => single,
+            other => {
+                return Err(VerificationError::Failed(format!(
+                    "vp_token['{}'] must contain exactly one presentation, got {}",
                     cq.id(),
-                    json_type_name(presentation)
-                ))
-            })?)
-        }
-        CredentialFormat::MsoMdoc => {
-            let obj = presentation.as_object().ok_or_else(|| {
-                VerificationError::Failed(format!(
-                    "credential query '{}' declares format mso_mdoc, so its \
-                     presentation must be an object, got {}",
-                    cq.id(),
-                    json_type_name(presentation)
-                ))
-            })?;
-            let mdoc_b64 = obj.get("mdoc").and_then(|v| v.as_str()).ok_or_else(|| {
-                VerificationError::Failed(format!(
-                    "mdoc presentation for credential query '{}' is missing 'mdoc'",
-                    cq.id()
-                ))
-            })?;
-            let device_signature_b64 = obj
-                .get("device_signature")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
+                    other.len()
+                )));
+            }
+        };
+
+        let payload = match cq.format() {
+            CredentialFormat::DcSdJwt => {
+                SelectedPresentation::SdJwtVc(presentation.as_str().ok_or_else(|| {
                     VerificationError::Failed(format!(
-                        "mdoc presentation for credential query '{}' is missing \
-                         'device_signature'",
+                        "credential query '{}' declares format dc+sd-jwt, so its \
+                         presentation must be an SD-JWT VC string, got {}",
+                        cq.id(),
+                        json_type_name(presentation)
+                    ))
+                })?)
+            }
+            CredentialFormat::MsoMdoc => {
+                let obj = presentation.as_object().ok_or_else(|| {
+                    VerificationError::Failed(format!(
+                        "credential query '{}' declares format mso_mdoc, so its \
+                         presentation must be an object, got {}",
+                        cq.id(),
+                        json_type_name(presentation)
+                    ))
+                })?;
+                let mdoc_b64 = obj.get("mdoc").and_then(|v| v.as_str()).ok_or_else(|| {
+                    VerificationError::Failed(format!(
+                        "mdoc presentation for credential query '{}' is missing 'mdoc'",
                         cq.id()
                     ))
                 })?;
-            SelectedPresentation::MsoMdoc {
-                mdoc_b64,
-                device_signature_b64,
+                let device_signature_b64 = obj
+                    .get("device_signature")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        VerificationError::Failed(format!(
+                            "mdoc presentation for credential query '{}' is missing \
+                             'device_signature'",
+                            cq.id()
+                        ))
+                    })?;
+                SelectedPresentation::MsoMdoc {
+                    mdoc_b64,
+                    device_signature_b64,
+                }
             }
-        }
-        // `CredentialFormat::Other` exists so that an unimplemented format inside a
-        // multi-credential query simply fails to match rather than invalidating the
-        // whole query (see `dcql_model`). Once a wallet has *answered* such a query
-        // there is nothing to fall back to: no verifier for the format exists, so
-        // this is a request the verifier cannot service.
-        CredentialFormat::Other(other) => {
-            return Err(VerificationError::Failed(format!(
-                "credential query '{}' requests credential format '{}', which this \
-                 verifier does not implement",
-                cq.id(),
-                other
-            )));
-        }
-    };
+            // `CredentialFormat::Other` exists so that an unimplemented format inside
+            // a multi-credential query simply fails to match rather than invalidating
+            // the whole query (see `dcql_model`). Once a wallet has *answered* such a
+            // query there is nothing to fall back to: no verifier for the format
+            // exists, so this is a request the verifier cannot service.
+            CredentialFormat::Other(other) => {
+                return Err(VerificationError::Failed(format!(
+                    "credential query '{}' requests credential format '{}', which this \
+                     verifier does not implement",
+                    cq.id(),
+                    other
+                )));
+            }
+        };
 
-    Ok((cq.id().to_string(), selected))
+        selected.push((cq.id().to_string(), payload));
+    }
+
+    if selected.is_empty() {
+        return Err(VerificationError::Failed(format!(
+            "vp_token answers no credential query from this request: expected one of [{}]",
+            requested.join(", ")
+        )));
+    }
+
+    Ok(selected)
 }
 
 /// `skip_all` is mandatory here, not stylistic: the default `instrument`
@@ -608,7 +624,12 @@ async fn do_verify_vp_response(
     // 3. Credential-format-specific signature/binding verification + disclosure.
     //    The format is taken from the answered DCQL credential query, never
     //    inferred from the shape of the payload.
-    let (answered_query_id, selected) = select_presentation(vp_token, &tx.dcql_query)?;
+    // Task 4 turns this into a loop over every entry. Taking the first keeps
+    // this task's diff to selection alone. `select_presentations` returns `Err`
+    // rather than an empty `Vec`, so `remove(0)` is the panic-free form here --
+    // no `unwrap`/`expect` is needed or wanted (root AGENTS.md §4.1).
+    let mut selected_all = select_presentations(vp_token, &tx.dcql_query)?;
+    let (answered_query_id, selected) = selected_all.remove(0);
     let presented_format = selected.format();
     let mut disclosed_claims = serde_json::Map::new();
     // Populated only for SD-JWT VC presentations, whose Key Binding JWT carries
@@ -2217,7 +2238,7 @@ mod tests {
         );
     }
 
-    // --- select_presentation: the OpenID4VP 1.0 section 8.1 envelope ---
+    // --- select_presentations: the OpenID4VP 1.0 `vp_token` envelope (L1161) ---
     //
     // These exercise envelope selection directly, with no JWE, no keys and no
     // trust store, so a failure points at the envelope rather than at crypto.
@@ -2230,83 +2251,152 @@ mod tests {
         serde_json::json!({"credentials": [{"id": "c1", "format": "mso_mdoc"}]})
     }
 
+    fn two_credential_dcql() -> Value {
+        serde_json::json!({"credentials": [
+            {"id": "pid", "format": "dc+sd-jwt"},
+            {"id": "mdl", "format": "mso_mdoc"}
+        ]})
+    }
+
     /// Assert rejection and hand back the message, so each test can check that the
     /// message actually says something actionable.
     fn rejection_of(vp_token: Value, dcql_query: &Value) -> String {
-        match select_presentation(&vp_token, dcql_query) {
-            Ok((id, selected)) => {
-                panic!("expected rejection, but selected id={id} payload={selected:?}")
+        match select_presentations(&vp_token, dcql_query) {
+            Ok(selected) => {
+                let ids: Vec<&str> = selected.iter().map(|(id, _)| id.as_str()).collect();
+                panic!("expected rejection, but selected {ids:?}")
             }
             Err(e) => e.to_string(),
         }
     }
 
     #[test]
-    fn select_presentation_accepts_conformant_sd_jwt_envelope() {
+    fn select_presentations_accepts_conformant_sd_jwt_envelope() {
         let vp = serde_json::json!({"c1": ["header.body.sig~disclosure~kb"]});
-        let (id, selected) = select_presentation(&vp, &sd_jwt_dcql()).unwrap();
-        assert_eq!(id, "c1");
-        match selected {
-            SelectedPresentation::SdJwtVc(s) => assert_eq!(s, "header.body.sig~disclosure~kb"),
+        let selected = select_presentations(&vp, &sd_jwt_dcql()).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, "c1");
+        match &selected[0].1 {
+            SelectedPresentation::SdJwtVc(s) => assert_eq!(*s, "header.body.sig~disclosure~kb"),
             other => panic!("expected SdJwtVc, got {other:?}"),
         }
     }
 
     #[test]
-    fn select_presentation_accepts_conformant_mdoc_envelope() {
+    fn select_presentations_accepts_conformant_mdoc_envelope() {
         let vp = serde_json::json!({"c1": [{"mdoc": "AAAA", "device_signature": "BBBB"}]});
-        let (id, selected) = select_presentation(&vp, &mdoc_dcql()).unwrap();
-        assert_eq!(id, "c1");
-        match selected {
+        let selected = select_presentations(&vp, &mdoc_dcql()).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, "c1");
+        match &selected[0].1 {
             SelectedPresentation::MsoMdoc {
                 mdoc_b64,
                 device_signature_b64,
             } => {
-                assert_eq!(mdoc_b64, "AAAA");
-                assert_eq!(device_signature_b64, "BBBB");
+                assert_eq!(*mdoc_b64, "AAAA");
+                assert_eq!(*device_signature_b64, "BBBB");
             }
             other => panic!("expected MsoMdoc, got {other:?}"),
         }
     }
 
+    /// The inverse of the guard this feature removes. A `vp_token` answering
+    /// several credential queries is the point, not an error.
+    #[test]
+    fn select_presentations_accepts_several_answered_queries() {
+        let vp = serde_json::json!({
+            "pid": ["header.body.sig~disclosure~kb"],
+            "mdl": [{"mdoc": "AAAA", "device_signature": "BBBB"}]
+        });
+        let selected = select_presentations(&vp, &two_credential_dcql()).unwrap();
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].0, "pid");
+        assert_eq!(selected[1].0, "mdl");
+        assert!(matches!(selected[0].1, SelectedPresentation::SdJwtVc(_)));
+        assert!(matches!(selected[1].1, SelectedPresentation::MsoMdoc { .. }));
+    }
+
+    /// Declaration order, not `vp_token` key order. Depending on the wallet's
+    /// serialization -- or on whether serde_json is built with `preserve_order`
+    /// -- would make the operator-visible output non-deterministic.
+    #[test]
+    fn select_presentations_follows_dcql_declaration_order() {
+        // `mdl` first in the vp_token, `pid` first in the query.
+        let vp = serde_json::json!({
+            "mdl": [{"mdoc": "AAAA", "device_signature": "BBBB"}],
+            "pid": ["header.body.sig~disclosure~kb"]
+        });
+        let selected = select_presentations(&vp, &two_credential_dcql()).unwrap();
+
+        let ids: Vec<&str> = selected.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["pid", "mdl"],
+            "order must follow the DCQL query, not the vp_token"
+        );
+    }
+
+    /// A subset is a wallet MUST-violation (OpenID4VP 1.0 L1007-1008) but a
+    /// well-formed one, so selection must NOT reject it: it is a policy verdict
+    /// decided later by `requested_credentials_answered` (root AGENTS.md §4.3).
+    #[test]
+    fn select_presentations_accepts_a_subset_and_leaves_the_verdict_to_policy() {
+        let vp = serde_json::json!({"pid": ["header.body.sig~disclosure~kb"]});
+        let selected = select_presentations(&vp, &two_credential_dcql()).unwrap();
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].0, "pid");
+    }
+
+    /// An id the request never asked for is structural: there is no credential
+    /// query to verify it against, so no verdict can be attributed to it.
+    #[test]
+    fn select_presentations_rejects_an_id_that_was_never_requested() {
+        let vp = serde_json::json!({
+            "pid": ["header.body.sig~disclosure~kb"],
+            "surprise": ["x"]
+        });
+        let msg = rejection_of(vp, &two_credential_dcql());
+        assert!(msg.contains("surprise"), "must name the unexpected id: {msg}");
+        assert!(msg.contains("did not ask for"), "{msg}");
+    }
+
+    #[test]
+    fn select_presentations_rejects_an_empty_vp_token() {
+        let msg = rejection_of(serde_json::json!({}), &two_credential_dcql());
+        assert!(msg.contains("no credential query"), "{msg}");
+    }
+
     /// The reported production defect: a bare string was foundry's old SD-JWT VC
     /// shape, and no conformant wallet sends it.
     #[test]
-    fn select_presentation_rejects_bare_string_vp_token() {
+    fn select_presentations_rejects_bare_string_vp_token() {
         let msg = rejection_of(serde_json::json!("header.body.sig~"), &sd_jwt_dcql());
         assert!(msg.contains("must be a JSON object"), "{msg}");
         assert!(msg.contains("got a string"), "{msg}");
     }
 
     /// foundry's old mdoc shape put these keys at the top level of `vp_token`.
+    /// They now read as credential query ids that were never requested.
     #[test]
-    fn select_presentation_rejects_legacy_top_level_mdoc_envelope() {
+    fn select_presentations_reject_legacy_top_level_mdoc_envelope() {
         let msg = rejection_of(
             serde_json::json!({"mdoc": "AAAA", "device_signature": "BBBB"}),
             &mdoc_dcql(),
         );
-        assert!(msg.contains("names no credential query"), "{msg}");
+        assert!(msg.contains("did not ask for"), "{msg}");
     }
 
     #[test]
-    fn select_presentation_rejects_unknown_query_id_naming_both_sides() {
+    fn select_presentations_rejects_unknown_query_id_naming_both_sides() {
         let msg = rejection_of(serde_json::json!({"unexpected": ["x"]}), &sd_jwt_dcql());
         assert!(msg.contains("unexpected"), "must name what arrived: {msg}");
         assert!(msg.contains("c1"), "must name what was expected: {msg}");
     }
 
     #[test]
-    fn select_presentation_rejects_multiple_answered_queries() {
-        let dcql = serde_json::json!({"credentials": [
-            {"id": "a", "format": "dc+sd-jwt"},
-            {"id": "b", "format": "dc+sd-jwt"}
-        ]});
-        let msg = rejection_of(serde_json::json!({"a": ["x"], "b": ["y"]}), &dcql);
-        assert!(msg.contains("several credential queries"), "{msg}");
-    }
-
-    #[test]
-    fn select_presentation_requires_exactly_one_presentation() {
+    fn select_presentations_requires_exactly_one_presentation() {
         let dcql = sd_jwt_dcql();
         let empty = rejection_of(serde_json::json!({"c1": []}), &dcql);
         assert!(empty.contains("exactly one presentation"), "{empty}");
@@ -2315,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn select_presentation_requires_an_array_value() {
+    fn select_presentations_requires_an_array_value() {
         let msg = rejection_of(serde_json::json!({"c1": "not-an-array"}), &sd_jwt_dcql());
         assert!(msg.contains("must be an array"), "{msg}");
     }
@@ -2324,7 +2414,7 @@ mod tests {
     /// old shape-sniffing protection now lives, with a message that names the
     /// declared format instead of guessing.
     #[test]
-    fn select_presentation_rejects_payload_contradicting_declared_format() {
+    fn select_presentations_rejects_payload_contradicting_declared_format() {
         let object_for_sd_jwt = rejection_of(
             serde_json::json!({"c1": [{"mdoc": "A", "device_signature": "B"}]}),
             &sd_jwt_dcql(),
@@ -2339,7 +2429,7 @@ mod tests {
     }
 
     #[test]
-    fn select_presentation_rejects_unusable_dcql_query() {
+    fn select_presentations_rejects_unusable_dcql_query() {
         let msg = rejection_of(
             serde_json::json!({"c1": ["x"]}),
             &serde_json::json!({"credentials": []}),
@@ -2351,7 +2441,7 @@ mod tests {
     /// fail to match inside a multi-credential query. Once one is *answered*,
     /// though, there is no verifier to dispatch to.
     #[test]
-    fn select_presentation_rejects_unimplemented_credential_format() {
+    fn select_presentations_rejects_unimplemented_credential_format() {
         let dcql = serde_json::json!({"credentials": [{"id": "c1", "format": "jwt_vc_json"}]});
         let msg = rejection_of(serde_json::json!({"c1": ["x"]}), &dcql);
         assert!(msg.contains("jwt_vc_json"), "{msg}");
