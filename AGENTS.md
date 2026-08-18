@@ -78,13 +78,21 @@ that point back here.
 
 ### 4.2 Honest Verification Verdicts (`verified` flag)
 
-- In `foundry-verifier`, `VerificationResult.verified` MUST equal
-  `checks.iter().all(|c| c.passed)`.
+- In `foundry-verifier`, `VerificationResult.verified` MUST equal the
+  conjunction over **every** `CheckResult` in the result — the top-level
+  `checks` **and** every `credentials[i].checks` entry. Use
+  `VerificationResult::all_checks()`; `checks.iter().all(..)` alone is
+  satisfiable while a per-credential check fails, which is the whole defect
+  this rule exists to prevent.
 - **Never hardcode `verified: true`.**
-- Every verification step pushes a named `CheckResult`: `jwe_decryption`,
-  `sd_jwt_vc_signature_and_kb_jwt`, `mdoc_issuer_auth_and_device_signature`,
-  `dcql_match`, `status_check`, `transaction_data_binding` (the last only when
-  the request carried `transaction_data`).
+- Every verification step pushes a named `CheckResult`, at one of two levels.
+  **Cross-cutting** (`result.checks`): `jwe_decryption`,
+  `requested_credentials_answered`. **Per-credential**
+  (`result.credentials[i].checks`): `sd_jwt_vc_signature_and_kb_jwt` or
+  `mdoc_issuer_auth_and_device_signature` (mutually exclusive, chosen by the
+  answered credential query's declared format), `dcql_match`, `status_check`,
+  and `transaction_data_binding` (only when the request carried
+  `transaction_data`).
 
 ### 4.3 Policy Failures vs. Structural / Network Failures
 

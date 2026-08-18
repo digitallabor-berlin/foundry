@@ -558,7 +558,10 @@ async fn full_flow_issue_verify_revoke_reverify() {
         happy.checks,
         guard.dump_logs()
     );
-    for check in &happy.checks {
+    // Both levels: after multi-credential support most checks (including
+    // status_check) live on `credentials[i].checks`, so iterating only the
+    // top-level list would assert almost nothing.
+    for check in happy.all_checks() {
         assert!(
             check.passed,
             "check {} unexpectedly failed: {:?}",
@@ -598,19 +601,18 @@ async fn full_flow_issue_verify_revoke_reverify() {
     let revoked = run_verification(&client, &admin_base, &wallet_base, &issued).await;
     assert!(
         !revoked.verified,
-        "revoked credential must not verify; checks={:?}",
-        revoked.checks
+        "revoked credential must not verify; checks={:?} credentials={:?}",
+        revoked.checks, revoked.credentials
     );
     let status_check = revoked
-        .checks
-        .iter()
+        .all_checks()
         .find(|c| c.check == "status_check")
         .expect("status_check present");
     assert!(
         !status_check.passed,
         "status_check must fail after revocation"
     );
-    for check in &revoked.checks {
+    for check in revoked.all_checks() {
         if check.check != "status_check" {
             assert!(
                 check.passed,

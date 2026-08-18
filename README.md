@@ -1010,12 +1010,21 @@ foundry serve --config config.yaml 2>&1 | grep '<the x-request-id value>'
 ```
 
 A failed verification records which stage rejected the presentation, using the
-same check names the successful path reports — `jwe_decryption`,
-`sd_jwt_vc_signature_and_kb_jwt`, `mdoc_issuer_auth_and_device_signature`,
+same check names the successful path reports, at two levels. **Cross-cutting**:
+`jwe_decryption`, `requested_credentials_answered`. **Per-credential**:
+`sd_jwt_vc_signature_and_kb_jwt` or `mdoc_issuer_auth_and_device_signature`,
 `dcql_match`, `status_check`, `transaction_data_binding` (only present when the
-request carried `transaction_data`) — and the reason is also persisted on the
+request carried `transaction_data`). The reason is also persisted on the
 transaction, so it appears in the admin API and the test console rather than only
 in the log.
+
+Because one `vp_token` may answer several DCQL credential queries, a
+per-credential check record additionally carries `credential` — the DCQL
+credential query id it belongs to — so `check=dcql_match passed=false` says
+*whose*. The final verdict record carries `credentials_requested` and
+`credentials_answered`, which are **counts, never identifiers**: a wallet that
+returned fewer credentials than were asked for is visible at a glance, and the
+failed `requested_credentials_answered` check names the missing query ids.
 
 ### `sensitive_payloads` — development only
 

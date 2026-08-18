@@ -28,7 +28,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface |
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
-| `verify.rs` | The orchestrator: JWE decrypt → format-specific verification → DCQL → transaction_data_binding → status, then computes `verified = checks.iter().all(\|c\| c.passed)`. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
+| `verify.rs` | The orchestrator: JWE decrypt → `select_presentations` → a per-credential verify-all loop (`verify_one_credential`) → `requested_credentials_answered`, then computes `verified` as the conjunction over **both** check levels. Returns a `VerifyOutcome` internally so an unavailable status list can become HTTP 502 without discarding the other credentials' checks. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
 | `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Three spec non-empty constraints are enforced at deserialization (`credentials`, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
@@ -53,9 +53,11 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   `state`, `nonce`, `dcql_query`, `transport`, `response_mode`,
   `ephem_private_jwk`, `ephem_public_jwk`, `transaction_data`, `result`,
   `created_at`), `VerificationState` (`Pending` | `Verified` | `Failed`),
-  `VerificationResult { verified, checks, claims }`,
-  `CheckResult { check, passed, detail }`,
-  `save_verification_transaction`, `load_verification_transaction`.
+  `VerificationResult { verified, checks, credentials }`,
+  `PresentedCredential { query_id, format, claims, checks }`,
+  `CheckResult { check, passed, detail }`. `VerificationResult::all_checks()`
+  yields every check at both levels; `derive_verified()` is the §4.2 verdict.
+  Also `save_verification_transaction`, `load_verification_transaction`.
 - **Errors:** `VerificationError` — `NotFound`, `InvalidState`, `Dcql`,
   `Crypto`, `Decryption`, `Failed`, `StatusUnavailable`, `Storage`,
   `CoreCrypto`, `Trust`, `Serialization`.
@@ -76,19 +78,22 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   credential is a correct outcome that still returns HTTP 200 with
   `verified: false` (root [AGENTS.md](../../AGENTS.md) §4.3); reserve `error` for
   actual faults such as an unreachable status list.
-- **`verified` MUST equal `checks.iter().all(|c| c.passed)`** — never hardcode
-  `verified: true`; it is computed once at the end of `do_verify_vp_response` —
-  full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
-- **Every verification step must push a named `CheckResult`.** The six names in
-  the vocabulary are `jwe_decryption`, `sd_jwt_vc_signature_and_kb_jwt`,
-  `mdoc_issuer_auth_and_device_signature`, `dcql_match`, `status_check`,
-  `transaction_data_binding`. **A single result normally contains four of the
-  first five**, because the SD-JWT VC and mdoc checks are mutually exclusive
-  (chosen by whether `vp_token` is a JSON string or an object);
-  `transaction_data_binding` adds a fifth only when `tx.transaction_data` is
-  `Some` — an mdoc presentation with `transaction_data` requested still gets
-  the check pushed, recorded as a hard `passed: false` (no KB-JWT exists to
-  bind it) — full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
+- **`verified` MUST equal the conjunction over EVERY check, at both levels** —
+  use `all_checks()` / `derive_verified()`, never `checks.iter().all(..)`,
+  which passes while a per-credential check fails. Never hardcode
+  `verified: true`; it is computed once at the end of `do_verify_vp_response`.
+  Full rule: root [AGENTS.md](../../AGENTS.md) §4.2.
+- **Every verification step must push a named `CheckResult`, at one of two
+  levels.** **Cross-cutting** (`result.checks`): `jwe_decryption`,
+  `requested_credentials_answered`. **Per-credential**
+  (`result.credentials[i].checks`): `sd_jwt_vc_signature_and_kb_jwt` or
+  `mdoc_issuer_auth_and_device_signature` — mutually exclusive, chosen by the
+  answered credential query's **declared format**, never by the JSON type of
+  the payload — plus `dcql_match`, `status_check`, and
+  `transaction_data_binding` only when `tx.transaction_data` is `Some`. An mdoc
+  presentation with `transaction_data` requested still gets that check pushed,
+  recorded as a hard `passed: false` (no KB-JWT exists to bind it) — full rule:
+  root [AGENTS.md](../../AGENTS.md) §4.2.
 - **The error path of `verify_vp_response` MUST populate `tx.result`.** Setting
   only `tx.state = Failed` leaves the reason inside the returned `Err`, which the
   HTTP layer sends to the *wallet* — so the admin console renders a bare red
@@ -204,8 +209,8 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   with ARRAY values** — `{ "<query id>": [ <presentation> ] }` — and that is the
   same shape for **both** credential formats. The credential format comes from
   the `format` **declared by the answered credential query**, never from the JSON
-  type of the payload. `select_presentation` (in `verify.rs`) performs the
-  selection and returns an already-destructured payload, so no verification arm
+  type of the payload. `select_presentations` (in `verify.rs`) performs the
+  selection and returns already-destructured payloads, so no verification arm
   can re-derive the format.
   Never restore type-sniffing (`vp_token.as_str()` ⇒ SD-JWT, `as_object()` ⇒
   mdoc): because a conformant SD-JWT VC envelope is *also* an object, that logic
@@ -221,6 +226,39 @@ cargo nextest run -p foundry --test wallet_verification           # verification
 - **`PresentedFormat::MsoMdoc`** is the variant name (not `Mdoc`), matching
   `dcql_model::CredentialFormat::MsoMdoc` (note: lower-case `d` in `Mdoc` —
   the removed vendored type spelled it `MsoMDoc`).
+- **A `vp_token` may answer SEVERAL credential queries**, and each answered
+  query becomes one `PresentedCredential` in **DCQL declaration order** — not
+  `vp_token` key order, which depends on the wallet's serialization and on
+  whether `serde_json` was built with `preserve_order`. `select_presentations`
+  performs the selection.
+- **Each entry's array still holds exactly one presentation.** OpenID4VP
+  L1166: "When `multiple` is omitted, or set to `false`, the array MUST contain
+  only one Presentation." foundry ignores `multiple` (VP-0090), so it never
+  requests more than one and the rule always applies. If `multiple: true` is
+  ever honoured, this guard must move behind that flag in the same change.
+- **Claims are per credential and MUST NOT be merged.** `check_status` reads
+  `status.status_list` out of the map it is handed, so a merged map runs one
+  credential's revocation check against another's status list — silently, with
+  a passing `status_check`. Two credentials disclosing the same claim name
+  collide the same way.
+- **A subset `vp_token` is a POLICY verdict, not a 400.** It violates
+  OpenID4VP L1007-1008 (a wallet that cannot deliver all non-optional
+  Credentials MUST NOT return any), but it is well-formed, so it yields
+  HTTP 200 + `verified: false` with a failed `requested_credentials_answered`
+  naming the unanswered ids — and the detail attributes the fault to the
+  wallet. An id the request never asked for stays structural (400): there is
+  no credential query to attribute a verdict to.
+- **An unavailable status list still returns 502, but must not be lossy.**
+  `do_verify_vp_response` returns `VerifyOutcome { result, deferred }`; the
+  wrapper persists `result` first, then re-raises. It also pushes a top-level
+  failed `status_check` — without it, an unavailable status pushes no check at
+  all and the conjunction computes `true`, persisting `verified: true` on a
+  transaction that just returned 502.
+- **Duplicate credential query ids are rejected at request creation**
+  (`create_verification_request`, OpenID4VP L745-746). This is load-bearing,
+  not cosmetic: `select_presentations` matches each credential query against
+  `vp_token`'s keys, so two queries sharing an id both match the same entry
+  and one presentation would be verified twice under contradictory queries.
 - **`response_uri` for mdoc device binding is reconstructed**, not stored:
   `{public_base_url}/vp/response/{tx.id}`. Changing the route shape in
   `crates/foundry` silently breaks the device signature check.

@@ -593,21 +593,27 @@ fn vp_0110_mdoc_value_matching_matches_converted_json_types() {
     );
 }
 
-// GAP-VP-03 — DCQL / Credential Query (L743, L745, L756); DCQL / Claims Query
+// GAP-VP-03 — DCQL / Credential Query (L743, L756); DCQL / Claims Query
 // (L780): a Credential Query `id` MUST be a non-empty string of alphanumeric,
-// underscore or hyphen characters (VP-0093) and MUST NOT repeat within one
-// Authorization Request (VP-0094); `meta` is REQUIRED, even if empty
+// underscore or hyphen characters (VP-0093); `meta` is REQUIRED, even if empty
 // (VP-0096); and Verifiers MUST NOT point to the same claim more than once in
-// a single query's `claims` array (VP-0097). None of these four constraints
+// a single query's `claims` array (VP-0097). None of these three constraints
 // is validated by `DcqlCredentialQuery`/`DcqlClaimsQuery` deserialization --
 // `id` is an unconstrained `String`, `meta` is `Option<Value>` with
 // `#[serde(default)]` (so it may be entirely absent, not merely empty), and
 // neither `credentials` nor `claims` checks its entries for duplicates. This
-// query violates all four simultaneously and parses and evaluates as if it
+// query violates all three simultaneously and parses and evaluates as if it
 // were a well-formed request.
+//
+// `id` UNIQUENESS (VP-0094, L745) is deliberately NOT part of this gap any
+// more: `create_verification_request` now rejects a repeated id before the
+// transaction is persisted (see `create_rejects_duplicate_credential_query_ids`
+// in request.rs). This test still constructs a query with a repeated id,
+// because it exercises `check_dcql_match` directly rather than the request
+// path -- fail-closed matching is defence in depth, not the enforcement point.
 #[test]
-#[ignore = "GAP-VP-03: OpenID4VP DCQL / Credential Query (L743, L745, L756); DCQL / Claims Query (L780) — id character-class and uniqueness, meta required-presence, and claims duplicate-path uniqueness are never validated"]
-fn vp_0093_0094_0096_0097_dcql_structural_constraints_not_validated() {
+#[ignore = "GAP-VP-03: OpenID4VP DCQL / Credential Query (L743, L756); DCQL / Claims Query (L780) — id character-class, meta required-presence, and claims duplicate-path uniqueness are never validated"]
+fn vp_0093_0096_0097_dcql_structural_constraints_not_validated() {
     let q = serde_json::json!({"credentials": [
         {"id": "dup!", "format": "dc+sd-jwt",
          "claims": [{"path": ["given_name"]}, {"path": ["given_name"]}]},
