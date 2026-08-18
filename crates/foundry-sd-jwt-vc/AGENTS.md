@@ -84,6 +84,18 @@ always the whole workspace — `cargo nextest run --workspace --no-fail-fast
 - **KB-JWT sd_hash computation**: hashed over the issuer presentation STRING (everything up to and including the final `~` before the KB-JWT itself), not a computed value. Tampering with any disclosure segment invalidates the hash, raising `KeyBinding` error *before* the crate tries to parse the corrupted disclosure — so malformed disclosure JSON never surfaces as an unrelated parse error.
 - **Disclosure digest matching**: _sd array holds SHA-256(disclosure_b64); each disclosure is [salt, name, value]. Names from disclosures are injected into the payload only if their digest appears in _sd. Order matters for determinism but not validation.
 - **KB-JWT typ field**: MUST be "kb+jwt" (verified strictly, not just suggested).
+- **An audience mismatch names both values, and the presented one is
+  Debug-formatted.** `verify_kb_jwt` returns
+  `KeyBinding("KB-JWT audience mismatch: presented {aud:?}, expected one of
+  [...]")` — a bare "mismatch" once forced an operator to enable sensitive
+  payload logging at `trace` on a live deployment just to recover the `aud`.
+  Both values are public identifiers (an Origin or a Client Identifier), so
+  neither is on root [AGENTS.md](../../AGENTS.md) §4.5's never-log list. The
+  presented `aud` is **wallet-controlled** and this string reaches a log record
+  and an HTTP body, so it MUST stay `{:?}`-formatted: `{}` would let a caller
+  forge log lines with an embedded newline. The expected list is bounded by
+  `MAX_NAMED_EXPECTED_AUDIENCES` and says `(+N more)` when it truncates, so the
+  presented value is never what a downstream `obs::truncate` cuts off.
 - **A KB-JWT is mandatory.** A bare issuer presentation (one ending in `~` with nothing after it) fails with `KeyBinding("KB-JWT missing from presentation")`. There is no "issuer-only" verification mode.
 - **An `x5c` header is mandatory.** A missing or empty `x5c`, or a non-string element, fails with `SignatureVerification` — the issuer key is only ever taken from the certificate chain, never from an embedded JWK.
 - **`iat` in the future is rejected as `Expired`**, the same error used for a past `exp`; the variant name does not distinguish the two directions.

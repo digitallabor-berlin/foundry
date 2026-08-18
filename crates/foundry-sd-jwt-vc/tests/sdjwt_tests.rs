@@ -133,6 +133,143 @@ fn rejects_kb_audience_mismatch() {
     assert!(matches!(err, FormatError::KeyBinding(_)));
 }
 
+/// An audience mismatch must name **both** sides of the comparison it just
+/// failed. The bare "KB-JWT audience mismatch" this used to return told an
+/// operator only that two values differed, not which two -- diagnosing a real
+/// one (a wallet on OpenID4VP draft 24 sending `web-origin:` where 1.0 says
+/// `origin:`) required enabling sensitive payload logging at `trace` on a live
+/// deployment just to read the `aud` back out of the decrypted `vp_token`.
+///
+/// Both values are public identifiers -- an Origin or a Client Identifier --
+/// so neither is on root AGENTS.md §4.5's never-log list.
+#[test]
+fn kb_audience_mismatch_names_both_the_presented_and_the_expected_audiences() {
+    let (root, leaf_cert, leaf_key) = test_pki();
+    let signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+    let trust_store = TrustStore::from_pems(&[root]).unwrap();
+    let (h_signer, h_pub) = holder();
+
+    let now = now_secs();
+    let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
+    let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
+    let pres = attach_kb_jwt(
+        issuer_pres,
+        &h_signer,
+        "web-origin:https://presented.example",
+        "nonce",
+        None,
+    )
+    .unwrap();
+
+    let err = verify_sd_jwt_vc(
+        &pres,
+        &trust_store,
+        &[
+            "origin:https://expected-a.example".to_string(),
+            "origin:https://expected-b.example".to_string(),
+        ],
+        "nonce",
+        now,
+    )
+    .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("web-origin:https://presented.example"),
+        "the message must name what the wallet actually presented: {msg}"
+    );
+    assert!(
+        msg.contains("origin:https://expected-a.example")
+            && msg.contains("origin:https://expected-b.example"),
+        "the message must name every audience that would have been accepted: {msg}"
+    );
+}
+
+/// The presented `aud` is wallet-controlled and reaches both a log record and
+/// an HTTP error body, so it must not be interpolated raw: a newline in it
+/// would let a caller forge log lines. Debug-formatting escapes it.
+#[test]
+fn kb_audience_mismatch_escapes_a_wallet_controlled_audience() {
+    let (root, leaf_cert, leaf_key) = test_pki();
+    let signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+    let trust_store = TrustStore::from_pems(&[root]).unwrap();
+    let (h_signer, h_pub) = holder();
+
+    let now = now_secs();
+    let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
+    let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
+    let pres = attach_kb_jwt(
+        issuer_pres,
+        &h_signer,
+        "origin:https://x.example\nERROR forged log line",
+        "nonce",
+        None,
+    )
+    .unwrap();
+
+    let err = verify_sd_jwt_vc(
+        &pres,
+        &trust_store,
+        &["origin:https://y.example".to_string()],
+        "nonce",
+        now,
+    )
+    .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(
+        !msg.contains('\n'),
+        "a newline in the presented audience must be escaped, not emitted raw: {msg:?}"
+    );
+    assert!(
+        msg.contains("\\n"),
+        "the newline should survive as an escape sequence so the value stays readable: {msg:?}"
+    );
+}
+
+/// A deployment may configure many Origins, and the accepted-audience list is
+/// doubled when the draft-24 `web-origin:` accommodation is on. The message
+/// bounds how many it names so the presented value -- the part an operator
+/// actually needs -- is never the part that gets truncated away downstream.
+#[test]
+fn kb_audience_mismatch_bounds_a_long_expected_audience_list() {
+    let (root, leaf_cert, leaf_key) = test_pki();
+    let signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+    let trust_store = TrustStore::from_pems(&[root]).unwrap();
+    let (h_signer, h_pub) = holder();
+
+    let now = now_secs();
+    let claims = make_claims(h_pub, (now - 3600) as i64, (now + 3600) as i64);
+    let issuer_pres = build_sd_jwt_vc(claims, &signer, Some(vec![encode_der(&leaf_cert)])).unwrap();
+    let pres = attach_kb_jwt(
+        issuer_pres,
+        &h_signer,
+        "origin:https://nope.example",
+        "nonce",
+        None,
+    )
+    .unwrap();
+
+    let expected: Vec<String> = (0..20)
+        .map(|i| format!("origin:https://site-{i}.example"))
+        .collect();
+    let err = verify_sd_jwt_vc(&pres, &trust_store, &expected, "nonce", now).unwrap_err();
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("origin:https://nope.example"),
+        "the presented audience must survive the bound: {msg}"
+    );
+    assert!(
+        msg.contains("more"),
+        "a truncated expected list must say so rather than silently omit: {msg}"
+    );
+    assert!(
+        !msg.contains("origin:https://site-19.example"),
+        "the list must actually be bounded: {msg}"
+    );
+}
+
 #[test]
 fn rejects_tampered_disclosure() {
     let (root, leaf_cert, leaf_key) = test_pki();

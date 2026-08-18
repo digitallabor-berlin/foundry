@@ -435,14 +435,20 @@ single trailing slash is normalised away, so `https://x.example` and
 The symptom when this is wrong is an otherwise well-formed presentation failing
 at HTTP 400 with:
 
-```
-verification failed: holder key binding verification failed: KB-JWT audience mismatch
+```text
+verification failed: holder key binding verification failed: KB-JWT audience
+mismatch: presented "origin:https://console-host.example", expected one of
+["origin:https://verifier-site.example"]
 ```
 
-The log record does not carry the two values being compared, so confirm them
-from each side: the wallet's attested Origin (CMWallet logs it as
-`GetCredentialActivity: origin <value>`, readable via `adb logcat`) against this
-config key — or, when it is unset, against `public_base_url`.
+The message names both sides of the comparison, so the fix is usually readable
+straight off the log line: the *presented* value is the Origin the browser
+attested to the wallet, and the *expected* list is this config key (or, when it
+is unset, the `public_base_url`-derived fallback). Add the presented Origin to
+`dc_api_expected_origins` if it is one you intend to serve.
+
+To confirm the wallet's side independently, CMWallet logs it as
+`GetCredentialActivity: origin <value>`, readable via `adb logcat`.
 
 ##### Wallets Still on OpenID4VP draft 24 (`web-origin:`)
 

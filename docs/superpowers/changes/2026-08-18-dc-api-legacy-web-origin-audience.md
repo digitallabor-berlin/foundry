@@ -106,9 +106,10 @@ wallet over the DC API is a separate, uninvestigated question.
 
 ## Follow-up
 
-`FormatError::KeyBinding("KB-JWT audience mismatch")` still discards both
-compared values. Diagnosing this required enabling `--log-sensitive` plus
-`trace` on a live pod to dump the whole decrypted `vp_token`. Putting the
-presented and expected audiences into the error detail — both public
-identifiers — would make the next such mismatch a one-line read. Not done here:
-it is a separate change with its own tests.
+**Done, same day** — see
+[`2026-08-18-kb-jwt-audience-mismatch-names-both-values.md`](2026-08-18-kb-jwt-audience-mismatch-names-both-values.md).
+`FormatError::KeyBinding("KB-JWT audience mismatch")` discarded both compared
+values, which is why diagnosing this one required enabling `--log-sensitive`
+plus `trace` on a live pod to dump the whole decrypted `vp_token`. The message
+now names the presented `aud` and the accepted list, so the next such mismatch
+is a one-line read.

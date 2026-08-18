@@ -285,6 +285,32 @@ fn normalize_audience(value: &str) -> &str {
     value.trim_end_matches('/')
 }
 
+/// How many accepted audiences an audience-mismatch message names before it
+/// summarises the rest.
+///
+/// A deployment may configure many Origins, and the DC API audience list is
+/// doubled when `verifier.dc_api_accept_legacy_web_origin_audience` is on.
+/// The presented value is written first and the list is bounded here, so the
+/// part an operator actually needs is never the part a downstream
+/// `obs::truncate` cuts off.
+const MAX_NAMED_EXPECTED_AUDIENCES: usize = 8;
+
+/// Render the accepted-audience list for an error message, bounded by
+/// [`MAX_NAMED_EXPECTED_AUDIENCES`] and saying so when it had to stop.
+fn describe_expected_audiences(expected_audiences: &[String]) -> String {
+    let shown: Vec<&str> = expected_audiences
+        .iter()
+        .take(MAX_NAMED_EXPECTED_AUDIENCES)
+        .map(String::as_str)
+        .collect();
+    let omitted = expected_audiences.len().saturating_sub(shown.len());
+    if omitted == 0 {
+        format!("{shown:?}")
+    } else {
+        format!("{shown:?} (+{omitted} more)")
+    }
+}
+
 fn verify_kb_jwt(
     kb: &str,
     full_presentation: &str,
@@ -320,7 +346,22 @@ fn verify_kb_jwt(
         .iter()
         .any(|expected| normalize_audience(expected) == normalize_audience(aud));
     if !aud_matches {
-        return Err(FormatError::KeyBinding("KB-JWT audience mismatch".into()));
+        // Name both sides of the comparison. Without them an operator learns
+        // only that two values differed -- the failure this repository last
+        // hit (a wallet on OpenID4VP draft 24 sending `web-origin:` where 1.0
+        // says `origin:`) then needs sensitive payload logging at `trace` on a
+        // live deployment just to read the `aud` back out of the decrypted
+        // `vp_token`. Both values are public identifiers, an Origin or a
+        // Client Identifier, so neither is on root AGENTS.md §4.5's
+        // never-log list.
+        //
+        // `aud` is wallet-controlled and this string reaches both a log record
+        // and an HTTP error body, so it is **Debug-formatted**: a raw newline
+        // in it would otherwise let a caller forge log lines.
+        return Err(FormatError::KeyBinding(format!(
+            "KB-JWT audience mismatch: presented {aud:?}, expected one of {}",
+            describe_expected_audiences(expected_audiences)
+        )));
     }
     if kb_payload.get("nonce").and_then(|v| v.as_str()) != Some(expected_nonce) {
         return Err(FormatError::KeyBinding("KB-JWT nonce mismatch".into()));
