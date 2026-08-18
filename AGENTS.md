@@ -300,6 +300,33 @@ worse than running none.
   `cargo nextest run -p foundry --test wallet_issuance full_issuance_flow_end_to_end`.
 - **`--nocapture` is spelled `--no-capture`.**
 
+### 5.5 Keeping the Gate Fast
+
+The gate is only fast while `target/` stays small. Cargo caches every distinct
+command shape separately and **never evicts**, so artifacts accumulate without
+bound. Once `target/` had reached 113 GB — over a million entries in
+`target/debug/deps` — identical cold builds ran **15–49× slower**. Not because
+cargo re-scans the tree (no-op invocations stay sub-second even then) but because
+*writing* new artifacts into a directory that large is slow. The full
+investigation, including the recommendations that measurement refuted, is
+[`docs/superpowers/changes/2026-08-18-build-performance-investigation.md`](docs/superpowers/changes/2026-08-18-build-performance-investigation.md).
+
+Three rules follow:
+
+- **Prefer the canonical shapes.** §5.1's "one gate, no tiers" is a cache rule as
+  much as a coverage rule: every novel `-p` / `--lib` / filter combination mints a
+  new fingerprint set, pays a cold build once, and is then retained forever.
+  Scoped runs are not cheaper — they are an extra cache.
+- **Sweep periodically.** `cargo sweep --time 14`, or `cargo sweep --maxsize 15GB`
+  for a hard ceiling; `cargo sweep --installed` after a toolchain bump. Audit with
+  `du -sh target` — a healthy full `--all-targets` build is a few GB, not tens.
+  Do not wait for the corrective `cargo clean`: deleting a bloated tree takes
+  ~20 minutes, far longer than the ~30 s rebuild that follows it.
+- **Do not let the editor share the build lock.** `.vscode/settings.json` sets
+  `rust-analyzer.cargo.targetDir` so rust-analyzer's `checkOnSave` flycheck gets
+  its own directory. Without it, a save in the editor stalls the next `cargo`
+  command on `Blocking waiting for file lock on build directory`. Keep it set.
+
 ---
 
 ## 6. OpenAPI Specification
