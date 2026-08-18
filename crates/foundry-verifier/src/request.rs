@@ -241,9 +241,31 @@ pub async fn create_verification_request(
     // stored, advertised to a wallet, and only surface at verification time --
     // presenting the operator's configuration mistake as a presentation failure.
     // `Dcql` maps to HTTP 400 on the admin API (`verifier_admin_error_response`).
-    serde_json::from_value::<crate::dcql_model::DcqlQuery>(dcql.clone()).map_err(|e| {
-        VerificationError::Dcql(format!("dcql_query is not a valid DCQL query: {e}"))
-    })?;
+    let parsed: crate::dcql_model::DcqlQuery =
+        serde_json::from_value(dcql.clone()).map_err(|e| {
+            VerificationError::Dcql(format!("dcql_query is not a valid DCQL query: {e}"))
+        })?;
+
+    // OpenID4VP 1.0 L745-746: "Within the Authorization Request, the same `id`
+    // MUST NOT be present more than once."
+    //
+    // This is checked here rather than at deserialization because it is the
+    // operator's error, and this is where operator errors become HTTP 400
+    // instead of a later presentation failure that reads as the wallet's fault.
+    // It is load-bearing for multi-credential verification: `select_presentations`
+    // matches each credential query against `vp_token`'s keys, so two queries
+    // sharing an id both match the SAME entry -- one presentation would be
+    // verified twice under contradictory queries, with no correct outcome to pick.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for cq in parsed.credentials() {
+        if !seen.insert(cq.id()) {
+            return Err(VerificationError::Dcql(format!(
+                "dcql_query repeats credential query id '{}'; OpenID4VP 1.0 requires \
+                 each credential query id to appear at most once",
+                cq.id()
+            )));
+        }
+    }
 
     let id = format!("v_{}", Uuid::new_v4().simple());
     let nonce = format!("vn_{}", Uuid::new_v4().simple());
@@ -713,6 +735,72 @@ mod tests {
             matches!(err, VerificationError::Dcql(_)),
             "expected a Dcql error, got: {err}"
         );
+    }
+
+    /// OpenID4VP 1.0 L745-746: "Within the Authorization Request, the same `id`
+    /// MUST NOT be present more than once."
+    ///
+    /// Unvalidated, this was a bounded operator misconfiguration -- every lookup
+    /// resolved to the first match. Multi-credential verification makes it
+    /// ambiguous: `select_presentations` matches each credential query against
+    /// `vp_token`'s keys, so two queries sharing an id both match the SAME entry
+    /// and one presentation would be verified twice under contradictory queries.
+    /// There is no correct behaviour available, so the request is refused before
+    /// it is persisted.
+    #[tokio::test]
+    async fn create_rejects_duplicate_credential_query_ids() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [
+                    {"id": "pid", "format": "dc+sd-jwt"},
+                    {"id": "pid", "format": "mso_mdoc"}
+                ]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        let err = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            matches!(err, VerificationError::Dcql(_)),
+            "a repeated credential query id is the operator's error, so it must be \
+             Dcql (HTTP 400 on the admin API), got: {err}"
+        );
+        assert!(
+            msg.contains("pid"),
+            "the message must name the repeated id so the operator can find it: {msg}"
+        );
+    }
+
+    /// Distinct ids remain acceptable -- this is the case the feature exists for.
+    #[tokio::test]
+    async fn create_accepts_multiple_distinct_credential_queries() {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [
+                    {"id": "pid", "format": "dc+sd-jwt"},
+                    {"id": "mdl", "format": "mso_mdoc"}
+                ]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+
+        create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .expect("a multi-credential query with distinct ids must be accepted");
     }
 
     #[tokio::test]
