@@ -159,8 +159,12 @@ pub fn build_mdoc(
             device_key: cose_key_value,
         },
         validity_info: ValidityInfo {
-            signed: format_epoch_seconds(claims.signed_at)?,
-            valid_until: format_epoch_seconds(claims.valid_until)?,
+            signed: ciborium::tag::Required(format_epoch_seconds(claims.signed_at)?),
+            // `MdocClaims` carries no separate validity start, so the document is
+            // valid from the moment it was signed. Widen `MdocClaims` if an issuer
+            // ever needs to post-date a credential.
+            valid_from: ciborium::tag::Required(format_epoch_seconds(claims.signed_at)?),
+            valid_until: ciborium::tag::Required(format_epoch_seconds(claims.valid_until)?),
         },
     };
 

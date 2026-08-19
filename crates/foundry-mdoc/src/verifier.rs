@@ -215,17 +215,19 @@ pub fn verify_mdoc(
     let mso: MobileSecurityObject = ciborium::from_reader(mso_inner)
         .map_err(|e| FormatError::Deserialization(format!("MSO CBOR: {e}")))?;
 
-    let signed_ts = time::OffsetDateTime::parse(
-        &mso.validity_info.signed,
+    // ISO/IEC 18013-5: the document's validity window is validFrom..validUntil.
+    // `signed` records when the MSO was signed and does not bound validity.
+    let from_ts = time::OffsetDateTime::parse(
+        &mso.validity_info.valid_from.0,
         &time::format_description::well_known::Rfc3339,
     )
-    .map_err(|e| FormatError::Deserialization(format!("signed parse: {e}")))?;
+    .map_err(|e| FormatError::Deserialization(format!("validFrom parse: {e}")))?;
     let until_ts = time::OffsetDateTime::parse(
-        &mso.validity_info.valid_until,
+        &mso.validity_info.valid_until.0,
         &time::format_description::well_known::Rfc3339,
     )
     .map_err(|e| FormatError::Deserialization(format!("validUntil parse: {e}")))?;
-    if now_unix < signed_ts.unix_timestamp() as u64 || now_unix > until_ts.unix_timestamp() as u64 {
+    if now_unix < from_ts.unix_timestamp() as u64 || now_unix > until_ts.unix_timestamp() as u64 {
         return Err(FormatError::Expired);
     }
 
@@ -699,6 +701,154 @@ mod tests {
                 .protected(sign1.protected.header.clone())
                 .unprotected(sign1.unprotected.clone())
                 .payload(unwrapped)
+                .signature(signer.sign(&tbs).unwrap())
+                .build();
+
+            let bytes = coset::CborSerializable::to_vec(rebuilt).unwrap();
+            *slot = ciborium::from_reader(bytes.as_slice()).unwrap();
+        }
+        mdoc.clear();
+        ciborium::into_writer(&value, mdoc).unwrap();
+    }
+
+    #[test]
+    fn validity_values_are_cbor_tag0_tdate() {
+        let f = valid_fixture();
+        let payload = issuer_auth_payload(&f.mdoc);
+        let wrapper: ciborium::Value = ciborium::from_reader(payload.as_slice()).unwrap();
+        let raw: ciborium::Value =
+            ciborium::from_reader(crate::types::tag24_unwrap(&wrapper).unwrap()).unwrap();
+
+        for member in ["signed", "validFrom", "validUntil"] {
+            let v = validity_member(&raw, member);
+            assert!(
+                matches!(v, ciborium::Value::Tag(0, _)),
+                "{member} must be CBOR tag 0 (tdate), got {v:?}"
+            );
+        }
+    }
+
+    /// Per design doc §3 decision 2 the verifier is strict: an untagged value must
+    /// be refused, not silently accepted. This is the direction a plain `String`
+    /// field got wrong — `ciborium` skips unexpected tags, so it accepted a
+    /// `tdate` while emitting untagged text.
+    #[test]
+    fn an_untagged_validity_value_is_rejected() {
+        #[derive(serde::Serialize)]
+        struct LooseValidity {
+            signed: String,
+            #[serde(rename = "validFrom")]
+            valid_from: String,
+            #[serde(rename = "validUntil")]
+            valid_until: String,
+        }
+        let loose = LooseValidity {
+            signed: "1970-01-01T00:16:40Z".to_string(),
+            valid_from: "1970-01-01T00:16:40Z".to_string(),
+            valid_until: "1970-01-01T00:33:20Z".to_string(),
+        };
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&loose, &mut bytes).unwrap();
+        let parsed: Result<crate::types::ValidityInfo, _> = ciborium::from_reader(bytes.as_slice());
+        assert!(parsed.is_err(), "untagged validity values must be rejected");
+    }
+
+    /// `validFrom`, not `signed`, is the lower bound.
+    ///
+    /// The builder emits `validFrom == signed`, so no builder-produced document
+    /// can distinguish the two rules. This rewrites `validFrom` forward — past
+    /// `now`, still inside `validUntil` — and re-signs. Under the old
+    /// `signed..validUntil` rule that document verifies; under the correct
+    /// `validFrom..validUntil` rule it is not yet valid.
+    #[test]
+    fn validity_window_is_bounded_by_valid_from_not_signed() {
+        let mut f = valid_fixture();
+        let not_yet = f.now + 60 * 60 * 24 * 30;
+        rewrite_mso_and_resign(&mut f.mdoc, &f.leaf_key, |mso| {
+            mso.validity_info.valid_from =
+                ciborium::tag::Required(format_rfc3339_for_test(not_yet));
+        });
+
+        let err = verify_mdoc(
+            &f.mdoc,
+            &f.trust_store,
+            &f.transcript,
+            &f.device_signature,
+            f.now,
+        )
+        .expect_err("a document whose validFrom is in the future is not yet valid");
+        assert!(matches!(err, FormatError::Expired), "got {err}");
+
+        // Same document, evaluated inside the window: the rejection above is the
+        // bound being read, not a document that cannot verify at all.
+        assert!(
+            verify_mdoc(
+                &f.mdoc,
+                &f.trust_store,
+                &f.transcript,
+                &f.device_signature,
+                not_yet + 1,
+            )
+            .is_ok(),
+            "inside validFrom..validUntil the same document must verify"
+        );
+    }
+
+    fn format_rfc3339_for_test(epoch: u64) -> String {
+        time::OffsetDateTime::from_unix_timestamp(epoch as i64)
+            .unwrap()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    }
+
+    fn validity_member<'a>(mso: &'a ciborium::Value, name: &str) -> &'a ciborium::Value {
+        let map = mso.as_map().unwrap();
+        let validity = map
+            .iter()
+            .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "validityInfo"))
+            .map(|(_, v)| v)
+            .expect("validityInfo")
+            .as_map()
+            .unwrap();
+        validity
+            .iter()
+            .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == name))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("validityInfo.{name}"))
+    }
+
+    /// Apply `edit` to the MSO, re-wrap it as tag-24 and re-sign, so the document
+    /// stays cryptographically valid and only the edited semantics are under test.
+    fn rewrite_mso_and_resign(
+        mdoc: &mut Vec<u8>,
+        leaf_key: &[u8],
+        edit: impl FnOnce(&mut MobileSecurityObject),
+    ) {
+        let signer = FileSigner::from_pem(leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let mut value: ciborium::Value = ciborium::from_reader(mdoc.as_slice()).unwrap();
+        {
+            let issuer_signed = issuer_signed_mut(&mut value);
+            let slot = map_entry_mut(issuer_signed, "issuerAuth");
+            let sign1 = CoseSign1::from_slice(&cbor_value_to_bytes(slot).unwrap()).unwrap();
+
+            let mut mso = parse_wrapped_mso(sign1.payload.as_deref().unwrap());
+            edit(&mut mso);
+
+            let mut inner = Vec::new();
+            ciborium::into_writer(&mso, &mut inner).unwrap();
+            let payload = crate::types::tag24_encode(&inner).unwrap();
+
+            let tbs = coset::sig_structure_data(
+                coset::SignatureContext::CoseSign1,
+                sign1.protected.clone(),
+                None,
+                &[],
+                &payload,
+            );
+            let rebuilt = coset::CoseSign1Builder::new()
+                .protected(sign1.protected.header.clone())
+                .unprotected(sign1.unprotected.clone())
+                .payload(payload)
                 .signature(signer.sign(&tbs).unwrap())
                 .build();
 

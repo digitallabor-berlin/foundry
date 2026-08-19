@@ -29,12 +29,26 @@ pub struct DeviceKeyInfo {
     pub device_key: ciborium::Value,
 }
 
-/// TODO(interop): should be CBOR `tdate` (tag 0), not plain text.
+/// ValidityInfo (ISO/IEC 18013-5 §9.1.2.4).
+///
+/// All three members are `tdate` — CBOR tag 0 over an RFC 3339 text string.
+/// [`ciborium::tag::Required`] requires the tag on deserialization and always
+/// emits it on serialization, so builder and verifier cannot drift and an
+/// untagged value is refused rather than silently accepted (design doc §3
+/// decision 2).
+///
+/// Note `ciborium` skips unexpected tags in its typed deserializers, so a plain
+/// `String` field would have *accepted* a `tdate` while emitting an untagged
+/// value — a silent one-way divergence. The wrapper is what closes it.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ValidityInfo {
-    pub signed: String,
+    pub signed: ciborium::tag::Required<String, 0>,
+    /// The start of the document's validity window. Distinct from `signed`,
+    /// which records when the MSO was signed and does not bound validity.
+    #[serde(rename = "validFrom")]
+    pub valid_from: ciborium::tag::Required<String, 0>,
     #[serde(rename = "validUntil")]
-    pub valid_until: String,
+    pub valid_until: ciborium::tag::Required<String, 0>,
 }
 
 /// IssuerSignedItem (ISO/IEC 18013-5 §9.1.2.5).
