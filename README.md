@@ -1026,6 +1026,23 @@ credential query id it belongs to — so `check=dcql_match passed=false` says
 returned fewer credentials than were asked for is visible at a glance, and the
 failed `requested_credentials_answered` check names the missing query ids.
 
+Each credential also gets one **roll-up record** — `credential verified` at
+`INFO`, or `credential failed` at `WARN` — carrying `credential` (the DCQL query
+id), `format`, `credential_type` (the `vct` for SD-JWT VC, the `docType` for
+mdoc), and the `checks` / `checks_passed` counts. That record is the one to read;
+the per-check records above are the drill-down. `credential_type` is the type the
+presentation *asserted*, and is authenticated only when that credential's format
+check passed — the same caveat that governs its claims.
+
+Because a failure in one credential no longer abandons the others, a mixed
+verdict is fully reported: the `vp response not verified` record carries
+`credentials_failed` alongside `credentials_requested` and
+`credentials_answered`, and every credential appears in the admin API and test
+console with its own checks — including the ones that failed. A credential whose
+format check failed carries **only** that check: `dcql_match` and `status_check`
+are not run against claims that were never obtained, so one fault is reported
+once rather than three times.
+
 ### `sensitive_payloads` — development only
 
 > **Do not enable this in production.** With `sensitive_payloads: true` (or

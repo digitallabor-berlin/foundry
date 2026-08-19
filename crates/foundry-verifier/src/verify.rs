@@ -263,11 +263,49 @@ pub async fn verify_vp_response(
                     );
                 }
             }
+            // One roll-up record per credential, then that credential's
+            // per-check trail. The roll-up is the line an operator reads; the
+            // per-check records are the drill-down, and §4.5 makes their field
+            // names operator-facing API, so they are enriched here and never
+            // replaced.
+            //
+            // A DCQL credential query id is operator-authored request structure
+            // and a `vct`/`docType` is a credential type identifier -- neither
+            // is a holder value, so both are logged unconditionally, at no
+            // sensitivity gate (root AGENTS.md §4.5).
             for credential in &result.credentials {
+                let checks_total = credential.checks.len();
+                let checks_passed = credential.checks.iter().filter(|c| c.passed).count();
+                let credential_type = credential.credential_type.as_deref().unwrap_or("");
+
+                if checks_passed == checks_total {
+                    tracing::info!(
+                        credential = %credential.query_id,
+                        format = %credential.format,
+                        credential_type = %credential_type,
+                        checks = checks_total,
+                        checks_passed,
+                        "credential verified"
+                    );
+                } else {
+                    // A per-credential failure is still a correct service
+                    // outcome, so `warn` rather than `error` (root AGENTS.md
+                    // §4.5). The reason lives on the per-check record below.
+                    tracing::warn!(
+                        credential = %credential.query_id,
+                        format = %credential.format,
+                        credential_type = %credential_type,
+                        checks = checks_total,
+                        checks_passed,
+                        "credential failed"
+                    );
+                }
+
                 for check in &credential.checks {
                     if check.passed {
                         tracing::info!(
                             credential = %credential.query_id,
+                            credential_type = %credential_type,
                             check = %check.check,
                             passed = true,
                             "verification check"
@@ -275,6 +313,7 @@ pub async fn verify_vp_response(
                     } else {
                         tracing::warn!(
                             credential = %credential.query_id,
+                            credential_type = %credential_type,
                             check = %check.check,
                             passed = false,
                             detail = %check.detail.as_deref().unwrap_or(""),
@@ -312,6 +351,16 @@ pub async fn verify_vp_response(
                     failed_checks = result.all_checks().filter(|c| !c.passed).count(),
                     credentials_requested,
                     credentials_answered,
+                    // A COUNT, never an identifier -- the roll-up records above
+                    // name the credentials. This makes "1 of 2 failed" visible
+                    // on the verdict line itself. Emitted only here: on a
+                    // verified response it is always zero, and a field that is
+                    // always zero is noise.
+                    credentials_failed = result
+                        .credentials
+                        .iter()
+                        .filter(|c| c.checks.iter().any(|k| !k.passed))
+                        .count(),
                     "vp response not verified"
                 );
             }
@@ -3502,6 +3551,149 @@ mod tests {
                 .any(|c| c.check == "status_check" && !c.passed),
             "the parked unavailability is still recorded as a fault: {:?}",
             result.checks
+        );
+    }
+
+    /// A mixed verdict must be readable without reconstructing it from
+    /// per-check lines. One roll-up record per credential, naming the credential,
+    /// its format and its asserted type.
+    #[tokio::test]
+    async fn a_mixed_verdict_emits_one_roll_up_record_per_credential() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = FieldCapture::default();
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(capture.clone());
+
+        foundry_core::obs::set_sensitive(false);
+        let guard = tracing::subscriber::set_default(subscriber);
+        let _ = run_unanchored_mdoc_presentation_reporting_result().await;
+        drop(guard);
+
+        // The failing credential is named, typed, and counted.
+        assert!(
+            capture.contains("credential failed"),
+            "a failed credential needs its own record"
+        );
+        // Unquoted: every string field in these records is `%`-formatted
+        // (Display), matching the `check`/`credential`/`detail` fields that
+        // predate this roll-up.
+        assert!(
+            capture.contains("credential_type=org.iso.18013.5.1.mDL"),
+            "the roll-up must name the credential type"
+        );
+        assert!(
+            capture.contains("checks_passed=0"),
+            "the roll-up must carry the passed count"
+        );
+        assert!(
+            capture.contains("format=mso_mdoc"),
+            "the roll-up must carry the format"
+        );
+        // The per-check record still exists and is now typed too -- §4.5 makes
+        // these field names operator-facing API, so they are enriched, never
+        // replaced.
+        assert!(
+            capture.contains("check=mdoc_issuer_auth_and_device_signature"),
+            "the per-check trail must survive"
+        );
+        assert!(
+            capture.contains("credentials_failed=1"),
+            "the verdict record must count failed credentials"
+        );
+    }
+
+    /// The positive counterpart: a credential that passed emits the same roll-up
+    /// shape at `info`, so an operator reading a green verification still sees
+    /// which credential types were accepted -- not only which were rejected.
+    #[tokio::test]
+    async fn a_verified_credential_emits_its_own_roll_up_record() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+        let pid = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+        let diploma = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("degree", serde_json::json!("MSc"))],
+        );
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [pid], "diploma": [diploma]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let capture = FieldCapture::default();
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(capture.clone());
+
+        foundry_core::obs::set_sensitive(false);
+        let resolver = MockResolver { token: None };
+        let guard = tracing::subscriber::set_default(subscriber);
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver).await;
+        drop(guard);
+
+        assert!(res.expect("both credentials are valid").verified);
+        assert!(
+            capture.contains("credential verified"),
+            "a passing credential needs its own record too"
+        );
+        assert!(
+            capture.contains("credential_type=https://localhost:8443/vct/pid"),
+            "the roll-up must name the asserted vct"
+        );
+        // Three, not two: a credential with no `status.status_list` claim is
+        // non-revocable, so `check_status` PASSES and still pushes its record
+        // (see the crate's Gotchas). So signature + dcql_match + status_check.
+        assert!(
+            capture.contains("checks_passed=3"),
+            "signature + dcql_match + a passing status_check"
+        );
+        // `credentials_failed` is emitted ONLY on the not-verified record: on a
+        // verified response the count is always zero, and a field that is always
+        // zero is noise.
+        assert!(
+            !capture.contains("credentials_failed"),
+            "a verified response must not carry a permanently-zero count"
+        );
+
+        // The paired negative, and the reason the assertions above are a
+        // meaningful control rather than a tautology: `credential_type` is a
+        // credential TYPE identifier and is logged unconditionally, while a
+        // DISCLOSED CLAIM VALUE is holder data and must never appear with
+        // `sensitive_payloads` off (root AGENTS.md §4.5). Both properties are
+        // asserted against one capture, so neither can drift without the other
+        // noticing.
+        //
+        // This control lives here rather than in
+        // `crates/foundry/tests/logging_redaction.rs` because that file's
+        // `drive_verification` deliberately posts an undecryptable JWE: it
+        // returns before any credential is examined, so no per-credential
+        // record is ever emitted there to assert against.
+        assert!(
+            !capture.contains("Alice"),
+            "a disclosed claim value must not be logged with sensitive payloads off"
+        );
+        assert!(
+            !capture.contains("MSc"),
+            "a disclosed claim value must not be logged with sensitive payloads off"
         );
     }
 

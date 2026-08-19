@@ -216,8 +216,11 @@ Logging is a request-path concern and is governed like one.
   faults.
 - **Log field names are operator-facing API.** `request_id`, `tx_id`, `route`,
   `method`, `listener`, `http.status`, `latency_ms`, `error.kind`,
-  `error.detail`. Renaming one is a breaking change for whoever is watching the
-  logs; update `README.md` too.
+  `error.detail`, and on per-credential verification records `credential`,
+  `credential_type`, `format`, `check`, `passed`, `checks`, `checks_passed`,
+  plus `credentials_requested` / `credentials_answered` / `credentials_failed`
+  on the verdict record. Renaming one is a breaking change for whoever is
+  watching the logs; update `README.md` too.
 
 Enforced by `crates/foundry/tests/instrumentation_hygiene.rs` (structural) and
 `crates/foundry/tests/logging_redaction.rs` (behavioural, with a positive
