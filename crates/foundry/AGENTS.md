@@ -266,6 +266,17 @@ cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
   comment.** Do not delete that comment, and do not reintroduce a CDN
   dependency (it exists for air-gapped deployment) or dynamic `innerHTML` (prior
   fixes deliberately removed it).
+- **`console.html` is excluded from pi-lens by the repo-root `.pi-lens.json`.
+  Do not delete that entry.** Without it, pi-lens's HTML autoformatter rewrites
+  the whole file on any edit — a ~6200-line diff that reflows the vendored QR
+  library above along with the console's own script, burying a one-line change
+  and putting the provenance comment's surroundings at risk. The exclusion is
+  the file's whole-file `ignore` glob, verified by editing one line and
+  confirming the diff stays at one line; note that a `.pi-lens.json` placed in
+  `assets/` itself is **not** honoured (project config is discovered from the
+  invocation directory, so only the repo-root file is read). The cost is that
+  pi-lens reports no diagnostics for this file at all — deliberate, since it is
+  a single vendored-plus-handwritten page with no build step.
 - **Both listeners must bind successfully** — `serve` binds them sequentially
   and propagates a bind error via `?`, so a port clash on either one aborts
   startup with an error (it does not panic, and it does not fall back to a
