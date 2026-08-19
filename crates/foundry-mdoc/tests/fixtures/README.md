@@ -34,5 +34,32 @@ needs a *fresh* run captured together with its transcript. Until then
 agreeing, not on a real wallet's signature verifying here — see the design doc
 §2.1 and §9.
 
+## Capturing a fresh `DeviceResponse` + `SessionTranscript` pair
+
+Both halves come from one run, and both are gated on payload logging
+(`--log-sensitive` / `logging.sensitive_payloads: true`) **and** `trace`, per root
+`AGENTS.md` §4.5. Run the server with:
+
+```bash
+RUST_LOG=info,foundry_verifier=trace foundry --log-sensitive serve --config config.yaml
+```
+
+Present a credential, then take two fields from the log — from the **same**
+`tx_id`, because the transcript commits to that transaction's `nonce`:
+
+| Log record | Field | What it is |
+| --- | --- | --- |
+| `SENSITIVE: decrypted response payload` | `decrypted_response` | JSON; the `DeviceResponse` is `vp_token.<query id>[0]`, base64url |
+| `SENSITIVE: candidate mdoc SessionTranscript` | `session_transcript` | hex of the CBOR `SessionTranscript` |
+
+With several `dc_api_expected_origins` configured there is one transcript record
+per Origin, in configuration order, and only one of them will verify — try each.
+
+The transcript record is emitted **before** issuer verification, so it appears
+even when the presentation is rejected for an untrusted or expired issuer chain
+(design doc §8) — which is the normal case for the wallets worth capturing. Do
+not move that emission back into the candidate loop; see the Gotchas in
+`crates/foundry-verifier/AGENTS.md`.
+
 Design doc:
 `docs/superpowers/specs/2026-08-19-mdoc-deviceresponse-verification-design.md`

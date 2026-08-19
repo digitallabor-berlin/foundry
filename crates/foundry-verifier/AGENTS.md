@@ -281,3 +281,13 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   authorisation. It exists because a real wallet's Device Signature cannot be
   reproduced offline without the exact transcript bytes, which is what blocked
   capturing an interop fixture.
+  **It is emitted before `verify_issuer_signed`, and never from inside the
+  candidate loop.** The presentations that most need reproducing offline are the
+  ones that *fail* — a test-PKI or expired issuer chain — and those return from
+  `verify_issuer_signed` before the loop is entered, so an emission inside the
+  loop is suppressed by exactly the verdict it exists to explain. That is not a
+  hypothetical: it is why the golden fixture could not be captured from the AV
+  wallet. Pinned by
+  `the_session_transcript_diagnostic_survives_an_issuer_trust_failure` (positive)
+  and `..._stays_locked_by_default` (negative control), both inline in
+  `verify.rs`.

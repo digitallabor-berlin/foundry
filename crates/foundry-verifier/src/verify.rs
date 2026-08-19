@@ -708,6 +708,28 @@ async fn verify_one_credential(
                 }]
             };
 
+            // The transcript is interop-diagnostic gold — without it a real
+            // wallet's Device Signature cannot be reproduced offline — but it
+            // commits to `tx.nonce`. Gated on BOTH sensitive_enabled() AND
+            // trace per root AGENTS.md §4.5: a level is not authorisation.
+            //
+            // Emitted HERE, before any verification, and never from inside the
+            // candidate loop below. The presentations that most need
+            // reproducing offline are the ones that fail — a test-PKI or expired
+            // issuer chain (design doc §8) — and those return from
+            // `verify_issuer_signed` below. A diagnostic conditioned on the
+            // verdict it exists to explain is no diagnostic at all.
+            if foundry_core::obs::sensitive_enabled() {
+                for params in &candidates {
+                    if let Ok(encoded) = build_session_transcript(params) {
+                        tracing::trace!(
+                            session_transcript = %hex::encode(&encoded),
+                            "SENSITIVE: candidate mdoc SessionTranscript"
+                        );
+                    }
+                }
+            }
+
             // The issuer half does not depend on the Origin, so it runs ONCE.
             // Only the Device Signature commits to a SessionTranscript, so only
             // that check is retried per candidate. Before this, each candidate
@@ -724,19 +746,6 @@ async fn verify_one_credential(
             for params in &candidates {
                 let session_transcript = session_transcript_value(params)
                     .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
-
-                // The transcript is interop-diagnostic gold — without it a real
-                // wallet's Device Signature cannot be reproduced offline — but it
-                // commits to `tx.nonce`. Gated on BOTH sensitive_enabled() AND
-                // trace per root AGENTS.md §4.5: a level is not authorisation.
-                if foundry_core::obs::sensitive_enabled()
-                    && let Ok(encoded) = build_session_transcript(params)
-                {
-                    tracing::trace!(
-                        session_transcript = %hex::encode(&encoded),
-                        "SENSITIVE: candidate mdoc SessionTranscript"
-                    );
-                }
 
                 match foundry_mdoc::verifier::verify_device_auth(
                     &resp,
@@ -2468,6 +2477,202 @@ mod tests {
         assert!(
             res.all_checks()
                 .any(|c| c.check == "status_check" && c.passed)
+        );
+    }
+
+    /// Collects the fields of every event, so a test can assert that a
+    /// diagnostic was emitted at all. Deliberately minimal: `crates/foundry`'s
+    /// `logging_redaction.rs` owns the full redaction harness (root `AGENTS.md`
+    /// §4.5); this proves one positive property about one record.
+    #[derive(Clone, Default)]
+    struct FieldCapture(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl FieldCapture {
+        fn contains(&self, needle: &str) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains(needle))
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FieldCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor<'a>(&'a mut String);
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write as _;
+                    let _ = write!(self.0, " {}={:?}", field.name(), value);
+                }
+            }
+            let mut line = String::new();
+            event.record(&mut Visitor(&mut line));
+            self.0.lock().unwrap().push(line);
+        }
+    }
+
+    /// Build an mdoc presentation whose issuer chain roots at a CA the config
+    /// does **not** trust, and run it through `verify_vp_response`. Identical to
+    /// `test_verify_vp_response_mdoc_presentation` in every respect except the
+    /// anchor mismatch, so the only reason it can fail is issuer trust.
+    async fn run_unanchored_mdoc_presentation() -> Result<VerificationResult, VerificationError> {
+        // Two independent CAs: the trust store carries #1, the credential is
+        // signed under #2's leaf.
+        let (trusted_root_pem, _, _) = test_pki();
+        let (_, foreign_leaf_cert, foreign_leaf_key) = test_pki();
+        let ca_str = String::from_utf8(trusted_root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer =
+            FileSigner::from_pem(&foreign_leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "mso_mdoc",
+                "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+            }]
+        });
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &issuer_signer,
+            Some(vec![der_b64(&foreign_leaf_cert)]),
+        )
+        .unwrap();
+
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+            client_id: expected_client_id(&config),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
+            &transcript,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({
+                "vp_token": { "c1": [B64URL.encode(&device_response)] }
+            }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await
+    }
+
+    /// The candidate `SessionTranscript` diagnostic MUST survive an issuer-trust
+    /// failure.
+    ///
+    /// Without it there is no way to reproduce a real wallet's Device Signature
+    /// offline, and the wallets whose presentations most need reproducing are
+    /// exactly the ones foundry cannot yet trust — a test PKI, or an expired DS
+    /// certificate (design doc §8). When the emission sat inside the candidate
+    /// retry loop, which runs only after `verify_issuer_signed(..)?`, capturing
+    /// the golden fixture of design doc §9 was impossible: the record an
+    /// operator needed was suppressed by the very verdict it was meant to
+    /// explain.
+    ///
+    /// A diagnostic must not be conditional on the outcome it diagnoses.
+    #[tokio::test]
+    async fn the_session_transcript_diagnostic_survives_an_issuer_trust_failure() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = FieldCapture::default();
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(capture.clone());
+
+        foundry_core::obs::set_sensitive(true);
+        let guard = tracing::subscriber::set_default(subscriber);
+        let res = run_unanchored_mdoc_presentation().await;
+        drop(guard);
+        // Process-global: restore before asserting, so a failure cannot leave
+        // the flag on for whatever runs next in this process.
+        foundry_core::obs::set_sensitive(false);
+
+        let err = res.expect_err("an unanchored issuer chain must be rejected");
+        assert!(
+            err.to_string().contains("trust anchor"),
+            "expected an anchor failure, got: {err}"
+        );
+        assert!(
+            capture.contains("session_transcript"),
+            "the candidate SessionTranscript was not logged; it is emitted only \
+             after the issuer check, so the golden fixture of design doc §9 \
+             cannot be captured from any wallet foundry does not already trust"
+        );
+    }
+
+    /// The negative control for the test above: the transcript commits to
+    /// `tx.nonce`, so it stays locked unless payload logging is explicitly
+    /// unlocked. A `trace` level alone is not authorisation (root `AGENTS.md`
+    /// §4.5).
+    #[tokio::test]
+    async fn the_session_transcript_diagnostic_stays_locked_by_default() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = FieldCapture::default();
+        let subscriber = tracing_subscriber::Registry::default()
+            .with(tracing_subscriber::filter::LevelFilter::TRACE)
+            .with(capture.clone());
+
+        foundry_core::obs::set_sensitive(false);
+        let guard = tracing::subscriber::set_default(subscriber);
+        let res = run_unanchored_mdoc_presentation().await;
+        drop(guard);
+
+        res.expect_err("an unanchored issuer chain must be rejected");
+        assert!(
+            !capture.contains("session_transcript"),
+            "the SessionTranscript was logged with payload logging disabled"
+        );
+        // Proves the assertion above is not vacuous: something was captured.
+        assert!(
+            capture.contains("step"),
+            "captured no events at all, so the negative assertion proves nothing"
         );
     }
 

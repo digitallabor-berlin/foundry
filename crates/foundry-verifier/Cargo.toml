@@ -28,6 +28,9 @@ hex = { workspace = true }
 [dev-dependencies]
 # Test code names ciborium::Value for the mdoc SessionTranscript.
 ciborium = { workspace = true }
+# Only for the capture layer that proves the sensitive-gated SessionTranscript
+# diagnostic is emitted even when issuer trust fails (root AGENTS.md §4.5).
+tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
 coset = { workspace = true }
