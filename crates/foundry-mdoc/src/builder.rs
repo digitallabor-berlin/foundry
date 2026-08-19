@@ -77,9 +77,15 @@ fn json_to_cbor_value(json: &JsonValue) -> Result<ciborium::Value, FormatError> 
 
 /// Builds a signed ISO/IEC 18013-5 mdoc CBOR document.
 ///
-/// TODO(interop): IssuerSignedItem and MobileSecurityObject payloads are not
-/// wrapped as CBOR tag-24 embedded CBOR, and validity timestamps are plain
-/// text rather than `tdate` (tag 0). See `crate::types` for details.
+/// `IssuerSignedItem`s and the `MobileSecurityObject` are both carried as tag-24
+/// embedded CBOR, and validity timestamps as `tdate` (tag 0); see
+/// [`crate::types`] for which of those facts are proven against a real
+/// presentation and which are derived.
+///
+/// The remaining known divergence is the **outer envelope**, not the CBOR inside
+/// it: this returns a `DeviceResponse`-shaped wrapper, where OpenID4VCI L2249
+/// wants a bare `IssuerSigned` for the credential. That is tracked as a
+/// conformance gap rather than fixed here.
 pub fn build_mdoc(
     claims: MdocClaims,
     signer: &dyn Signer,
