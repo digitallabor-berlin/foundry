@@ -108,7 +108,9 @@ pub enum SessionTranscriptParams {
 /// compatible with a tag-24 embedding). It was settled against the spec's own
 /// published vectors rather than by interpretation, and this module's tests
 /// assert those vectors byte-for-byte so the decision cannot silently drift.
-pub fn build_session_transcript(params: &SessionTranscriptParams) -> Result<Vec<u8>, String> {
+pub fn session_transcript_value(
+    params: &SessionTranscriptParams,
+) -> Result<ciborium::Value, String> {
     let (identifier, info) = handover_info(params);
     let info_bytes = encode_cbor(&info)?;
 
@@ -119,11 +121,21 @@ pub fn build_session_transcript(params: &SessionTranscriptParams) -> Result<Vec<
 
     // SessionTranscript = [ DeviceEngagementBytes, EReaderKeyBytes, Handover ],
     // the first two pinned to null by OpenID4VP (L2831-L2832, L2961-L2962).
-    encode_cbor(&ciborium::Value::Array(vec![
+    Ok(ciborium::Value::Array(vec![
         ciborium::Value::Null,
         ciborium::Value::Null,
         handover,
     ]))
+}
+
+/// The encoded form of [`session_transcript_value`].
+///
+/// Both forms exist because they serve different consumers: this one is pinned
+/// against OpenID4VP's published hex vectors, while `DeviceAuthentication`
+/// element [1] needs the `Value` so the transcript can be spliced **by value**
+/// with no decode/re-encode round trip (design doc §2.1).
+pub fn build_session_transcript(params: &SessionTranscriptParams) -> Result<Vec<u8>, String> {
+    encode_cbor(&session_transcript_value(params)?)
 }
 
 /// The fixed identifier and the `…HandoverInfo` array for `params`.
@@ -179,6 +191,57 @@ fn encode_cbor(value: &ciborium::Value) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     ciborium::into_writer(value, &mut bytes).map_err(|e| e.to_string())?;
     Ok(bytes)
+}
+
+/// A human-readable CBOR type name, for error messages only.
+fn cbor_type_name(value: &ciborium::Value) -> &'static str {
+    match value {
+        ciborium::Value::Integer(_) => "integer",
+        ciborium::Value::Bytes(_) => "byte string",
+        ciborium::Value::Float(_) => "float",
+        ciborium::Value::Text(_) => "text string",
+        ciborium::Value::Bool(_) => "boolean",
+        ciborium::Value::Null => "null",
+        ciborium::Value::Tag(..) => "tag",
+        ciborium::Value::Array(_) => "array",
+        ciborium::Value::Map(_) => "map",
+        _ => "unknown",
+    }
+}
+
+/// Wrap pre-encoded CBOR as `#6.24(bstr .cbor …)` and return the **full tagged
+/// encoding**.
+///
+/// That full encoding — not the inner CBOR — is what ISO/IEC 18013-5 digests in
+/// `valueDigests` and signs in `DeviceAuthenticationBytes`. Proven against a
+/// real wallet's presentation; see the design doc §2.3.
+pub fn tag24_encode(inner_cbor: &[u8]) -> Result<Vec<u8>, String> {
+    encode_cbor(&ciborium::Value::Tag(
+        24,
+        Box::new(ciborium::Value::Bytes(inner_cbor.to_vec())),
+    ))
+}
+
+/// Unwrap `#6.24(bstr …)` to its inner CBOR bytes.
+///
+/// Every non-tag-24 shape is an error rather than a skip. Returning `None` for
+/// an untagged value is precisely how foundry silently dropped every disclosed
+/// element and then reported a DCQL mismatch instead (design doc §1.6).
+pub fn tag24_unwrap(value: &ciborium::Value) -> Result<&[u8], String> {
+    match value {
+        ciborium::Value::Tag(24, inner) => match inner.as_ref() {
+            ciborium::Value::Bytes(b) => Ok(b.as_slice()),
+            other => Err(format!(
+                "CBOR tag 24 must wrap a byte string, got {}",
+                cbor_type_name(other)
+            )),
+        },
+        ciborium::Value::Tag(other, _) => Err(format!("expected CBOR tag 24, got tag {other}")),
+        other => Err(format!(
+            "expected CBOR tag 24 embedded CBOR, got {}",
+            cbor_type_name(other)
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -363,5 +426,55 @@ mod tests {
         })
         .expect("encodes");
         assert_ne!(with, without, "jwkThumbprint must affect the hash");
+    }
+
+    #[test]
+    fn tag24_round_trips_and_matches_the_captured_wire_bytes() {
+        // An empty CBOR map (`a0`) wrapped as #6.24(bstr) is `d81841a0` — the
+        // exact bytes a real wallet sends for an empty `deviceSigned.nameSpaces`
+        // (design doc §2.3).
+        let inner = hex::decode("a0").expect("valid hex");
+        let tagged = tag24_encode(&inner).expect("encodes");
+        assert_eq!(hex::encode(&tagged), "d81841a0");
+
+        let value: ciborium::Value = ciborium::from_reader(tagged.as_slice()).expect("decodes");
+        assert_eq!(tag24_unwrap(&value).expect("unwraps"), inner.as_slice());
+    }
+
+    #[test]
+    fn tag24_unwrap_rejects_untagged_and_wrongly_tagged_values() {
+        // Silence here is what made design doc defect 4 invisible: an untagged
+        // item must be an error, never a skip.
+        let bare = ciborium::Value::Bytes(vec![0xa0]);
+        assert!(tag24_unwrap(&bare).is_err(), "a bare bstr is not tag-24");
+
+        let wrong_tag = ciborium::Value::Tag(0, Box::new(ciborium::Value::Bytes(vec![0xa0])));
+        assert!(tag24_unwrap(&wrong_tag).is_err(), "tag 0 is not tag 24");
+
+        let tag24_over_text = ciborium::Value::Tag(24, Box::new(ciborium::Value::Text("x".into())));
+        assert!(
+            tag24_unwrap(&tag24_over_text).is_err(),
+            "tag 24 must wrap a byte string"
+        );
+    }
+
+    #[test]
+    fn session_transcript_value_encodes_to_the_byte_form() {
+        // The `Value` form and the byte form must never diverge: the byte form
+        // is pinned against OpenID4VP's published vectors, and the `Value` form
+        // is what DeviceAuthentication element [1] is spliced from.
+        let params = SessionTranscriptParams::DcApi {
+            origin: "https://verifier.example.com".to_string(),
+            nonce: SPEC_NONCE.to_string(),
+            jwk_thumbprint: Some(thumbprint_fixture()),
+        };
+        let as_value = session_transcript_value(&params).expect("value");
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&as_value, &mut encoded).expect("encodes");
+        assert_eq!(
+            encoded,
+            build_session_transcript(&params).expect("bytes"),
+            "session_transcript_value and build_session_transcript must agree"
+        );
     }
 }
