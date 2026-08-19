@@ -10,9 +10,9 @@
 //! is the one half of mdoc verification a capture can exercise without PKI; see
 //! `tests/fixtures/README.md`.
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _};
 use foundry_core::trust::TrustStore;
-use foundry_mdoc::types::{IssuerSignedItem, MobileSecurityObject, tag24_unwrap};
+use foundry_mdoc::types::{tag24_unwrap, IssuerSignedItem, MobileSecurityObject};
 use foundry_mdoc::verifier::{
     decode_device_response, parse_device_response, verify_device_auth, verify_issuer_signed,
 };
