@@ -137,6 +137,9 @@ fn payload_fields_are_gated_on_the_sensitive_flag() {
         "vp_token",
         "disclosed_claims =",
         "credential_jwt",
+        "request_object_jws",
+        "request_object_payload",
+        "dc_api_request =",
     ];
 
     for (path, text) in rust_sources(&[

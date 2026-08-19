@@ -21,6 +21,7 @@ mod support;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use base64::Engine as _;
 use foundry::admin_auth::AdminApiKey;
 use foundry::log_capture::{self, CaptureHandle};
 use foundry::server::{AppState, admin_router, wallet_router};
@@ -1080,6 +1081,206 @@ async fn payload_logging_does_not_unlock_private_key_material() {
     assert!(
         !log.contains_value("ephem_private_jwk"),
         "the ephemeral private key must stay out of the log even in dev mode"
+    );
+}
+
+/// Create a verification request over `transport` and, on the `request_uri`
+/// transport, fetch the signed Request Object the wallet would actually
+/// receive from `GET /vp/request/:id`.
+///
+/// Returns the admin-API response body together with the served compact JWS.
+/// The JWS is `None` for the DC API transport, which has no signed form -- its
+/// request object is carried in the admin response body instead.
+async fn drive_request_object(
+    state: &AppState,
+    transport: &str,
+) -> (serde_json::Value, Option<String>) {
+    let admin = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+    let create_res = admin
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/verification/requests")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "transport": transport,
+                        "dcql_query": {
+                            "credentials": [{
+                                "id": "q1",
+                                "format": "dc+sd-jwt",
+                                "meta": { "vct_values": [format!("{ISSUER}/vct/pid")] }
+                            }]
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("create verification request"),
+        )
+        .await
+        .expect("create verification response");
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let created = body_json(create_res).await;
+
+    if transport != "request_uri" {
+        return (created, None);
+    }
+
+    let id = created["verification_id"]
+        .as_str()
+        .expect("verification_id")
+        .to_string();
+    let res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/vp/request/{id}"))
+                .body(Body::empty())
+                .expect("request object request"),
+        )
+        .await
+        .expect("request object response");
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .expect("request object body");
+    let jws = String::from_utf8(bytes.to_vec()).expect("request object is UTF-8");
+
+    (created, Some(jws))
+}
+
+/// The `nonce` inside a compact Request Object JWS.
+///
+/// Asserted on rather than the whole JWS alone: a leak that logged only the
+/// *decoded* payload would not contain the compact string as a substring, so
+/// checking the JWS by itself would miss exactly the shape this feature adds.
+fn request_object_nonce(jws: &str) -> String {
+    let payload_b64 = jws.split('.').nth(1).expect("jws has a payload segment");
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .expect("payload is base64url");
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("payload is JSON");
+    payload["nonce"]
+        .as_str()
+        .expect("request object carries a nonce")
+        .to_string()
+}
+
+/// The Request Object served to the wallet is a payload: it commits to the
+/// transaction nonce and carries the ephemeral public JWK. Without the dev-only
+/// flag it must not appear, at any level -- the capture here runs at `TRACE`.
+#[tokio::test]
+async fn the_request_object_served_to_the_wallet_stays_locked_by_default() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir) = setup().await;
+    let (guard, log) = capture_at_trace();
+    let (_created, jws) = drive_request_object(&state, "request_uri").await;
+    drop(guard);
+
+    let jws = jws.expect("request_uri transport serves a signed Request Object");
+    assert!(!log.events().is_empty(), "captured nothing");
+
+    assert!(
+        !log.contains_value(&jws),
+        "the signed Request Object leaked with payload logging disabled"
+    );
+    assert!(
+        !log.contains_value(&request_object_nonce(&jws)),
+        "the Request Object nonce leaked with payload logging disabled"
+    );
+}
+
+/// The positive control for the signed Request Object. Without it the negative
+/// test above could pass simply because nothing is ever emitted.
+#[tokio::test]
+async fn payload_logging_unlocks_the_request_object_served_to_the_wallet() {
+    let _flag = lock_flag().await;
+
+    let (state, _dir) = setup().await;
+    foundry_core::obs::set_sensitive(true);
+    let (guard, log) = capture_at_trace();
+    let (_created, jws) = drive_request_object(&state, "request_uri").await;
+    drop(guard);
+    // Restore immediately: this flag is process-global.
+    foundry_core::obs::set_sensitive(false);
+
+    let jws = jws.expect("request_uri transport serves a signed Request Object");
+    assert!(
+        log.contains_value(&jws),
+        "with sensitive_payloads enabled the served Request Object should be logged \
+         at trace; if it is not, the diagnostic is inert and the negative test above \
+         is meaningless"
+    );
+}
+
+/// The DC API transport has no signed form, so its request object is the JSON
+/// handed to the invoking page. It is the same tier of payload and gets the
+/// same default.
+#[tokio::test]
+async fn the_dc_api_request_object_stays_locked_by_default() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir) = setup().await;
+    let (guard, log) = capture_at_trace();
+    let (created, _) = drive_request_object(&state, "dc_api").await;
+    drop(guard);
+
+    let nonce = created["dc_api_request"]["nonce"]
+        .as_str()
+        .expect("dc_api_request carries a nonce");
+    assert!(!log.events().is_empty(), "captured nothing");
+    assert!(
+        !log.contains_value(nonce),
+        "the DC API request object leaked with payload logging disabled"
+    );
+}
+
+/// The positive control for the DC API transport.
+#[tokio::test]
+async fn payload_logging_unlocks_the_dc_api_request_object() {
+    let _flag = lock_flag().await;
+
+    let (state, _dir) = setup().await;
+    foundry_core::obs::set_sensitive(true);
+    let (guard, log) = capture_at_trace();
+    let (created, _) = drive_request_object(&state, "dc_api").await;
+    drop(guard);
+    foundry_core::obs::set_sensitive(false);
+
+    let nonce = created["dc_api_request"]["nonce"]
+        .as_str()
+        .expect("dc_api_request carries a nonce");
+    assert!(
+        log.contains_value(nonce),
+        "with sensitive_payloads enabled the DC API request object should be logged \
+         at trace; if it is not, the diagnostic is inert"
+    );
+}
+
+/// Unlocking the Request Object widens what may be logged; it does not remove
+/// the floor. The transaction's ephemeral **private** key stays out, and the
+/// dump is deliberately of the public half only.
+#[tokio::test]
+async fn unlocking_the_request_object_does_not_unlock_the_ephemeral_private_key() {
+    let _flag = lock_flag().await;
+
+    let (state, _dir) = setup().await;
+    foundry_core::obs::set_sensitive(true);
+    let (guard, log) = capture_at_trace();
+    let _ = drive_request_object(&state, "request_uri").await;
+    drop(guard);
+    foundry_core::obs::set_sensitive(false);
+
+    assert!(
+        !log.contains_value("ephem_private_jwk"),
+        "the ephemeral private key field name appears in the log"
+    );
+    assert!(
+        !log.contains_value("\"d\":"),
+        "a private JWK component appears in the log while serving a Request Object"
     );
 }
 
