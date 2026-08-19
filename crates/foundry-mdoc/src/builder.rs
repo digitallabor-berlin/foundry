@@ -164,9 +164,15 @@ pub fn build_mdoc(
         },
     };
 
-    let mut mso_bytes = Vec::new();
-    ciborium::into_writer(&mso, &mut mso_bytes)
+    let mut mso_inner = Vec::new();
+    ciborium::into_writer(&mso, &mut mso_inner)
         .map_err(|e| FormatError::Serialization(e.to_string()))?;
+
+    // ISO/IEC 18013-5: the IssuerAuth COSE_Sign1 payload is
+    // MobileSecurityObjectBytes = `#6.24(bstr .cbor MobileSecurityObject)`. The
+    // signature is computed over these wrapped bytes, so the wrapping must happen
+    // before `sig_structure_data`.
+    let mso_bytes = crate::types::tag24_encode(&mso_inner).map_err(FormatError::Serialization)?;
 
     // IssuerAuth COSE_Sign1.
     let protected = HeaderBuilder::new().algorithm(alg_label(signer)).build();

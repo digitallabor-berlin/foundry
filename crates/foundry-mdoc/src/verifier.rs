@@ -205,7 +205,14 @@ pub fn verify_mdoc(
     verify_ecdsa(curve, &ix, &iy, &tbs, &sign1.signature)?;
 
     // --- MSO ---
-    let mso: MobileSecurityObject = ciborium::from_reader(mso_bytes.as_slice())
+    // The signature above was verified over `mso_bytes` verbatim, which is
+    // MobileSecurityObjectBytes = `#6.24(bstr .cbor MobileSecurityObject)`.
+    // Unwrap only to parse; never feed the unwrapped form to the signature check.
+    let mso_wrapper: ciborium::Value = ciborium::from_reader(mso_bytes.as_slice())
+        .map_err(|e| FormatError::Deserialization(format!("issuerAuth payload CBOR: {e}")))?;
+    let mso_inner =
+        crate::types::tag24_unwrap(&mso_wrapper).map_err(FormatError::InvalidStructure)?;
+    let mso: MobileSecurityObject = ciborium::from_reader(mso_inner)
         .map_err(|e| FormatError::Deserialization(format!("MSO CBOR: {e}")))?;
 
     let signed_ts = time::OffsetDateTime::parse(
@@ -401,6 +408,10 @@ mod tests {
     /// the structural-rejection tests exercise the same fixture.
     struct Fixture {
         mdoc: Vec<u8>,
+        /// The issuer's private key PEM, so a tamper helper can re-sign after
+        /// rewriting the MSO — isolating a structural check from the signature
+        /// check that legitimately runs before it.
+        leaf_key: Vec<u8>,
         trust_store: TrustStore,
         transcript: Vec<u8>,
         device_signature: Vec<u8>,
@@ -464,6 +475,7 @@ mod tests {
 
         Fixture {
             mdoc,
+            leaf_key,
             trust_store,
             transcript,
             device_signature,
@@ -565,8 +577,7 @@ mod tests {
             .clone();
         let issuer_auth = map_entry_mut(issuer_signed, "issuerAuth").clone();
         let sign1 = CoseSign1::from_slice(&cbor_value_to_bytes(&issuer_auth).unwrap()).unwrap();
-        let mso: MobileSecurityObject =
-            ciborium::from_reader(sign1.payload.as_deref().unwrap()).unwrap();
+        let mso = parse_wrapped_mso(sign1.payload.as_deref().unwrap());
         (mso, namespaces)
     }
 
@@ -604,5 +615,97 @@ mod tests {
             .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == key))
             .map(|(_, v)| v)
             .unwrap_or_else(|| panic!("fixture must contain {key}"))
+    }
+
+    /// The IssuerAuth payload is `MobileSecurityObjectBytes`. Asserting the
+    /// two-byte tag-24 head (`d818`) pins the wire form, not just that a
+    /// round-trip happens to work.
+    #[test]
+    fn issuer_auth_payload_is_tag24_wrapped_mso() {
+        let f = valid_fixture();
+        let payload = issuer_auth_payload(&f.mdoc);
+        assert_eq!(
+            &payload[..2],
+            &[0xd8, 0x18],
+            "IssuerAuth payload must begin with CBOR tag 24"
+        );
+        assert_eq!(parse_wrapped_mso(&payload).version, "1.0");
+    }
+
+    #[test]
+    fn an_untagged_mso_payload_is_rejected() {
+        let mut f = valid_fixture();
+        unwrap_issuer_auth_payload_in_place(&mut f.mdoc, &f.leaf_key);
+
+        let err = verify_mdoc(
+            &f.mdoc,
+            &f.trust_store,
+            &f.transcript,
+            &f.device_signature,
+            f.now,
+        )
+        .expect_err("a bare MSO payload must be rejected");
+        assert!(
+            format!("{err}").contains("tag 24"),
+            "error must name the tag-24 requirement, got: {err}"
+        );
+    }
+
+    fn parse_wrapped_mso(payload: &[u8]) -> MobileSecurityObject {
+        let wrapper: ciborium::Value = ciborium::from_reader(payload).unwrap();
+        let inner = crate::types::tag24_unwrap(&wrapper).unwrap();
+        ciborium::from_reader(inner).unwrap()
+    }
+
+    fn issuer_auth_payload(mdoc: &[u8]) -> Vec<u8> {
+        let mut value: ciborium::Value = ciborium::from_reader(mdoc).unwrap();
+        let issuer_signed = issuer_signed_mut(&mut value);
+        let issuer_auth = map_entry_mut(issuer_signed, "issuerAuth").clone();
+        CoseSign1::from_slice(&cbor_value_to_bytes(&issuer_auth).unwrap())
+            .unwrap()
+            .payload
+            .unwrap()
+    }
+
+    /// Replace the tag-24 IssuerAuth payload with its inner bytes and **re-sign**,
+    /// reproducing exactly what foundry's pre-fix builder emitted: a bare MSO map
+    /// under a signature that genuinely covers it.
+    ///
+    /// Re-signing is required, not incidental. `verify_mdoc` authenticates the
+    /// payload bytes before parsing them — which is the correct order, since
+    /// parsing unauthenticated CBOR is the thing to avoid — so without a valid
+    /// signature this test would fail on the signature and never reach the
+    /// structural check it exists to pin.
+    fn unwrap_issuer_auth_payload_in_place(mdoc: &mut Vec<u8>, leaf_key: &[u8]) {
+        let signer = FileSigner::from_pem(leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let mut value: ciborium::Value = ciborium::from_reader(mdoc.as_slice()).unwrap();
+        {
+            let issuer_signed = issuer_signed_mut(&mut value);
+            let slot = map_entry_mut(issuer_signed, "issuerAuth");
+            let sign1 = CoseSign1::from_slice(&cbor_value_to_bytes(slot).unwrap()).unwrap();
+
+            let wrapper: ciborium::Value =
+                ciborium::from_reader(sign1.payload.as_deref().unwrap()).unwrap();
+            let unwrapped = crate::types::tag24_unwrap(&wrapper).unwrap().to_vec();
+
+            let tbs = coset::sig_structure_data(
+                coset::SignatureContext::CoseSign1,
+                sign1.protected.clone(),
+                None,
+                &[],
+                &unwrapped,
+            );
+            let rebuilt = coset::CoseSign1Builder::new()
+                .protected(sign1.protected.header.clone())
+                .unprotected(sign1.unprotected.clone())
+                .payload(unwrapped)
+                .signature(signer.sign(&tbs).unwrap())
+                .build();
+
+            let bytes = coset::CborSerializable::to_vec(rebuilt).unwrap();
+            *slot = ciborium::from_reader(bytes.as_slice()).unwrap();
+        }
+        mdoc.clear();
+        ciborium::into_writer(&value, mdoc).unwrap();
     }
 }

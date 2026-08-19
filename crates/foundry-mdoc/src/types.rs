@@ -3,7 +3,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// MobileSecurityObject (ISO/IEC 18013-5 §9.1.2.4).
-/// TODO(interop): payload is not tag-24 embedded-CBOR wrapped.
+///
+/// Transported as `MobileSecurityObjectBytes` = `#6.24(bstr .cbor
+/// MobileSecurityObject)` in the IssuerAuth COSE_Sign1 payload. The tag-24
+/// wrapper is applied and stripped at the call sites rather than by this type,
+/// because the IssuerAuth signature is computed over the **wrapped** bytes.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct MobileSecurityObject {
     pub version: String,
