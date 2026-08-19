@@ -9,7 +9,9 @@
 //! here — see `tests/fixtures/README.md`.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
+use foundry_core::trust::TrustStore;
 use foundry_mdoc::types::{IssuerSignedItem, MobileSecurityObject, tag24_unwrap};
+use foundry_mdoc::verifier::{decode_device_response, parse_device_response, verify_issuer_signed};
 use sha2::{Digest, Sha256};
 
 const CAPTURE_B64: &str = include_str!("fixtures/av_device_response.b64");
@@ -160,5 +162,54 @@ fn re_encoding_the_capture_is_byte_identical() {
         encode(&device_response()),
         original,
         "the wallet's CBOR must survive a decode/re-encode round trip unchanged"
+    );
+}
+
+/// A timestamp inside the capture's MSO validity window (2026-08-13 ..
+/// 2027-08-13). Chain validation is reached first, so this does not decide the
+/// outcome; it only keeps the scenario honest.
+const NOW_INSIDE_MSO_WINDOW: u64 = 1_787_097_600;
+
+/// RFC 9360 §2 (`x5chain`, COSE header label 33) keys the encoding to
+/// cardinality: "If a single certificate is conveyed, it is placed in a CBOR
+/// byte string." Its CDDL — `COSE_X509 = bstr / [ 2*certs: bstr ]` — puts the
+/// array form's lower bound at two, so for exactly one certificate the bare byte
+/// string is the encoding the RFC prescribes, not an alternative to an array.
+///
+/// This wallet uses that form -- the capture's unprotected header is
+/// `a1 1821 5902b2 ...`, label 33 followed by a bare 690-byte string. foundry
+/// required an array, so `as_array()` returned `None`, the `&&` short-circuited,
+/// the header was skipped, and a chain that was *present* was reported as
+/// `issuerAuth missing x5c`. Every foundry-built test round-tripped fine because
+/// foundry's builder emits the array form -- the same writer/reader blind spot
+/// that hid the tag-24 digest defect.
+///
+/// The assertion is about how FAR verification gets, not that it succeeds. This
+/// capture's chain cannot validate here (its root is not a trust anchor and its
+/// DS certificate expired 2025-09-17), so reaching the chain check is precisely
+/// what proves extraction handed a leaf onward.
+#[test]
+fn the_real_x5chain_is_a_bare_byte_string_and_is_still_extracted() {
+    let bytes = capture();
+    let value = decode_device_response(&bytes).expect("the capture decodes");
+    let resp = parse_device_response(&value).expect("the capture parses");
+    let empty_anchors = TrustStore::from_pems(&[]).expect("an empty trust store builds");
+
+    // `IssuerVerified` is not `Debug`, so `expect_err` is unavailable here.
+    let err = match verify_issuer_signed(&resp, &empty_anchors, NOW_INSIDE_MSO_WINDOW) {
+        Ok(_) => panic!("the capture's issuer chain must not validate in this workspace"),
+        Err(e) => e,
+    };
+    let rendered = format!("{err:?}");
+
+    assert!(
+        !rendered.contains("missing x5c"),
+        "the x5chain header IS present, as a bare byte string; reporting it missing \
+         means extraction silently skipped it again, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("issuer cert validation"),
+        "extraction must succeed and hand a leaf certificate to chain validation, \
+         got: {rendered}"
     );
 }

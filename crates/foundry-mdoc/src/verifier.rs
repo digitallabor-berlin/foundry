@@ -255,21 +255,56 @@ pub fn verify_issuer_signed(
     let sign1 = CoseSign1::from_slice(&issuer_auth_bytes)
         .map_err(|e| FormatError::Deserialization(format!("issuerAuth COSE: {e}")))?;
 
+    // RFC 9360 §2 (`x5chain`, COSE header label 33) states the two encodings as
+    // a dichotomy keyed on cardinality, not as a preference: "If a single
+    // certificate is conveyed, it is placed in a CBOR byte string", while "if
+    // multiple certificates are conveyed, a CBOR array of byte strings is used,
+    // with each certificate being in its own byte string." The section's CDDL
+    // puts the array's lower bound at two:
+    //
+    //     COSE_X509 = bstr / [ 2*certs: bstr ]
+    //
+    // So a bare byte string is not a tolerated variant of the array -- it is the
+    // encoding the RFC prescribes when there is exactly one certificate, and
+    // accepting it is conformance rather than leniency. The real wallet capture
+    // in `tests/fixtures/` uses it. foundry's own builder emits the array
+    // unconditionally, so a single-certificate chain leaves here as a one-element
+    // array that `[ 2*certs: bstr ]` does not admit; that is a separate open gap
+    // recorded in the crate's AGENTS.md, and it is why writer and reader agreed
+    // with each other while disagreeing with the RFC until a real presentation
+    // arrived.
+    //
+    // A present-but-wrongly-typed header is a structural fault, never a skip.
+    // Skipping is what previously reported a *present* x5chain as "missing":
+    // the same silent-skip failure mode as the tag-24 item drop (design §1.6).
     let mut x5c_b64s: Vec<String> = Vec::new();
     for (label, value) in &sign1.unprotected.rest {
-        if *label == coset::Label::Int(33)
-            && let Some(arr) = value.as_array()
-        {
-            for item in arr {
-                if let Some(bytes) = item.as_bytes() {
-                    x5c_b64s.push(B64STD.encode(bytes));
+        if *label != coset::Label::Int(33) {
+            continue;
+        }
+        match value {
+            ciborium::Value::Array(items) => {
+                for item in items {
+                    let der = item.as_bytes().ok_or_else(|| {
+                        FormatError::InvalidStructure(
+                            "issuerAuth x5chain array member is not a byte string".into(),
+                        )
+                    })?;
+                    x5c_b64s.push(B64STD.encode(der));
                 }
+            }
+            ciborium::Value::Bytes(der) => x5c_b64s.push(B64STD.encode(der)),
+            other => {
+                return Err(FormatError::InvalidStructure(format!(
+                    "issuerAuth x5chain must be a byte string or an array of byte strings, got {}",
+                    crate::types::cbor_type_name(other)
+                )));
             }
         }
     }
     if x5c_b64s.is_empty() {
         return Err(FormatError::SignatureVerification(
-            "issuerAuth missing x5c".into(),
+            "issuerAuth missing x5c (COSE unprotected header label 33)".into(),
         ));
     }
 

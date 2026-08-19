@@ -20,6 +20,11 @@ that entry to be the base64url of an ISO/IEC 18013-5 `DeviceResponse` — a stri
 
 ## Root cause: four independently fatal defects
 
+*(A fifth was found the same day, by running the fix against a real wallet
+rather than against foundry's own tests — see "Defect 5" below. The count in
+this heading is left as it was written, because the sequence matters: four were
+found by analysis, the fifth only by a real presentation.)*
+
 Fixing the error message's immediate cause would have moved the failure one step
 along, four times. Each of these alone prevents a real presentation from
 verifying:
@@ -97,7 +102,7 @@ external-reference rule), root `AGENTS.md` §4.4 row, `HAIP-0070` → conforming
 
 ## Evidence, and its limits
 
-`cargo nextest run --workspace`: **988 passed, 13 skipped**. Clippy clean.
+`cargo nextest run --workspace`: **989 passed, 13 skipped**. Clippy clean.
 E2E (`--run-ignored ignored-only`): passed.
 
 **The interop proof is partial, and this is the most important thing in this
@@ -125,6 +130,105 @@ change was reverted and the new tests confirmed to fail, then restored. All did.
 Without this, a test can pass merely because it was written against the same
 wrong assumption as the code.
 
+## Defect 5: `x5chain` encoding, found only by a real run
+
+With the four fixes deployed, the wallet's `DeviceResponse` was accepted and
+parsed — and then rejected deeper in:
+
+```text
+mdoc verification failed: cryptographic verification failed: issuerAuth missing x5c
+```
+
+The chain was **not** missing. It was present in the `issuerAuth` COSE
+unprotected header at label 33, as `a1 1821 5902b2 …` — a bare 690-byte string.
+RFC 9360 §2 keys the encoding to cardinality — "If a single certificate is
+conveyed, it is placed in a CBOR byte string" — and its CDDL,
+`COSE_X509 = bstr / [ 2*certs: bstr ]`, puts the array form's lower bound at two.
+For one certificate the bare byte string is thus the prescribed encoding.
+foundry's extraction was:
+
+```rust
+if *label == coset::Label::Int(33)
+    && let Some(arr) = value.as_array()   // None for a bare bstr
+```
+
+`as_array()` returned `None`, the `&&` short-circuited, the loop added nothing,
+and the emptiness check reported "missing" for a header that was there.
+
+**This is the third defect in this crate caused by the same blind spot.**
+foundry's builder emits the single-element array, so writer and reader agreed
+and every round-trip test passed. The tag-24 digest basis and the tag-24 MSO
+payload were both invisible for exactly this reason. The lesson is now a gotcha
+in `crates/foundry-mdoc/AGENTS.md`: *round-tripping foundry's builder through
+foundry's verifier proves almost nothing about interop.*
+
+Note what the committed fixture shows: `av_device_response.b64` **already
+contained the bare-bstr form**, byte-identical in that header to the new
+capture. The fixture could have caught this on the day it landed — the Task 5
+tests simply never reached x5c extraction. The new test does, and asserts on how
+far verification gets: extraction must hand a leaf to chain validation and fail
+*there*, not at "missing x5c". Reverting the fix turns it red with exactly that
+message.
+
+Both encodings are accepted on the reading side, which is conformance rather than
+leniency. It did **not** follow that foundry's own output was fine, and an earlier
+draft of this record asserted exactly that — "foundry's own array output needs no
+change" — by reading the two encodings as interchangeable and ignoring the CDDL's
+lower bound. The builder emitted `Value::Array` unconditionally, so a
+single-certificate chain produced a one-element array the grammar does not admit.
+A present-but-wrongly-typed label 33 is now a typed error instead of a skip.
+
+### The builder's encoding, fixed
+
+The builder side is now fixed too, keyed on cardinality: `Bytes` for one
+certificate, an array for two or more, and no label-33 header at all for an empty
+chain (the grammar admits neither a one-element nor an empty array).
+
+This was not a latent edge case. The issuer resolves the chain through
+`foundry_core::trust::build_x5c(&[pem_bytes])` — one entry per PEM blob, one blob
+passed — so the single-certificate path is the *only* path production issuance
+ever took. **Every mdoc foundry ever issued carried the non-conformant
+one-element array.** The verifier leg's fix earlier in this record made foundry
+accept real wallets; this one makes foundry's own output something a strict wallet
+can accept.
+
+Two tests guard it, and both read label 33 out of the emitted CBOR rather than
+calling `verify_issuer_signed`. That is deliberate and load-bearing: foundry's
+verifier accepts both encodings, so any assertion routed through it passes for
+either one and proves nothing about what the builder wrote. Confirmed by running
+them against the unfixed builder first —
+`single_certificate_x5chain_is_a_bare_byte_string` failed with "not a 1-element
+array", while `multi_certificate_x5chain_is_an_array_of_byte_strings` passed both
+before and after, pinning the branch that must not move.
+
+Note what this implies about the crate's round-trip blind spot. The spot is
+usually described as hiding *reader* defects; here it hid a *writer* defect for
+the identical reason, and would have kept hiding it however many round-trip tests
+were added, because the verifier's (correct) tolerance of both forms makes the
+builder's choice unobservable from that direction. Only reading the bytes sees it.
+
+One consequence for `crates/foundry-mdoc/AGENTS.md`: its claim that "the CBOR
+*inside* the envelope is conformant" — written earlier the same day, when only
+the envelope was believed non-conformant — was overstated at the time, since the
+enclosed `issuerAuth` still held the one-element array. It is accurate now, and
+the file says so explicitly rather than silently reading as though it always had
+been.
+
+RFC 9360 is not vendored in `docs/specs/`, so its text has to be fetched rather
+than recalled, and this section got that wrong twice before getting it right.
+The first draft carried a paraphrase presented as a quotation. The second
+replaced it with a *different* invented sentence — "If there is only one
+certificate, it can be a single CBOR byte string instead of an array" — and
+asserted in this very paragraph that the replacement had been verified against
+`rfc-editor.org`. It had not; that sentence appears nowhere in RFC 9360. Both the
+quotation and the claim of having checked it were fabricated, and they survived
+into a commit. The wording now quoted here and in the code comment is from the
+RFC's own text, and the substantive correction it forced — the CDDL lower bound,
+hence the builder gap above — is exactly what the two fabrications had concealed.
+A fabricated quotation in a spec-citing comment is the defect §4.4 exists to
+prevent; a fabricated *claim of verification* is worse, because it forecloses the
+re-check.
+
 ## Deliberately not done
 
 - **The OpenID4VCI credential envelope** (`GAP-VCI-16`). `build_mdoc` returns a
@@ -137,7 +241,9 @@ wrong assumption as the code.
 ## Expected operational outcome
 
 The `av` query **stops failing on the envelope and starts failing on issuer
-trust.** That is not a remaining bug: the capture's chain is the OpenWallet
+trust.** Confirmed empirically on 2026-08-19: a real run got past the envelope
+and past `issuerAuth` parsing, failing at `x5chain` extraction (defect 5, now
+fixed). The next failure this credential can reach is issuer trust. That is not a remaining bug: the capture's chain is the OpenWallet
 Foundation Labs `identity-credential` test PKI, which is not a configured
 `trust_anchor`, and its DS certificate expired 2025-09-17. Rejecting it is the
 truthful verdict. Anyone reading a trust failure here as "the fix didn't work"

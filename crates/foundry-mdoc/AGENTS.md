@@ -162,9 +162,36 @@ the whole workspace — `cargo nextest run --workspace --no-fail-fast
   on the issuance side.** `build_mdoc` returns a `DeviceResponse`-shaped wrapper
   where OpenID4VCI L2249 wants a bare `IssuerSigned`. The CBOR *inside* the
   envelope is conformant; the wrapper is not. Tracked as a conformance gap in
-  `docs/conformance/openid4vc-conformance.md`.
+  `docs/conformance/openid4vc-conformance.md`. That "inside is conformant" claim
+  was overstated when first written on 2026-08-19 — the enclosed `issuerAuth`
+  still carried a one-element `x5chain` array, which RFC 9360's grammar does not
+  admit. It became true only when the encoding was fixed later the same day (see
+  the `x5chain` entry below); state it as a property of the current code, not as
+  a standing guarantee.
 - **A green mdoc test no longer proves only self-consistency — but only one test
   earns that.** Everything except `tests/real_presentation.rs` round-trips
-  foundry's builder through its own verifier, which is precisely how four format
+  foundry's builder through its own verifier, which is precisely how five format
   defects survived. When changing wire format, add or extend a
   `real_presentation.rs` assertion; a passing round-trip is not evidence.
+- **`x5chain` (label 33) encodes by cardinality; the verifier accepts both
+  forms.** RFC 9360 §2 says a single conveyed certificate "is placed in a CBOR
+  byte string" while multiple certificates use an array of byte strings, and its
+  CDDL — `COSE_X509 = bstr / [ 2*certs: bstr ]` — sets the array's lower bound at
+  two. The bare byte string is therefore the encoding prescribed for one
+  certificate, not a lenient alternative to the array. The builder **used to**
+  emit the array unconditionally, so every round-trip test passed while a real
+  wallet sending the bare form was rejected with `issuerAuth missing x5c` — a
+  chain that was present, reported as missing. A present-but-wrongly-typed label
+  33 is now a typed error, not a silent skip.
+- **Both sides now obey the cardinality rule, and the builder is the side that
+  can regress silently.** `build_mdoc` emits `Bytes` for a one-certificate chain,
+  an array for two or more, and no label-33 header at all for an empty chain
+  (`[ 2*certs: bstr ]` admits neither a one-element nor an empty array). This
+  matters in production: the issuer resolves `x5c` via
+  `foundry_core::trust::build_x5c(&[pem_bytes])` with exactly one PEM blob, so
+  **every** issued mdoc takes the single-certificate path. Guard it by asserting
+  on emitted bytes — `builder.rs`'s
+  `single_certificate_x5chain_is_a_bare_byte_string` reads label 33 out of the
+  CBOR directly and deliberately does *not* call the verifier, because the
+  verifier accepts both forms and would pass either way. A round trip cannot see
+  this class of defect at all.

@@ -1,10 +1,10 @@
 use crate::error::FormatError;
 use crate::types::{DeviceKeyInfo, IssuerSignedItem, MobileSecurityObject, ValidityInfo};
 use base64::{
-    engine::general_purpose::STANDARD as B64STD,
-    engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
+    Engine as _, engine::general_purpose::STANDARD as B64STD,
+    engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
 };
-use coset::{iana, CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, HeaderBuilder};
+use coset::{CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, HeaderBuilder, iana};
 use foundry_core::crypto::Signer;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -189,17 +189,39 @@ pub fn build_mdoc(
 
     let mut unprotected = Header::default();
     if let Some(chain) = x5c {
-        let mut x5c_values: Vec<ciborium::Value> = Vec::with_capacity(chain.len());
+        let mut ders: Vec<Vec<u8>> = Vec::with_capacity(chain.len());
         for cert in chain {
-            let der = B64STD
-                .decode(cert)
-                .map_err(|e| FormatError::InvalidStructure(format!("x5c cert b64: {e}")))?;
-            x5c_values.push(ciborium::Value::Bytes(der));
+            ders.push(
+                B64STD
+                    .decode(cert)
+                    .map_err(|e| FormatError::InvalidStructure(format!("x5c cert b64: {e}")))?,
+            );
         }
-        // Label 33 = x5chain (RFC 9360). TODO(interop): confirm wallet expectations.
-        unprotected
-            .rest
-            .push((coset::Label::Int(33), ciborium::Value::Array(x5c_values)));
+
+        // Label 33 = x5chain (RFC 9360 §2). The encoding is chosen by cardinality,
+        // not by preference: "If a single certificate is conveyed, it is placed in
+        // a CBOR byte string", while "if multiple certificates are conveyed, a
+        // CBOR array of byte strings is used, with each certificate being in its
+        // own byte string." The section's CDDL bounds the array at two:
+        //
+        //     COSE_X509 = bstr / [ 2*certs: bstr ]
+        //
+        // so a one-element array is not merely unidiomatic, it is not admitted by
+        // the grammar. foundry emitted one unconditionally until now; the fault
+        // hid because foundry's verifier accepts both forms, so every round trip
+        // through it agreed (crate AGENTS.md: a passing round-trip is not
+        // evidence). An empty chain adds no header at all rather than an empty
+        // array, which the grammar likewise does not admit.
+        let header_value = match ders.len() {
+            0 => None,
+            1 => ders.pop().map(ciborium::Value::Bytes),
+            _ => Some(ciborium::Value::Array(
+                ders.into_iter().map(ciborium::Value::Bytes).collect(),
+            )),
+        };
+        if let Some(value) = header_value {
+            unprotected.rest.push((coset::Label::Int(33), value));
+        }
     }
 
     let protected_wrapped = coset::ProtectedHeader {
@@ -434,5 +456,119 @@ mod tests {
         assert!(!bytes.is_empty());
         let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(matches!(decoded, ciborium::Value::Map(_)));
+    }
+
+    fn sample_claims() -> MdocClaims {
+        let d_jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
+        let mut ns_items = BTreeMap::new();
+        let mut elements = BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        ns_items.insert("org.iso.18013.5.1".to_string(), elements);
+        MdocClaims {
+            doc_type: "org.iso.18013.5.1.mDL".to_string(),
+            namespaces: ns_items,
+            device_key_jwk: serde_json::to_value(&d_jwk).unwrap(),
+            signed_at: 1700000000,
+            valid_until: 1800000000,
+        }
+    }
+
+    /// Read the `issuerAuth` COSE unprotected-header entry at label 33 straight
+    /// out of the built CBOR.
+    ///
+    /// Deliberately does NOT go through `foundry_mdoc::verifier`: the verifier
+    /// accepts both encodings, so routing the assertion through it would pass for
+    /// either one and prove nothing about what the builder emits. Reading the
+    /// bytes is the whole point (crate AGENTS.md: a passing round-trip is not
+    /// evidence).
+    fn x5chain_header(mdoc: &[u8]) -> ciborium::Value {
+        let outer: ciborium::Value = ciborium::from_reader(mdoc).unwrap();
+        let issuer_auth = outer
+            .as_map()
+            .and_then(|m| lookup(m, "documents"))
+            .and_then(|v| v.as_array())
+            .and_then(|docs| docs.first())
+            .and_then(|d| d.as_map())
+            .and_then(|d| lookup(d, "issuerSigned"))
+            .and_then(|v| v.as_map())
+            .and_then(|m| lookup(m, "issuerAuth"))
+            .expect("documents[0].issuerSigned.issuerAuth is present")
+            .clone();
+
+        // COSE_Sign1 = [protected, unprotected, payload, signature].
+        let sign1 = issuer_auth
+            .as_array()
+            .expect("issuerAuth is a COSE_Sign1 array");
+        sign1[1]
+            .as_map()
+            .expect("the COSE unprotected header is a map")
+            .iter()
+            .find_map(|(k, v)| match k {
+                ciborium::Value::Integer(i) if i128::from(*i) == 33 => Some(v.clone()),
+                _ => None,
+            })
+            .expect("x5chain label 33 is present when a chain was supplied")
+    }
+
+    /// RFC 9360 §2 keys the `x5chain` encoding to cardinality, and its CDDL is
+    /// `COSE_X509 = bstr / [ 2*certs: bstr ]` — the array's lower bound is TWO.
+    /// A single certificate therefore has exactly one conformant encoding: the
+    /// bare byte string. A one-element array is not a stylistic choice, it is
+    /// output the grammar does not admit.
+    ///
+    /// This asserts on emitted bytes rather than on a round trip through
+    /// foundry's verifier, which accepts both forms; the verifier's leniency is
+    /// exactly what let non-conformant output go unnoticed.
+    #[test]
+    fn single_certificate_x5chain_is_a_bare_byte_string() {
+        let signer = test_signer();
+        let der = vec![0xAAu8; 40];
+        let chain = vec![B64STD.encode(&der)];
+
+        let bytes = build_mdoc(sample_claims(), &signer, Some(chain)).unwrap();
+
+        match x5chain_header(&bytes) {
+            ciborium::Value::Bytes(b) => assert_eq!(
+                b, der,
+                "the bare byte string must be the certificate's DER verbatim"
+            ),
+            ciborium::Value::Array(items) => panic!(
+                "a single-certificate x5chain must be a bare byte string, not a \
+                 {}-element array: `COSE_X509 = bstr / [ 2*certs: bstr ]` admits no \
+                 array shorter than two",
+                items.len()
+            ),
+            other => panic!("unexpected x5chain encoding: {other:?}"),
+        }
+    }
+
+    /// The other half of the same dichotomy: two or more certificates take the
+    /// array form, each in its own byte string, ordered leaf-first.
+    #[test]
+    fn multi_certificate_x5chain_is_an_array_of_byte_strings() {
+        let signer = test_signer();
+        let leaf = vec![0x11u8; 30];
+        let issuer = vec![0x22u8; 31];
+        let chain = vec![B64STD.encode(&leaf), B64STD.encode(&issuer)];
+
+        let bytes = build_mdoc(sample_claims(), &signer, Some(chain)).unwrap();
+
+        let items = match x5chain_header(&bytes) {
+            ciborium::Value::Array(items) => items,
+            other => panic!("a two-certificate x5chain must be an array, got {other:?}"),
+        };
+        let ders: Vec<Vec<u8>> = items
+            .iter()
+            .map(|i| {
+                i.as_bytes()
+                    .expect("each array member is a byte string")
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            ders,
+            vec![leaf, issuer],
+            "the chain must stay ordered leaf-first"
+        );
     }
 }

@@ -216,7 +216,7 @@ fn encode_cbor(value: &ciborium::Value) -> Result<Vec<u8>, String> {
 }
 
 /// A human-readable CBOR type name, for error messages only.
-fn cbor_type_name(value: &ciborium::Value) -> &'static str {
+pub(crate) fn cbor_type_name(value: &ciborium::Value) -> &'static str {
     match value {
         ciborium::Value::Integer(_) => "integer",
         ciborium::Value::Bytes(_) => "byte string",
