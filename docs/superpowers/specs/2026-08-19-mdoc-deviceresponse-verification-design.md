@@ -459,7 +459,12 @@ The gate is root `AGENTS.md` §5.1 — whole workspace, `cargo nextest run`, nev
    transaction's `SessionTranscript`, asserting `verify_device_auth` succeeds.
    PKI-free, so the expired and unanchored issuer chain is irrelevant. First test
    in the workspace proving mdoc interoperability rather than self-consistency.
-   **Blocked on §9.**
+   ~~**Blocked on §9.**~~ **Landed 2026-08-19** as
+   `the_real_device_signature_verifies_over_the_captured_session_transcript`,
+   with the same run's other-Origin candidate kept as the negative
+   (`the_other_origins_candidate_transcript_does_not_verify`) so a
+   transcript-ignoring assembly cannot pass. §2.1 is therefore **proven**, not
+   derived.
 5. **Synthetic round trip.** `build_mdoc` → `build_device_response` →
    `verify_mdoc`, migrating the existing mdoc tests in
    `crates/foundry-mdoc/src/verifier.rs`, `crates/foundry-verifier/src/verify.rs`,
@@ -542,7 +547,18 @@ foundry's own PKI, which depends on §7. Neither belongs in a format change.
 
 ---
 
-## 9. Open item: capturing the golden fixture
+## 9. Closed 2026-08-19: capturing the golden fixture
+
+**Resolved.** All three steps below were taken; see
+[`../changes/2026-08-19-deviceauth-fixture-capture-unblock.md`](../changes/2026-08-19-deviceauth-fixture-capture-unblock.md).
+One correction to step 1: the diagnostic as first written sat *inside* the
+candidate retry loop, which `do_verify_vp_response` reaches only after
+`verify_issuer_signed(..)?` — so for the wallets worth capturing (unanchored or
+expired chains, §8) it never fired, and the capture was still impossible. It is
+now emitted before any verification runs. A diagnostic must not be conditional on
+the verdict it exists to explain.
+
+The original text follows, as the record of what was required.
 
 Test 4 in §5 needs the exact `SessionTranscript` of a live transaction. The
 transcript is derived from `tx.nonce`, the Origin and the response-encryption key
@@ -570,13 +586,16 @@ ships with proven `IssuerSigned` internals, derived `DeviceAuthentication`
 vectors and synthetic round trips, but **no real-wallet proof of the device
 signature** — which must be stated as such in the change record.
 
+That contingency did not materialise: the capture happened on 2026-08-19 and
+`DeviceAuthentication` is proven.
+
 ---
 
 ## 10. Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| `DeviceAuthentication` is derived, not proven; no live oracle. | Two independent implementations agreeing at pinned commits (§2.1), pinned vectors (§5 test 2), and the interop fixture (§5 test 4) once §9 lands. |
+| ~~`DeviceAuthentication` is derived, not proven; no live oracle.~~ **Retired 2026-08-19.** | The interop fixture (§5 test 4) landed, so a real wallet is now the oracle: its Device Signature verifies against foundry's assembly, and against the same run's other-Origin candidate it does not. Two independent implementations agreeing at pinned commits (§2.1) and the pinned vectors (§5 test 2) remain as corroboration rather than as the sole basis. |
 | Changing `build_mdoc` changes issued credential bytes. | Intended (§3 decision 1) and called out in §6 as a `VCI-0071`/`VCI-0176` re-check. No stored-credential migration exists to break — issuance is demo-stage. |
 | Several simultaneous format changes make a failure hard to localise. | Per-defect anti-regression tests (§5 test 6) and per-layer vector assertions (§5 tests 1-2), so each defect has an independent witness. The plan sequences one format flip per task. |
 | Defects inferred from reading rather than executing. | §1.7 records two such retractions and why. Every remaining structural claim is either proven against the capture (§2.3) or agreed by two independent implementations (§2.1). |

@@ -32,8 +32,12 @@ are **restated, not quoted**, and the prose is not reproduced.
 Facts here fall into two classes, and the distinction is load-bearing:
 
 - **Proven** — reproduced from a real wallet's presentation captured 2026-08-19,
-  now committed as `crates/foundry-mdoc/tests/fixtures/av_device_response.b64`.
-  A test asserts each one. If foundry's reading were wrong, that test fails.
+  now committed as `crates/foundry-mdoc/tests/fixtures/av_device_response.b64`,
+  together with the `SessionTranscript` its Device Signature covers
+  (`av_session_transcript.hex`). A test asserts each one. If foundry's reading
+  were wrong, that test fails. For `DeviceAuthentication` the assertion is a
+  signature verification, so the whole structure is proven at once: get any part
+  of it wrong and ECDSA rejects.
 - **Derived** — reconstructed from two independent open-source implementations at
   pinned commits, which agree byte-for-byte with each other:
   - `openwallet-foundation-labs/identity-credential` (multipaz, Kotlin) at
@@ -66,7 +70,7 @@ extend a derived fact by analogy to a case the two implementations do not cover.
 - `valueDigests` commits to every element the credential contains, disclosed or
   not; the capture commits to six and discloses one.
 
-### mdoc authentication — **derived**
+### mdoc authentication — **proven** (2026-08-19), previously derived
 
 ```cddl
 DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)
@@ -84,8 +88,19 @@ COSE_Sign1 (`DeviceSignature`), whose `external_aad` is the empty byte string.
 Detachment changes the wire structure — `payload` is absent — not the
 `Sig_structure`.
 
+This was **derived** until 2026-08-19, when a captured presentation's Device
+Signature was verified against the transcript foundry derived for that same
+transaction
+(`the_real_device_signature_verifies_over_the_captured_session_transcript`). A
+signature check proves the entire structure at once and admits no partial credit:
+every element above, the tag-24 wrapping, the detached payload and the empty
+`external_aad` are all now confirmed against a third-party implementation. The
+companion test
+(`the_other_origins_candidate_transcript_does_not_verify`) rules out a passing
+verification that ignored the transcript.
+
 Two hazards both reference implementations avoid, recorded because each is a
-plausible-looking error:
+plausible-looking error. Both are now covered by that same signature check:
 
 - The `SessionTranscript` goes in **bare**. A tag-24 wrapping of the transcript
   does exist in multipaz, but only as a salt for MAC key derivation; it must not

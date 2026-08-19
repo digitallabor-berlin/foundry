@@ -84,6 +84,15 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
 - Expiry rejection (MSO validity window).
 - Untrusted issuer root rejection.
 
+**Interop** (`tests/real_presentation.rs`) — the only tests checking foundry
+against bytes it did not produce. Structure, MSO parsing, element digests and
+`x5chain` extraction, plus the device-signature proof: a real wallet's
+`DeviceSignature` verified against the captured `SessionTranscript`, with the
+other configured Origin's candidate asserted to fail. That pair is what moved
+`DeviceAuthenticationBytes` from derived to proven; it is PKI-free, so the
+capture's unanchored expired issuer chain does not bear on it. See
+`tests/fixtures/README.md`.
+
 **Run**: `cargo nextest run -p foundry-mdoc` while iterating. The gate is always
 the whole workspace — `cargo nextest run --workspace --no-fail-fast
 --status-level fail` — per root [AGENTS.md](../../AGENTS.md) §5. Do not use
@@ -124,16 +133,22 @@ the whole workspace — `cargo nextest run --workspace --no-fail-fast
   builder currently emits `validFrom == signed`, so no builder-produced document
   distinguishes the two rules — a test that means to pin this must rewrite
   `validFrom` and re-sign.
-- **`DeviceAuthenticationBytes` is DERIVED, not proven.** The structure
+- **`DeviceAuthenticationBytes` is PROVEN as of 2026-08-19** — it was DERIVED
+  until then, and the distinction is recorded because it bounds what may be
+  inferred. The structure
   `#6.24(bstr .cbor ["DeviceAuthentication", SessionTranscript, docType,
   DeviceNameSpacesBytes])` was reconstructed from two independent implementations
-  at pinned commits (multipaz, isomdl) which agree byte-for-byte; ISO/IEC 18013-5
-  is a paid standard and is **not** vendored (root [AGENTS.md](../../AGENTS.md)
-  §4.4). Do not restate it as proven, and do not add behaviour by inferring
-  further structure from it — obtain the document. Two traps, both pinned by
-  tests: the `SessionTranscript` goes in **bare** (its tag-24 form is a
-  MAC-key-derivation salt, not this), and `DeviceNameSpacesBytes` is the received
-  item **verbatim**.
+  at pinned commits (multipaz, isomdl) which agree byte-for-byte, and is now
+  additionally confirmed by a real wallet's Device Signature verifying against it
+  (`real_presentation::the_real_device_signature_verifies_over_the_captured_session_transcript`).
+  A signature check proves the whole structure at once — including both traps
+  below and the empty `external_aad` — because it admits no partial credit.
+  ISO/IEC 18013-5 remains a paid standard and is **not** vendored (root
+  [AGENTS.md](../../AGENTS.md) §4.4), so a *proven* interface fact still licenses
+  no inference beyond itself: do not extend this structure to a case the capture
+  does not exercise — obtain the document. The two traps: the
+  `SessionTranscript` goes in **bare** (its tag-24 form is a MAC-key-derivation
+  salt, not this), and `DeviceNameSpacesBytes` is the received item **verbatim**.
 - **`DeviceMac` is refused with a typed `Unsupported`,** not a structural error:
   foundry accepts only ES256 `deviceSignature`. A MAC would additionally need an
   ECDH agreement this crate never performs.

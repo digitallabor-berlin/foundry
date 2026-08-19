@@ -5,16 +5,25 @@
 //! other. This file is the only one that checks foundry against bytes it did not
 //! produce, and it is what four format defects survived the absence of.
 //!
-//! Trust validation and the device signature are both deliberately out of scope
-//! here — see `tests/fixtures/README.md`.
+//! Trust validation is deliberately out of scope here — the capture's chain is
+//! unanchored and expired by design. The **device signature** is in scope, and
+//! is the one half of mdoc verification a capture can exercise without PKI; see
+//! `tests/fixtures/README.md`.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use foundry_core::trust::TrustStore;
 use foundry_mdoc::types::{IssuerSignedItem, MobileSecurityObject, tag24_unwrap};
-use foundry_mdoc::verifier::{decode_device_response, parse_device_response, verify_issuer_signed};
+use foundry_mdoc::verifier::{
+    decode_device_response, parse_device_response, verify_device_auth, verify_issuer_signed,
+};
 use sha2::{Digest, Sha256};
 
 const CAPTURE_B64: &str = include_str!("fixtures/av_device_response.b64");
+/// The `SessionTranscript` this capture's Device Signature actually covers.
+const TRANSCRIPT_HEX: &str = include_str!("fixtures/av_session_transcript.hex");
+/// The other Origin's candidate from the same run — a transcript the wallet did
+/// **not** sign over.
+const OTHER_TRANSCRIPT_HEX: &str = include_str!("fixtures/av_session_transcript_other_origin.hex");
 const AV_NAMESPACE: &str = "eu.europa.ec.av.1";
 
 fn capture() -> Vec<u8> {
@@ -55,6 +64,38 @@ fn real_mso() -> MobileSecurityObject {
     let payload = issuer_auth_payload(&issuer_signed);
     let wrapper: ciborium::Value = ciborium::from_reader(payload.as_slice()).expect("payload CBOR");
     ciborium::from_reader(tag24_unwrap(&wrapper).expect("tag-24 unwraps")).expect("real MSO parses")
+}
+
+/// Decode a captured `SessionTranscript` hex fixture into the `Value` form
+/// `verify_device_auth` splices into `DeviceAuthentication`.
+fn transcript(hex_fixture: &str) -> ciborium::Value {
+    let bytes = hex::decode(hex_fixture.trim()).expect("fixture is hex");
+    ciborium::from_reader(bytes.as_slice()).expect("SessionTranscript CBOR")
+}
+
+/// The holder key's EC coordinates, read straight out of the MSO's `deviceKey`
+/// COSE_Key (labels -2 and -3).
+///
+/// `verify_issuer_signed` normally supplies these, but it cannot run against
+/// this capture — the chain is unanchored and expired. Reading them here is what
+/// makes the device-signature test PKI-free. It is not a weaker binding: the
+/// coordinates still come from the MSO the issuer signed, byte-identical to the
+/// ones the production path would have used.
+fn device_key_coords() -> (Vec<u8>, Vec<u8>) {
+    let device_key = real_mso().device_key_info.device_key;
+    let mut x: Option<Vec<u8>> = None;
+    let mut y: Option<Vec<u8>> = None;
+    for (label, value) in device_key.as_map().expect("deviceKey is a COSE_Key map") {
+        let Some(label) = label.as_integer() else {
+            continue;
+        };
+        if label == ciborium::value::Integer::from(-2) {
+            x = value.as_bytes().cloned();
+        } else if label == ciborium::value::Integer::from(-3) {
+            y = value.as_bytes().cloned();
+        }
+    }
+    (x.expect("deviceKey x"), y.expect("deviceKey y"))
 }
 
 fn issuer_auth_payload(issuer_signed: &ciborium::Value) -> Vec<u8> {
@@ -211,5 +252,53 @@ fn the_real_x5chain_is_a_bare_byte_string_and_is_still_extracted() {
         rendered.contains("issuer cert validation"),
         "extraction must succeed and hand a leaf certificate to chain validation, \
          got: {rendered}"
+    );
+}
+
+/// **The interop proof.** A real wallet's `DeviceSignature`, verified against the
+/// `SessionTranscript` foundry itself derived for that transaction.
+///
+/// Everything else in this workspace proves foundry agrees with foundry. This is
+/// the only assertion that a *third-party* wallet and foundry agree on the
+/// `DeviceAuthentication` structure — the tag-24 wrapping, the transcript spliced
+/// in bare rather than tag-24 wrapped, the `docType`, the byte-preserved
+/// `DeviceNameSpacesBytes`, the detached payload in the `Sig_structure`, and the
+/// empty `external_aad`. Those facts were previously *derived* from two
+/// independent implementations agreeing (design doc §2.1); this makes them
+/// **proven**. If any one of them were wrong, ECDSA would reject.
+///
+/// PKI-free on purpose: `verify_device_auth` takes no trust store, so the
+/// capture's unanchored and expired issuer chain (design doc §8) is irrelevant
+/// here.
+#[test]
+fn the_real_device_signature_verifies_over_the_captured_session_transcript() {
+    let bytes = capture();
+    let value = decode_device_response(&bytes).expect("the capture decodes");
+    let resp = parse_device_response(&value).expect("the capture parses");
+    let (x, y) = device_key_coords();
+
+    verify_device_auth(&resp, &transcript(TRANSCRIPT_HEX), &x, &y)
+        .expect("a real wallet's device signature must verify");
+}
+
+/// The transcript is load-bearing, not decorative.
+///
+/// The same run produced one candidate transcript per configured Origin, and only
+/// one of them is the one the wallet signed. Verifying against the other must
+/// fail — otherwise the test above would pass for a `DeviceAuthentication`
+/// assembly that ignored the transcript entirely, which is exactly the defect
+/// design doc §1.5 recorded.
+#[test]
+fn the_other_origins_candidate_transcript_does_not_verify() {
+    let bytes = capture();
+    let value = decode_device_response(&bytes).expect("the capture decodes");
+    let resp = parse_device_response(&value).expect("the capture parses");
+    let (x, y) = device_key_coords();
+
+    let err = verify_device_auth(&resp, &transcript(OTHER_TRANSCRIPT_HEX), &x, &y)
+        .expect_err("a transcript the wallet never signed must be rejected");
+    assert!(
+        format!("{err:?}").contains("device signature invalid"),
+        "expected a key-binding failure, got: {err:?}"
     );
 }
