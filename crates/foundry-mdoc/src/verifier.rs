@@ -239,15 +239,24 @@ pub fn verify_mdoc(
         };
         let mut ns_elements: BTreeMap<String, JsonValue> = BTreeMap::new();
         for item_val in items {
-            let item_bytes = match item_val.as_bytes() {
-                Some(b) => b,
-                None => continue,
-            };
+            // Elements travel as `#6.24(bstr .cbor IssuerSignedItem)`. A non-tag-24
+            // item is a structural fault, never a skip: skipping is exactly how
+            // foundry dropped every disclosed element and then reported the result
+            // as a DCQL policy mismatch (design doc §1.6).
+            let inner =
+                crate::types::tag24_unwrap(item_val).map_err(FormatError::InvalidStructure)?;
+
+            // The digest commits to the FULL tag-24 encoding (design doc §2.3), so
+            // re-wrap through the same helper the builder uses rather than hashing
+            // the item's contents.
+            let tagged_bytes =
+                crate::types::tag24_encode(inner).map_err(FormatError::Serialization)?;
+
             let mut hasher = Sha256::new();
-            hasher.update(item_bytes);
+            hasher.update(&tagged_bytes);
             let computed = hasher.finalize().to_vec();
 
-            let item: IssuerSignedItem = ciborium::from_reader(item_bytes.as_slice())
+            let item: IssuerSignedItem = ciborium::from_reader(inner)
                 .map_err(|e| FormatError::Deserialization(format!("IssuerSignedItem: {e}")))?;
             if let Some(expected) = mso_digests.get(&item.digest_id)
                 && expected == &computed
@@ -388,8 +397,26 @@ mod tests {
             .join("")
     }
 
-    #[test]
-    fn parses_and_verifies_valid_mdoc_presentation() {
+    /// Everything a `verify_mdoc` call needs, built once so the happy path and
+    /// the structural-rejection tests exercise the same fixture.
+    struct Fixture {
+        mdoc: Vec<u8>,
+        trust_store: TrustStore,
+        transcript: Vec<u8>,
+        device_signature: Vec<u8>,
+        now: u64,
+    }
+
+    fn dc_api_transcript() -> Vec<u8> {
+        crate::types::build_session_transcript(&crate::types::SessionTranscriptParams::DcApi {
+            origin: "https://client.example.com".to_string(),
+            nonce: "nonce".to_string(),
+            jwk_thumbprint: None,
+        })
+        .unwrap()
+    }
+
+    fn valid_fixture() -> Fixture {
         let (root, leaf_cert, leaf_key) = test_pki();
         let signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
         let trust_store = TrustStore::from_pems(&[root]).unwrap();
@@ -411,15 +438,9 @@ mod tests {
             signed_at: 1700000000,
             valid_until: 1800000000,
         };
-        let mdoc_bytes = build_mdoc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let mdoc = build_mdoc(claims, &signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
 
-        let transcript =
-            crate::types::build_session_transcript(&crate::types::SessionTranscriptParams::DcApi {
-                origin: "https://client.example.com".to_string(),
-                nonce: "nonce".to_string(),
-                jwk_thumbprint: None,
-            })
-            .unwrap();
+        let transcript = dc_api_transcript();
 
         let protected = coset::HeaderBuilder::new()
             .algorithm(coset::iana::Algorithm::ES256)
@@ -439,13 +460,149 @@ mod tests {
             .protected(protected)
             .signature(sig)
             .build();
-        let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+        let device_signature = coset::CborSerializable::to_vec(d_sign).unwrap();
 
-        // Cert validity is stamped from the system clock by pki::issue_leaf, so verify
-        // against the current time (the MSO signed/validUntil window spans it).
-        let now = time::OffsetDateTime::now_utc().unix_timestamp() as u64;
-        let res = verify_mdoc(&mdoc_bytes, &trust_store, &transcript, &d_sig_bytes, now).unwrap();
+        Fixture {
+            mdoc,
+            trust_store,
+            transcript,
+            device_signature,
+            // Cert validity is stamped from the system clock by pki::issue_leaf, so
+            // verify against the current time (the MSO window spans it).
+            now: time::OffsetDateTime::now_utc().unix_timestamp() as u64,
+        }
+    }
+
+    #[test]
+    fn parses_and_verifies_valid_mdoc_presentation() {
+        let f = valid_fixture();
+        let res = verify_mdoc(
+            &f.mdoc,
+            &f.trust_store,
+            &f.transcript,
+            &f.device_signature,
+            f.now,
+        )
+        .unwrap();
         assert_eq!(res.claims["org.iso.18013.5.1"]["given_name"], "John");
         assert_eq!(res.doc_type, "org.iso.18013.5.1.mDL");
+    }
+
+    /// The digest basis, proven against a real wallet's presentation (design doc
+    /// §2.3). The negative assertion matters as much as the positive: hashing the
+    /// inner CBOR is exactly what foundry used to do.
+    #[test]
+    fn value_digests_are_computed_over_the_full_tag24_encoding() {
+        // First: the two candidate bases are genuinely different, so the
+        // assertions below can distinguish them.
+        let probe = IssuerSignedItem {
+            digest_id: 4,
+            random: vec![0xAB; 16],
+            element_identifier: "age_over_18".to_string(),
+            element_value: ciborium::Value::Bool(true),
+        };
+        let mut probe_inner = Vec::new();
+        ciborium::into_writer(&probe, &mut probe_inner).unwrap();
+        let probe_tagged = crate::types::tag24_encode(&probe_inner).unwrap();
+        assert_ne!(
+            Sha256::digest(&probe_tagged).to_vec(),
+            Sha256::digest(&probe_inner).to_vec(),
+            "the two digest bases must differ, else this test proves nothing"
+        );
+
+        // Then: which one the builder actually committed to, read back out of the
+        // MSO it signed.
+        let f = valid_fixture();
+        let (mso, namespaces) = decode_mso_and_namespaces(&f.mdoc);
+        let items = namespaces[0].1.as_array().unwrap();
+        let wire_inner = crate::types::tag24_unwrap(&items[0]).unwrap();
+        let wire_tagged = crate::types::tag24_encode(wire_inner).unwrap();
+        let wire_item: IssuerSignedItem = ciborium::from_reader(wire_inner).unwrap();
+
+        let committed = &mso.value_digests["org.iso.18013.5.1"][&wire_item.digest_id];
+        assert_eq!(
+            committed,
+            &Sha256::digest(&wire_tagged).to_vec(),
+            "the builder must digest the full tag-24 encoding"
+        );
+        assert_ne!(
+            committed,
+            &Sha256::digest(wire_inner).to_vec(),
+            "the builder must not digest the inner CBOR"
+        );
+    }
+
+    #[test]
+    fn an_untagged_namespace_item_is_a_structural_error() {
+        let mut f = valid_fixture();
+        replace_first_namespace_item_with_untagged_bytes(&mut f.mdoc);
+
+        let err = verify_mdoc(
+            &f.mdoc,
+            &f.trust_store,
+            &f.transcript,
+            &f.device_signature,
+            f.now,
+        )
+        .expect_err("an untagged item must be rejected, not silently skipped");
+        assert!(
+            format!("{err}").contains("tag 24"),
+            "error must name the tag-24 requirement, got: {err}"
+        );
+    }
+
+    fn decode_mso_and_namespaces(
+        mdoc: &[u8],
+    ) -> (
+        MobileSecurityObject,
+        Vec<(ciborium::Value, ciborium::Value)>,
+    ) {
+        let mut value: ciborium::Value = ciborium::from_reader(mdoc).unwrap();
+        let issuer_signed = issuer_signed_mut(&mut value);
+        let namespaces = map_entry_mut(issuer_signed, "nameSpaces")
+            .as_map()
+            .unwrap()
+            .clone();
+        let issuer_auth = map_entry_mut(issuer_signed, "issuerAuth").clone();
+        let sign1 = CoseSign1::from_slice(&cbor_value_to_bytes(&issuer_auth).unwrap()).unwrap();
+        let mso: MobileSecurityObject =
+            ciborium::from_reader(sign1.payload.as_deref().unwrap()).unwrap();
+        (mso, namespaces)
+    }
+
+    /// Rewrite the first `nameSpaces` item as a bare byte string, reproducing
+    /// foundry's pre-fix wire shape.
+    fn replace_first_namespace_item_with_untagged_bytes(mdoc: &mut Vec<u8>) {
+        let mut value: ciborium::Value = ciborium::from_reader(mdoc.as_slice()).unwrap();
+        {
+            let issuer_signed = issuer_signed_mut(&mut value);
+            let namespaces = map_entry_mut(issuer_signed, "nameSpaces")
+                .as_map_mut()
+                .unwrap();
+            let items = namespaces[0].1.as_array_mut().unwrap();
+            let inner = crate::types::tag24_unwrap(&items[0]).unwrap().to_vec();
+            items[0] = ciborium::Value::Bytes(inner);
+        }
+        mdoc.clear();
+        ciborium::into_writer(&value, mdoc).unwrap();
+    }
+
+    fn issuer_signed_mut(
+        value: &mut ciborium::Value,
+    ) -> &mut Vec<(ciborium::Value, ciborium::Value)> {
+        let outer = value.as_map_mut().unwrap();
+        let docs = map_entry_mut(outer, "documents").as_array_mut().unwrap();
+        let doc = docs[0].as_map_mut().unwrap();
+        map_entry_mut(doc, "issuerSigned").as_map_mut().unwrap()
+    }
+
+    fn map_entry_mut<'a>(
+        map: &'a mut [(ciborium::Value, ciborium::Value)],
+        key: &str,
+    ) -> &'a mut ciborium::Value {
+        map.iter_mut()
+            .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == key))
+            .map(|(_, v)| v)
+            .unwrap_or_else(|| panic!("fixture must contain {key}"))
     }
 }

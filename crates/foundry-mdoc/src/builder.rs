@@ -105,10 +105,21 @@ pub fn build_mdoc(
             ciborium::into_writer(&item, &mut item_bytes)
                 .map_err(|e| FormatError::Serialization(e.to_string()))?;
 
+            // ISO/IEC 18013-5: elements travel as IssuerSignedItemBytes,
+            // `#6.24(bstr .cbor IssuerSignedItem)`, and `valueDigests` commits to
+            // that FULL tagged encoding — not the inner CBOR. Proven against a
+            // real wallet's presentation; see the design doc §2.3.
+            let tagged_bytes =
+                crate::types::tag24_encode(&item_bytes).map_err(FormatError::Serialization)?;
+
             let mut hasher = Sha256::new();
-            hasher.update(&item_bytes);
+            hasher.update(&tagged_bytes);
             digests_map.insert(digest_id_counter, hasher.finalize().to_vec());
-            ns_items.push(ciborium::Value::Bytes(item_bytes));
+
+            ns_items.push(ciborium::Value::Tag(
+                24,
+                Box::new(ciborium::Value::Bytes(item_bytes)),
+            ));
         }
         value_digests.insert(ns.clone(), digests_map);
         issuer_signed_namespaces.insert(ns, ciborium::Value::Array(ns_items));

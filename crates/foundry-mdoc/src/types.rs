@@ -34,7 +34,11 @@ pub struct ValidityInfo {
 }
 
 /// IssuerSignedItem (ISO/IEC 18013-5 §9.1.2.5).
-/// TODO(interop): should be transported as tag-24 embedded CBOR.
+///
+/// Always transported as `IssuerSignedItemBytes` = `#6.24(bstr .cbor
+/// IssuerSignedItem)`, and `valueDigests` commits to that **full tagged
+/// encoding**. Use [`tag24_encode`] / [`tag24_unwrap`] on both sides so the two
+/// cannot drift. Proven against a real presentation; see the design doc §2.3.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IssuerSignedItem {
     #[serde(rename = "digestID")]
