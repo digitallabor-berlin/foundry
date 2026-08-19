@@ -1,10 +1,10 @@
 use crate::error::FormatError;
 use crate::types::{DeviceKeyInfo, IssuerSignedItem, MobileSecurityObject, ValidityInfo};
 use base64::{
-    Engine as _, engine::general_purpose::STANDARD as B64STD,
-    engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
+    engine::general_purpose::STANDARD as B64STD,
+    engine::general_purpose::URL_SAFE_NO_PAD as B64URL, Engine as _,
 };
-use coset::{CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, HeaderBuilder, iana};
+use coset::{iana, CborSerializable, CoseKeyBuilder, CoseSign1Builder, Header, HeaderBuilder};
 use foundry_core::crypto::Signer;
 use rand::RngCore;
 use serde_json::Value as JsonValue;

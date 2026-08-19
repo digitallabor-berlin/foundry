@@ -138,7 +138,7 @@ A third governing source is neither standards-track nor a vendor profile, and it
 text is **not present in this repository at all**:
 
 | External reference | Governs |
-|---|---|
+| --- | --- |
 | [`emvco-dpc-schema-framework.md`](docs/specs/emvco-dpc-schema-framework.md) | EMV® Digital Payment Credential Specification — Schema Framework (v1.0, DRAFT Associate Review 2). Governs the shape of the `com.emvco.dpc.card` credential type only: its `vct`, and its three disclosable claims with their types and inclusion requirements. The linked file is a **reference stub**, not the specification — the document is all-rights-reserved and unpublished, so no verbatim copy is committed. |
 | [`iso-18013-5-device-auth.md`](docs/specs/iso-18013-5-device-auth.md) | ISO/IEC 18013-5:2021 — the mdoc CBOR internals `foundry-mdoc` builds and verifies: tag-24 embedding of `IssuerSignedItem`s and the `MobileSecurityObject`, the digest basis `valueDigests` commits to, `tdate` validity members, and the `DeviceAuthentication` structure a `DeviceSignature` covers. The linked file is a **reference stub**, not the specification — ISO 18013-5 is a paid standard whose licence forbids redistribution. It marks each recorded fact **proven** (reproduced from a captured real presentation) or **derived** (reconstructed from two independent implementations at pinned commits, which agree). Neither status equals having read the standard; do not infer unrecorded behaviour from the stub. |
 
