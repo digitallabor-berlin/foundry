@@ -28,7 +28,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface |
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
-| `verify.rs` | The orchestrator: JWE decrypt → `select_presentations` → a per-credential verify-all loop (`verify_one_credential`) → `requested_credentials_answered`, then computes `verified` as the conjunction over **both** check levels. Returns a `VerifyOutcome` internally so an unavailable status list can become HTTP 502 without discarding the other credentials' checks. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
+| `verify.rs` | The orchestrator: JWE decrypt → `select_presentations` → a per-credential verify-all loop (`verify_one_credential`, which returns **no `Result`**) → `requested_credentials_answered`, then computes `verified` as the conjunction over **both** check levels. Returns a `VerifyOutcome` internally so a per-credential failure can become HTTP 400/502 without discarding the other credentials' checks. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
 | `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Three spec non-empty constraints are enforced at deserialization (`credentials`, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
@@ -54,7 +54,9 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
   `ephem_private_jwk`, `ephem_public_jwk`, `transaction_data`, `result`,
   `created_at`), `VerificationState` (`Pending` | `Verified` | `Failed`),
   `VerificationResult { verified, checks, credentials }`,
-  `PresentedCredential { query_id, format, claims, checks }`,
+  `PresentedCredential { query_id, format, credential_type, claims, checks }`
+  (`credential_type` is the ASSERTED `vct`/`docType` — authenticated only when
+  that credential's format check passed, the same caveat as `claims`),
   `CheckResult { check, passed, detail }`. `VerificationResult::all_checks()`
   yields every check at both levels; `derive_verified()` is the §4.2 verdict.
   Also `save_verification_transaction`, `load_verification_transaction`.
@@ -260,6 +262,50 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   failed `status_check` — without it, an unavailable status pushes no check at
   all and the conjunction computes `true`, persisting `verified: true` on a
   transaction that just returned 502.
+- **`verify_one_credential` returns no `Result`, on purpose.** It returns
+  `(PresentedCredential, Option<VerificationError>)` so the per-credential loop
+  cannot `?` out of itself. It previously returned `Result` and the loop used
+  `?`, which meant the first credential's failure abandoned every credential
+  after it — while the comment above the loop claimed verify-all. The type won
+  the argument with the comment. If you find yourself wanting a `Result` here,
+  you are re-introducing that bug. The format-specific stage lives in
+  `verify_credential_payload`, which *does* return `Result`, so exactly one place
+  converts that `Err` into a failed `CheckResult`.
+- **A failed format check short-circuits that credential's remaining checks.**
+  No `dcql_match` and no `status_check` are recorded for it, and its `claims` is
+  an empty object. Running those against claims that were never obtained would
+  report three failures where one occurred, two of them misattributed — "DCQL
+  mismatch" when the truth is "we never obtained claims".
+- **Recording a fault and choosing the response status are SEPARATE steps, and
+  must stay separate.** The loop collects *every* per-credential error into
+  `faults`. Step 5 then pushes one top-level `status_check` per
+  `StatusUnavailable`, and step 5b reduces `faults` to the single error the
+  wallet is told about (crypto/structural 400 outranks unavailable 502, because a
+  bad signature is deterministic and a 502 would invite the wallet to retry
+  something that can never succeed; within one class the incumbent wins, so DCQL
+  declaration order decides). Collapsing these back into one `deferred` slot
+  chosen by precedence is what the first attempt did, and it made an
+  unavailability vanish entirely whenever a crypto failure outranked it: it has
+  no per-credential record by design, so the top-level one is the *only* place it
+  can appear. Pinned by
+  `a_crypto_failure_outranks_an_unreachable_status_list`.
+- **The top-level fault record is `StatusUnavailable`-only.** Every other
+  per-credential failure already has a per-credential record from
+  `verify_one_credential`, so a top-level copy would double-count one fault and
+  inflate `failed_checks`. Pinned by
+  `a_failed_format_check_short_circuits_without_double_counting`.
+- **`verify_vp_response`'s `Err` arm reports no credentials because there are
+  none.** It is reachable only by transaction-level failures — JWE decryption, a
+  missing `vp_token`, trust-store construction, `select_presentations` — all of
+  which precede any credential examination. A per-credential failure no longer
+  arrives there.
+- **`with_credential_context` cannot prefix the three `#[error(transparent)]`
+  variants.** `Storage`, `CoreCrypto` and `Trust` wrap a foreign error whose
+  `Display` is the whole message, with no string field to prefix. Rewrapping one
+  as `Failed` to gain a field would change `error.kind`, which root
+  [AGENTS.md](../../AGENTS.md) §4.5 makes operator-facing API, so they are
+  returned unchanged — the per-credential roll-up log record names the credential
+  in those cases instead.
 - **Duplicate credential query ids are rejected at request creation**
   (`create_verification_request`, OpenID4VP L745-746). This is load-bearing,
   not cosmetic: `select_presentations` matches each credential query against

@@ -1389,6 +1389,265 @@ async fn mdoc_presentation_is_accepted() {
     );
 }
 
+/// A mixed two-credential verdict, pinned at the route boundary.
+///
+/// One credential's issuer chain has no configured trust anchor; the other's is
+/// fine. The reported defect was that the failure abandoned the whole loop, so
+/// the passing credential's verdict was discarded and the operator's log named
+/// neither credential.
+///
+/// Two properties, and they are in tension -- which is why this is worth pinning
+/// over HTTP rather than only in the engine's unit tests:
+///
+/// 1. the WALLET still gets 400 (root AGENTS.md §4.3 -- an unanchored chain is a
+///    structural failure, not a policy verdict), unchanged by this work; while
+/// 2. the OPERATOR gets both credentials' verdicts on the transaction, each with
+///    its own checks and its own asserted credential type.
+///
+/// The 400 body goes to the wallet, so 2. is only reachable through the admin
+/// GET -- exactly the path an operator actually uses.
+#[tokio::test]
+async fn a_mixed_multi_credential_verdict_is_reported_for_every_credential() {
+    let (state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let wallet_app = wallet_router(state.clone());
+
+    // `sd` is declared FIRST, so DCQL declaration order verifies the credential
+    // that passes before the one that fails -- the ordering under which the
+    // original defect discarded an already-computed verdict.
+    let create_req_body = serde_json::json!({
+        "dcql_query": { "credentials": [
+            {
+                "id": "sd",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            },
+            {
+                "id": "md",
+                "format": "mso_mdoc",
+                "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+            }
+        ]},
+        "transport": "request_uri"
+    });
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id;
+
+    let get_req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = wallet_app.clone().oneshot(get_req).await.unwrap();
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).unwrap();
+    let parts: Vec<&str> = jws_str.split('.').collect();
+    let payload_bytes = B64URL.decode(parts[1]).unwrap();
+    let request_object: serde_json::Value = serde_json::from_slice(&payload_bytes).unwrap();
+    let client_id = request_object["client_id"].as_str().unwrap().to_string();
+    let nonce = request_object["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+    let response_uri = format!("https://localhost:8443/vp/response/{verification_id}");
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // The credential that PASSES: signed by the configured trust anchor's leaf.
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let trusted_issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: None,
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &trusted_issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+    let sd_presentation =
+        attach_kb_jwt(issuer_pres, &holder_signer, &client_id, &nonce, None).unwrap();
+
+    // The credential that FAILS: an entirely separate CA, absent from
+    // `trust_anchors`, so the ONLY thing wrong with it is issuer trust.
+    let untrusted_root = new_ca("Untrusted Root CA", 365).unwrap();
+    let untrusted_leaf = issue_leaf(
+        &untrusted_root.cert_pem,
+        &untrusted_root.key_pem,
+        "localhost",
+        &["localhost".to_string()],
+        365,
+    )
+    .unwrap();
+    let untrusted_issuer_signer =
+        FileSigner::from_pem(untrusted_leaf.key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+    let d_signer =
+        FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+    let mut elements = std::collections::BTreeMap::new();
+    elements.insert("given_name".to_string(), serde_json::json!("John"));
+    let mut namespaces = std::collections::BTreeMap::new();
+    namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+    let mdoc_bytes = build_mdoc(
+        MdocClaims {
+            doc_type: "org.iso.18013.5.1.mDL".to_string(),
+            namespaces,
+            device_key_jwk: d_jwk_pub,
+            signed_at: (now - 100) as i64,
+            valid_until: (now + 3600) as i64,
+        },
+        &untrusted_issuer_signer,
+        Some(vec![der_b64(untrusted_leaf.cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    let jwk_thumbprint = foundry_core::obs::thumbprint_bytes(&ephem_public_jwk).unwrap();
+    let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+        client_id: client_id.clone(),
+        nonce: nonce.clone(),
+        jwk_thumbprint: Some(jwk_thumbprint),
+        response_uri,
+    })
+    .unwrap();
+    let device_response = foundry_mdoc::builder::build_device_response(
+        &mdoc_bytes,
+        "org.iso.18013.5.1.mDL",
+        &d_signer,
+        &transcript,
+    )
+    .unwrap();
+
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": {
+            "sd": [sd_presentation],
+            "md": [B64URL.encode(&device_response)],
+        }}),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+    let post_resp_res = wallet_app.clone().oneshot(post_resp_req).await.unwrap();
+
+    // Property 1: the wallet's status code is unchanged by this work.
+    assert_eq!(post_resp_res.status(), StatusCode::BAD_REQUEST);
+    let body_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(body_json["error"], "invalid_request");
+
+    // Property 2: the operator sees BOTH credentials on the transaction.
+    let get_tx_req = Request::builder()
+        .method("GET")
+        .uri(format!("/admin/verification/requests/{verification_id}"))
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::empty())
+        .unwrap();
+    let get_tx_res = admin_app.clone().oneshot(get_tx_req).await.unwrap();
+    assert_eq!(get_tx_res.status(), StatusCode::OK);
+    let tx_bytes = axum::body::to_bytes(get_tx_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tx: VerificationTransaction = serde_json::from_slice(&tx_bytes).unwrap();
+
+    assert_eq!(tx.state, VerificationState::Failed);
+    let tx_res = tx
+        .result
+        .expect("the result must be persisted on the error path");
+    assert!(!tx_res.verified, "a failed credential fails the response");
+    assert_eq!(
+        tx_res.credentials.len(),
+        2,
+        "every answered credential is reported: {:?}",
+        tx_res.credentials
+    );
+
+    let sd_cred = &tx_res.credentials[0];
+    assert_eq!(sd_cred.query_id, "sd");
+    assert!(
+        sd_cred.checks.iter().all(|c| c.passed),
+        "the trusted credential's verdict must survive its neighbour's failure: {:?}",
+        sd_cred.checks
+    );
+    assert_eq!(
+        sd_cred.credential_type.as_deref(),
+        Some("https://localhost:8443/vct/pid"),
+        "the SD-JWT VC's asserted vct"
+    );
+    assert_eq!(sd_cred.claims["given_name"], "Alice");
+
+    let md_cred = &tx_res.credentials[1];
+    assert_eq!(md_cred.query_id, "md");
+    assert_eq!(
+        md_cred.credential_type.as_deref(),
+        Some("org.iso.18013.5.1.mDL"),
+        "a FAILED credential must still be nameable -- the point of the field"
+    );
+    assert_eq!(
+        md_cred.checks.len(),
+        1,
+        "a failed format check short-circuits the rest: {:?}",
+        md_cred.checks
+    );
+    assert_eq!(
+        md_cred.checks[0].check,
+        "mdoc_issuer_auth_and_device_signature"
+    );
+    assert!(!md_cred.checks[0].passed);
+    assert!(
+        md_cred.checks[0]
+            .detail
+            .as_deref()
+            .unwrap_or_default()
+            .contains("trust anchor"),
+        "the real reason belongs in detail: {:?}",
+        md_cred.checks[0].detail
+    );
+}
+
 // ---------------------------------------------------------------------------
 // OpenID4VP `direct_post.jwt` response shape
 //

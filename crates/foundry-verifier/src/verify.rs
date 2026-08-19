@@ -1149,17 +1149,24 @@ fn check_requested_credentials_answered(
 /// What `do_verify_vp_response` produces: always a result, plus optionally an
 /// error that still has to reach the wallet as a status code.
 ///
-/// A status-list fetch failure is a network fault, so root AGENTS.md §4.3 makes
-/// it HTTP 502 rather than a policy `passed: false`. Propagating it with `?` from
-/// inside the per-credential loop would throw away every check already
-/// collected, and the wrapper's `Err` arm would rebuild `tx.result` from
+/// A per-credential failure still has to reach the wallet as a status code --
+/// a bad signature is a structural 400 and a status-list fetch failure a network
+/// 502, never a policy `passed: false` (root AGENTS.md §4.3). But propagating it
+/// with `?` from inside the per-credential loop would throw away every check
+/// already collected, and the wrapper's `Err` arm would rebuild `tx.result` from
 /// scratch -- leaving the operator with none of the other credentials' verdicts,
-/// which is the whole reason a precise 502 is worth having. So the error travels
-/// beside the result instead of replacing it.
+/// which is the whole reason a precise status code is worth having. So the error
+/// travels beside the result instead of replacing it.
 struct VerifyOutcome {
     result: VerificationResult,
-    /// Only ever `StatusUnavailable`. Every other error still returns `Err`
-    /// directly, because nothing partial is worth reporting for those.
+    /// Any per-credential error, not just `StatusUnavailable`.
+    ///
+    /// It carried only `StatusUnavailable` while every other per-credential
+    /// error short-circuited the loop with `?` -- which is exactly the fail-fast
+    /// defect `verify_one_credential`'s return type now forbids. When several
+    /// credentials failed this is the ONE the wallet is told about, chosen by the
+    /// precedence rule in step 5b; every fault is recorded in `result`
+    /// regardless, so choosing a winner here cannot lose one.
     deferred: Option<VerificationError>,
 }
 
