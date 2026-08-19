@@ -1,0 +1,11 @@
+# Edition for standalone `rustfmt <file>` invocations.
+#
+# `cargo fmt` reads the edition from Cargo.toml and passes it through, so the
+# §5.1 gate never needed this. A tool that shells out to rustfmt directly —
+# an editor's format-on-save, a pre-commit hook, pi-lens's per-file formatter
+# runner — gets no such context and falls back to edition 2015, where `async
+# fn` is not valid syntax. Every async file in this workspace then fails to
+# format with E0670, which reads as a broken file rather than a missing flag.
+#
+# Must track `edition` in the workspace Cargo.toml.
+edition = "2024"
