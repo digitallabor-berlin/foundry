@@ -261,7 +261,7 @@ New field names, all additive — none renamed, per §4.5:
 | `credential_type` | roll-up + per-check lines | asserted `vct`/`docType`; empty string when `None` |
 | `checks` | roll-up | count of checks recorded for this credential |
 | `checks_passed` | roll-up | count that passed |
-| `credentials_failed` | final verdict line | count of credentials with ≥1 failed check |
+| `credentials_failed` | the `vp response not verified` line | count of credentials with ≥1 failed check |
 
 Deliberately **absent** from the roll-up: the failed check's name and detail. The
 adjacent per-check `WARN` carries both, and the existing verdict line already
@@ -283,6 +283,23 @@ certificate chain
 ```
 
 Additive change to the 400 body's `error_description`. Status codes unchanged.
+
+**The prefix cannot be applied uniformly, and must not be forced.** Three
+`VerificationError` variants are `#[error(transparent)]` and wrap a foreign
+error — `Storage`, `CoreCrypto`, `Trust` (`error.rs:31-38`). They carry no
+string field to prefix. Rewrapping them as `Failed` to gain one would change
+`error.kind`, which §4.5 makes operator-facing API that operators alert on, so
+that is refused: those three are returned unchanged. The prefix therefore
+applies to the nine string-carrying variants, and the per-credential roll-up
+line of §4.3 is what names the credential in *every* case, including the three.
+
+The helper is exhaustive with no catch-all, for the same reason `check_name_for`
+is: a new variant should be a deliberate decision about whether it can carry
+credential context, not a silent fallthrough.
+
+No new error log record is emitted. §4.5 requires exactly one record per typed
+error, emitted in `crates/foundry/src/server.rs`'s mapper; the deferred arm
+(`verify.rs:320`) deliberately does not log today and must continue not to.
 
 ### 4.5 Admin console
 
