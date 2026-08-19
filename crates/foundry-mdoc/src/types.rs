@@ -266,6 +266,52 @@ pub fn tag24_unwrap(value: &ciborium::Value) -> Result<&[u8], String> {
     }
 }
 
+/// `DeviceAuthenticationBytes` — the detached payload a `DeviceSignature` is
+/// computed over.
+///
+/// ```text
+/// #6.24(bstr .cbor ["DeviceAuthentication", SessionTranscript, docType,
+///                   DeviceNameSpacesBytes])
+/// ```
+///
+/// **Derived, not proven.** Reconstructed from
+/// `openwallet-foundation-labs/identity-credential` at
+/// `35bed72e20848a4bd8ec5c4bccece42021c9ee49` and `spruceid/isomdl` at
+/// `fcb49d15ad9d54afa028a12183ee7fab1e46a5dc`, which agree byte-for-byte.
+/// ISO/IEC 18013-5 is not vendored (root `AGENTS.md` §4.4); see the design doc
+/// §2.1. Do not restate this as proven — the digest facts in this module are
+/// proven against a real capture, this is not.
+///
+/// Two traps, both real, both pinned by tests:
+///
+/// - `session_transcript` goes in **bare**. Its tag-24 form exists, but only as a
+///   MAC-key-derivation salt; wrapping it here is a plausible-looking error that
+///   yields a signature no wallet can match.
+/// - `device_namespaces_tagged` is the **received item verbatim**. Decoding and
+///   re-encoding it risks a different byte string under the signature.
+///
+/// Lives here rather than in `verifier.rs` so the builder and the verifier cannot
+/// hold two different ideas of what was signed.
+pub(crate) fn device_authentication_bytes(
+    session_transcript: &ciborium::Value,
+    doc_type: &str,
+    device_namespaces_tagged: &ciborium::Value,
+) -> Result<Vec<u8>, String> {
+    let device_auth = ciborium::Value::Array(vec![
+        ciborium::Value::Text("DeviceAuthentication".to_string()),
+        session_transcript.clone(),
+        ciborium::Value::Text(doc_type.to_string()),
+        device_namespaces_tagged.clone(),
+    ]);
+    tag24_encode(&encode_cbor(&device_auth)?)
+}
+
+/// `DeviceNameSpacesBytes` for a presentation disclosing nothing at device level:
+/// `#6.24(bstr .cbor {})`, which encodes as `d81841a0`.
+pub(crate) fn empty_device_namespaces() -> ciborium::Value {
+    ciborium::Value::Tag(24, Box::new(ciborium::Value::Bytes(vec![0xa0])))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

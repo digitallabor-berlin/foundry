@@ -828,10 +828,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "ciborium",
  "coset",
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",
+ "hex",
  "josekit",
  "percent-encoding",
  "rand 0.8.7",

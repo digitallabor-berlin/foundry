@@ -273,6 +273,131 @@ pub fn build_mdoc(
     Ok(final_bytes)
 }
 
+/// Build a conformant ISO/IEC 18013-5 `DeviceResponse` around an already-issued
+/// mdoc, signing `DeviceAuthenticationBytes` with the holder's key.
+///
+/// This is the device/holder side of the protocol. foundry is not a wallet, so
+/// **production never calls this** — it exists so tests can produce the shape a
+/// real wallet sends, instead of asserting that foundry's verifier agrees with
+/// foundry's own envelope. That circularity is what hid four format defects; see
+/// the design doc §1.4.
+///
+/// `issuer_signed_mdoc` is [`build_mdoc`]'s output; its `documents[0].issuerSigned`
+/// is lifted out and rewrapped with a `deviceSigned` half disclosing nothing.
+pub fn build_device_response(
+    issuer_signed_mdoc: &[u8],
+    doc_type: &str,
+    device_signer: &dyn Signer,
+    session_transcript: &ciborium::Value,
+) -> Result<Vec<u8>, FormatError> {
+    let outer: ciborium::Value = ciborium::from_reader(issuer_signed_mdoc)
+        .map_err(|e| FormatError::Deserialization(format!("issuer-signed mdoc CBOR: {e}")))?;
+    let issuer_signed = outer
+        .as_map()
+        .and_then(|m| lookup(m, "documents"))
+        .and_then(|v| v.as_array())
+        .and_then(|docs| docs.first())
+        .and_then(|d| d.as_map())
+        .and_then(|d| lookup(d, "issuerSigned"))
+        .ok_or_else(|| {
+            FormatError::InvalidStructure(
+                "issuer-signed mdoc missing documents[0].issuerSigned".into(),
+            )
+        })?
+        .clone();
+
+    let device_namespaces = crate::types::empty_device_namespaces();
+    let payload =
+        crate::types::device_authentication_bytes(session_transcript, doc_type, &device_namespaces)
+            .map_err(FormatError::Serialization)?;
+
+    let protected = HeaderBuilder::new()
+        .algorithm(alg_label(device_signer))
+        .build();
+    let tbs = coset::sig_structure_data(
+        coset::SignatureContext::CoseSign1,
+        coset::ProtectedHeader {
+            original_data: None,
+            header: protected.clone(),
+        },
+        None,
+        &[],
+        &payload,
+    );
+    let signature = device_signer
+        .sign(&tbs)
+        .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
+
+    // No `.payload()`: the DeviceSignature is a DETACHED-payload COSE_Sign1. The
+    // payload is derived from the SessionTranscript, which the verifier already
+    // holds, so sending it would be redundant and would let a wallet assert a
+    // transcript rather than prove one.
+    let device_signature = CoseSign1Builder::new()
+        .protected(protected)
+        .signature(signature)
+        .build();
+    let device_signature_bytes = device_signature
+        .to_vec()
+        .map_err(|e| FormatError::Serialization(format!("deviceSignature encode: {e}")))?;
+
+    let device_auth = ciborium::Value::Map(vec![(
+        ciborium::Value::Text("deviceSignature".to_string()),
+        cbor_to_value_bytes(&device_signature_bytes)?,
+    )]);
+    let device_signed = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("nameSpaces".to_string()),
+            device_namespaces,
+        ),
+        (ciborium::Value::Text("deviceAuth".to_string()), device_auth),
+    ]);
+
+    let doc = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("docType".to_string()),
+            ciborium::Value::Text(doc_type.to_string()),
+        ),
+        (
+            ciborium::Value::Text("issuerSigned".to_string()),
+            issuer_signed,
+        ),
+        (
+            ciborium::Value::Text("deviceSigned".to_string()),
+            device_signed,
+        ),
+    ]);
+
+    let response = ciborium::Value::Map(vec![
+        (
+            ciborium::Value::Text("version".to_string()),
+            ciborium::Value::Text("1.0".to_string()),
+        ),
+        (
+            ciborium::Value::Text("documents".to_string()),
+            ciborium::Value::Array(vec![doc]),
+        ),
+        (
+            ciborium::Value::Text("status".to_string()),
+            ciborium::Value::Integer(0.into()),
+        ),
+    ]);
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&response, &mut bytes)
+        .map_err(|e| FormatError::Serialization(e.to_string()))?;
+    Ok(bytes)
+}
+
+fn lookup<'a>(
+    map: &'a [(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Option<&'a ciborium::Value> {
+    map.iter().find_map(|(k, v)| match k {
+        ciborium::Value::Text(s) if s == key => Some(v),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

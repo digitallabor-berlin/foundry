@@ -22,8 +22,12 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 sha2 = { workspace = true }
+# Only for the sensitive-gated SessionTranscript trace diagnostic in verify.rs.
+hex = { workspace = true }
 
 [dev-dependencies]
+# Test code names ciborium::Value for the mdoc SessionTranscript.
+ciborium = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
 coset = { workspace = true }

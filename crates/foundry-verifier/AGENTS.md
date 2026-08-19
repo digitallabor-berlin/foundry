@@ -217,9 +217,15 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   routed real SD-JWT presentations into the mdoc branch and reported the
   misleading `mdoc vp_token missing 'mdoc'`. A bare-string `vp_token` was
   foundry's own pre-fix shape and no conformant wallet sends it.
-  Per-format payloads: `dc+sd-jwt` → the SD-JWT VC string; `mso_mdoc` →
-  `{ "mdoc": <b64url CBOR>, "device_signature": <b64url COSE_Sign1> }`, which is
-  **bespoke and NOT interoperable** — see `crates/foundry-mdoc/AGENTS.md`.
+  Per-format payloads: `dc+sd-jwt` → the SD-JWT VC string; `mso_mdoc` → the
+  base64url of an ISO/IEC 18013-5 `DeviceResponse` (OpenID4VP L2825-L2828).
+  **Both formats are therefore JSON strings**, which is why the format must come
+  from the declared query and never from the payload's JSON type.
+  `mso_mdoc` previously carried a foundry-invented
+  `{ "mdoc": …, "device_signature": … }` object that no wallet ever sent; it is
+  now rejected outright rather than accepted alongside the conformant shape. The
+  remaining mdoc non-conformance is on the **issuance** side — the OpenID4VCI
+  credential envelope — not here; see `crates/foundry-mdoc/AGENTS.md`.
   A credential query whose `format` this verifier does not implement
   (`CredentialFormat::Other`) is a structural 400 once answered, even though it
   parses fine so it can simply fail to match inside a multi-credential query.
@@ -262,3 +268,16 @@ cargo nextest run -p foundry --test wallet_verification           # verification
 - **`response_uri` for mdoc device binding is reconstructed**, not stored:
   `{public_base_url}/vp/response/{tx.id}`. Changing the route shape in
   `crates/foundry` silently breaks the device signature check.
+- **The mdoc issuer half runs ONCE; only the Device Signature is retried per
+  candidate Origin.** `verify_issuer_signed` validates the certificate chain, the
+  IssuerAuth signature, MSO validity and the element digests, none of which
+  depend on the Origin. Only `verify_device_auth` commits to a
+  `SessionTranscript`. Do not collapse this back into one `verify_mdoc` call
+  inside the loop: that re-ran full chain validation once per configured Origin
+  purely to retry a single signature.
+- **The candidate `SessionTranscript` is logged at `trace`, gated on
+  `obs::sensitive_enabled()`.** It commits to `tx.nonce`, so per root
+  `AGENTS.md` §4.5 it requires BOTH the flag and the level — a level alone is not
+  authorisation. It exists because a real wallet's Device Signature cannot be
+  reproduced offline without the exact transcript bytes, which is what blocked
+  capturing an interop fixture.

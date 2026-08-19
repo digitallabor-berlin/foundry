@@ -11,7 +11,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Config;
 use foundry_core::trust::TrustStore;
-use foundry_mdoc::types::{SessionTranscriptParams, build_session_transcript};
+use foundry_mdoc::types::{
+    SessionTranscriptParams, build_session_transcript, session_transcript_value,
+};
 use josekit::jwk::Jwk;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -33,14 +35,12 @@ const LEGACY_WEB_ORIGIN_PREFIX: &str = "web-origin:";
 #[derive(Debug)]
 enum SelectedPresentation<'a> {
     SdJwtVc(&'a str),
-    /// **Non-conformant payload, deliberately retained.** OpenID4VP Annex B
-    /// requires a base64url ISO 18013-5 `DeviceResponse` carrying `deviceSigned`
-    /// inside each document. This split envelope is what `verify_mdoc` consumes
-    /// today, so mdoc is **not** interoperable with real wallets: the envelope
-    /// is now conformant, the payload is not. See spec defects 2-3.
+    /// OpenID4VP 1.0 L2825-L2828: the base64url-encoded ISO/IEC 18013-5
+    /// `DeviceResponse` CBOR structure. One string, not a split envelope — the
+    /// `{mdoc, device_signature}` pair this once carried was foundry-invented,
+    /// and no wallet ever sent it.
     MsoMdoc {
-        mdoc_b64: &'a str,
-        device_signature_b64: &'a str,
+        device_response_b64: &'a str,
     },
 }
 
@@ -168,36 +168,17 @@ fn select_presentations<'a>(
                     ))
                 })?)
             }
-            CredentialFormat::MsoMdoc => {
-                let obj = presentation.as_object().ok_or_else(|| {
+            CredentialFormat::MsoMdoc => SelectedPresentation::MsoMdoc {
+                device_response_b64: presentation.as_str().ok_or_else(|| {
                     VerificationError::Failed(format!(
                         "credential query '{}' declares format mso_mdoc, so its \
-                         presentation must be an object, got {}",
+                         presentation must be a base64url-encoded ISO 18013-5 \
+                         DeviceResponse string (OpenID4VP 1.0 L2825-L2828), got {}",
                         cq.id(),
                         json_type_name(presentation)
                     ))
-                })?;
-                let mdoc_b64 = obj.get("mdoc").and_then(|v| v.as_str()).ok_or_else(|| {
-                    VerificationError::Failed(format!(
-                        "mdoc presentation for credential query '{}' is missing 'mdoc'",
-                        cq.id()
-                    ))
-                })?;
-                let device_signature_b64 = obj
-                    .get("device_signature")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        VerificationError::Failed(format!(
-                            "mdoc presentation for credential query '{}' is missing \
-                             'device_signature'",
-                            cq.id()
-                        ))
-                    })?;
-                SelectedPresentation::MsoMdoc {
-                    mdoc_b64,
-                    device_signature_b64,
-                }
-            }
+                })?,
+            },
             // `CredentialFormat::Other` exists so that an unimplemented format inside
             // a multi-credential query simply fails to match rather than invalidating
             // the whole query (see `dcql_model`). Once a wallet has *answered* such a
@@ -654,15 +635,15 @@ async fn verify_one_credential(
             None
         }
         SelectedPresentation::MsoMdoc {
-            mdoc_b64,
-            device_signature_b64,
+            device_response_b64,
         } => {
-            let mdoc_bytes = B64URL
-                .decode(mdoc_b64)
-                .map_err(|e| VerificationError::Failed(format!("mdoc base64 decode: {e}")))?;
-            let dev_sig_bytes = B64URL.decode(device_signature_b64).map_err(|e| {
-                VerificationError::Failed(format!("device_signature base64 decode: {e}"))
+            let dr_bytes = B64URL.decode(device_response_b64).map_err(|e| {
+                VerificationError::Failed(format!("DeviceResponse base64url decode: {e}"))
             })?;
+            let decoded = foundry_mdoc::verifier::decode_device_response(&dr_bytes)
+                .map_err(|e| VerificationError::Failed(format!("DeviceResponse: {e}")))?;
+            let resp = foundry_mdoc::verifier::parse_device_response(&decoded)
+                .map_err(|e| VerificationError::Failed(format!("DeviceResponse: {e}")))?;
 
             // OpenID4VP L2870 (redirects) / L2999 (DC API): the third
             // `…HandoverInfo` element is the RFC 7638 thumbprint of the
@@ -727,20 +708,44 @@ async fn verify_one_credential(
                 }]
             };
 
-            let mut accepted = None;
+            // The issuer half does not depend on the Origin, so it runs ONCE.
+            // Only the Device Signature commits to a SessionTranscript, so only
+            // that check is retried per candidate. Before this, each candidate
+            // Origin re-ran full chain validation, MSO validity and digest
+            // matching just to retry one signature.
+            let issuer =
+                foundry_mdoc::verifier::verify_issuer_signed(&resp, ctx.trust_store, ctx.now_unix)
+                    .map_err(|e| {
+                        VerificationError::Failed(format!("mdoc verification failed: {e}"))
+                    })?;
+
+            let mut accepted = false;
             let mut last_err = None;
             for params in &candidates {
-                let session_transcript = build_session_transcript(params)
+                let session_transcript = session_transcript_value(params)
                     .map_err(|e| VerificationError::Failed(format!("SessionTranscript: {e}")))?;
-                match foundry_mdoc::verifier::verify_mdoc(
-                    &mdoc_bytes,
-                    ctx.trust_store,
+
+                // The transcript is interop-diagnostic gold — without it a real
+                // wallet's Device Signature cannot be reproduced offline — but it
+                // commits to `tx.nonce`. Gated on BOTH sensitive_enabled() AND
+                // trace per root AGENTS.md §4.5: a level is not authorisation.
+                if foundry_core::obs::sensitive_enabled()
+                    && let Ok(encoded) = build_session_transcript(params)
+                {
+                    tracing::trace!(
+                        session_transcript = %hex::encode(&encoded),
+                        "SENSITIVE: candidate mdoc SessionTranscript"
+                    );
+                }
+
+                match foundry_mdoc::verifier::verify_device_auth(
+                    &resp,
                     &session_transcript,
-                    &dev_sig_bytes,
-                    ctx.now_unix,
+                    &issuer.device_key_x,
+                    &issuer.device_key_y,
                 ) {
-                    Ok(res) => {
-                        accepted = Some(res);
+                    Ok(()) => {
+                        accepted = true;
                         break;
                     }
                     Err(e) => {
@@ -751,18 +756,22 @@ async fn verify_one_credential(
                 }
             }
 
-            // `candidates` is never empty, so `last_err` is always populated on
-            // the failure path. The fallback message exists only so that this
-            // cannot become a panic if that ever stops holding.
-            let mdoc_res = match accepted {
-                Some(res) => res,
-                None => {
-                    return Err(last_err.unwrap_or_else(|| {
-                        VerificationError::Failed(
-                            "mdoc verification failed: no SessionTranscript candidate".to_string(),
-                        )
-                    }));
-                }
+            if !accepted {
+                // `candidates` is never empty, so `last_err` is always populated
+                // here. The fallback exists only so this cannot become a panic if
+                // that ever stops holding.
+                return Err(last_err.unwrap_or_else(|| {
+                    VerificationError::Failed(
+                        "mdoc verification failed: no SessionTranscript candidate".to_string(),
+                    )
+                }));
+            }
+
+            let mdoc_res = foundry_mdoc::verifier::MdocVerificationResult {
+                claims: issuer.claims,
+                device_key_jwk: issuer.device_key_jwk,
+                issuer_x5c: Some(issuer.issuer_x5c),
+                doc_type: issuer.doc_type,
             };
 
             checks.push(CheckResult {
@@ -2408,7 +2417,7 @@ mod tests {
         // response_mode `direct_post.jwt`, so the "Invocation via Redirects"
         // Handover applies (L2829-L2873) and the encrypted-response thumbprint
         // is present rather than null (L2870).
-        let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
             client_id: expected_client_id(&config),
             nonce: tx.nonce.clone(),
             jwk_thumbprint: Some(
@@ -2417,36 +2426,21 @@ mod tests {
             response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
         })
         .unwrap();
-        let protected = coset::HeaderBuilder::new()
-            .algorithm(coset::iana::Algorithm::ES256)
-            .build();
-        let partial = coset::CoseSign1Builder::new()
-            .protected(protected.clone())
-            .build();
-        let d_tbs = coset::sig_structure_data(
-            coset::SignatureContext::CoseSign1,
-            partial.protected.clone(),
-            None,
-            &[],
+        // Build what a wallet sends: one base64url DeviceResponse whose
+        // DeviceSignature covers DeviceAuthenticationBytes.
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
             &transcript,
-        );
-        let sig = {
-            use foundry_core::crypto::Signer as _;
-            d_signer.sign(&d_tbs).unwrap()
-        };
-        let d_sign = coset::CoseSign1Builder::new()
-            .protected(protected)
-            .signature(sig)
-            .build();
-        let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+        )
+        .unwrap();
 
         // Envelope + JWE.
-        let vp_token = serde_json::json!({
-            "mdoc": B64URL.encode(&mdoc_bytes),
-            "device_signature": B64URL.encode(&d_sig_bytes),
-        });
         let jwe_str = encrypt_compact(
-            &serde_json::json!({ "vp_token": { "c1": [vp_token] } }),
+            &serde_json::json!({
+                "vp_token": { "c1": [B64URL.encode(&device_response)] }
+            }),
             &tx.ephem_public_jwk,
             "ECDH-ES",
             "A128GCM",
@@ -2879,22 +2873,33 @@ mod tests {
         }
     }
 
+    /// OpenID4VP L2825-L2828: the mdoc presentation is ONE base64url
+    /// `DeviceResponse` string.
     #[test]
-    fn select_presentations_accepts_conformant_mdoc_envelope() {
-        let vp = serde_json::json!({"c1": [{"mdoc": "AAAA", "device_signature": "BBBB"}]});
+    fn select_presentations_accepts_a_device_response_string() {
+        let vp = serde_json::json!({"c1": ["QUFBQQ"]});
         let selected = select_presentations(&vp, &mdoc_dcql()).unwrap();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].0, "c1");
         match &selected[0].1 {
             SelectedPresentation::MsoMdoc {
-                mdoc_b64,
-                device_signature_b64,
-            } => {
-                assert_eq!(*mdoc_b64, "AAAA");
-                assert_eq!(*device_signature_b64, "BBBB");
-            }
+                device_response_b64,
+            } => assert_eq!(*device_response_b64, "QUFBQQ"),
             other => panic!("expected MsoMdoc, got {other:?}"),
         }
+    }
+
+    /// Strict, not liberal (design doc §3 decision 2): the former
+    /// `{mdoc, device_signature}` object was foundry-invented and is now refused
+    /// outright rather than accepted alongside the conformant shape.
+    #[test]
+    fn select_presentations_rejects_the_former_split_mdoc_envelope() {
+        let vp = serde_json::json!({"c1": [{"mdoc": "AAAA", "device_signature": "BBBB"}]});
+        let err = select_presentations(&vp, &mdoc_dcql()).expect_err("must be rejected");
+        assert!(
+            format!("{err}").contains("DeviceResponse"),
+            "the error should name the required shape, got: {err}"
+        );
     }
 
     /// The inverse of the guard this feature removes. A `vp_token` answering
@@ -2903,7 +2908,7 @@ mod tests {
     fn select_presentations_accepts_several_answered_queries() {
         let vp = serde_json::json!({
             "pid": ["header.body.sig~disclosure~kb"],
-            "mdl": [{"mdoc": "AAAA", "device_signature": "BBBB"}]
+            "mdl": ["QUFBQQ"]
         });
         let selected = select_presentations(&vp, &two_credential_dcql()).unwrap();
 
@@ -2924,7 +2929,7 @@ mod tests {
     fn select_presentations_follows_dcql_declaration_order() {
         // `mdl` first in the vp_token, `pid` first in the query.
         let vp = serde_json::json!({
-            "mdl": [{"mdoc": "AAAA", "device_signature": "BBBB"}],
+            "mdl": ["QUFBQQ"],
             "pid": ["header.body.sig~disclosure~kb"]
         });
         let selected = select_presentations(&vp, &two_credential_dcql()).unwrap();
@@ -3016,6 +3021,11 @@ mod tests {
     /// The payload must match the format the query *declared*. This is where the
     /// old shape-sniffing protection now lives, with a message that names the
     /// declared format instead of guessing.
+    ///
+    /// Both formats now expect a JSON string, so a bare string no longer
+    /// contradicts either one — the contradicting payload for each is a
+    /// non-string. Before the DeviceResponse envelope landed, mso_mdoc expected
+    /// an object and this test read the other way round.
     #[test]
     fn select_presentations_rejects_payload_contradicting_declared_format() {
         let object_for_sd_jwt = rejection_of(
@@ -3027,8 +3037,11 @@ mod tests {
             "{object_for_sd_jwt}"
         );
 
-        let string_for_mdoc = rejection_of(serde_json::json!({"c1": ["a-string"]}), &mdoc_dcql());
-        assert!(string_for_mdoc.contains("mso_mdoc"), "{string_for_mdoc}");
+        let object_for_mdoc = rejection_of(
+            serde_json::json!({"c1": [{"mdoc": "A", "device_signature": "B"}]}),
+            &mdoc_dcql(),
+        );
+        assert!(object_for_mdoc.contains("mso_mdoc"), "{object_for_mdoc}");
     }
 
     #[test]
@@ -3618,12 +3631,22 @@ mod tests {
     /// Hand-encoded because `ciborium` is not a dependency of this crate, and
     /// because pinning the pre-fix bytes literally is the point: it is what a
     /// wallet built against the old behaviour would sign.
-    fn pre_fix_ad_hoc_transcript(client_id: &str, response_uri: &str, nonce: &str) -> Vec<u8> {
+    /// The pre-GAP-VP-06 ad-hoc transcript, hand-assembled as raw CBOR then
+    /// decoded — `mdoc_presentation_jwe` now takes a `Value` because
+    /// `DeviceAuthentication` splices the transcript by value.
+    ///
+    /// Still assembled byte-by-byte rather than with `Value` constructors: the
+    /// point is to reproduce a shape foundry's current code cannot produce.
+    fn pre_fix_ad_hoc_transcript(
+        client_id: &str,
+        response_uri: &str,
+        nonce: &str,
+    ) -> ciborium::Value {
         let mut out = vec![0x83, 0xf6, 0xf6, 0x83];
         out.extend(cbor_text(client_id));
         out.extend(cbor_text(response_uri));
         out.extend(cbor_text(nonce));
-        out
+        ciborium::from_reader(out.as_slice()).expect("hand-built CBOR decodes")
     }
 
     fn mdoc_dcql_query() -> serde_json::Value {
@@ -3637,13 +3660,17 @@ mod tests {
         })
     }
 
-    /// Issue an mdoc and sign a detached DeviceAuth over `transcript`, then
-    /// wrap it in the JWE a wallet would post. Taking the transcript as raw
-    /// bytes lets a caller sign a deliberately wrong one.
+    /// Issue an mdoc, wrap it in the `DeviceResponse` a wallet would send, and
+    /// encrypt it as the JWE a wallet would post.
+    ///
+    /// Taking the transcript as a caller-supplied `Value` lets a test sign a
+    /// deliberately wrong one — which is how the Origin-candidate and
+    /// thumbprint-selection tests below prove the transcript is actually
+    /// committed to.
     fn mdoc_presentation_jwe(
         leaf_cert: &[u8],
         leaf_key: &[u8],
-        transcript: &[u8],
+        transcript: &ciborium::Value,
         ephem_public_jwk: &serde_json::Value,
         now: u64,
     ) -> String {
@@ -3670,34 +3697,23 @@ mod tests {
         )
         .unwrap();
 
-        let protected = coset::HeaderBuilder::new()
-            .algorithm(coset::iana::Algorithm::ES256)
-            .build();
-        let partial = coset::CoseSign1Builder::new()
-            .protected(protected.clone())
-            .build();
-        let d_tbs = coset::sig_structure_data(
-            coset::SignatureContext::CoseSign1,
-            partial.protected.clone(),
-            None,
-            &[],
+        // Build what a wallet sends: one base64url DeviceResponse, with the
+        // DeviceSignature over DeviceAuthenticationBytes. Previously this
+        // hand-rolled a signature over the bare transcript and wrapped it in
+        // foundry's own split envelope, so it could only ever confirm that
+        // foundry agreed with itself.
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
             transcript,
-        );
-        let sig = {
-            use foundry_core::crypto::Signer as _;
-            d_signer.sign(&d_tbs).unwrap()
-        };
-        let d_sign = coset::CoseSign1Builder::new()
-            .protected(protected)
-            .signature(sig)
-            .build();
-        let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
+        )
+        .unwrap();
 
         encrypt_compact(
-            &serde_json::json!({ "vp_token": { "c1": [serde_json::json!({
-                "mdoc": B64URL.encode(&mdoc_bytes),
-                "device_signature": B64URL.encode(&d_sig_bytes),
-            })] } }),
+            &serde_json::json!({
+                "vp_token": { "c1": [B64URL.encode(&device_response)] }
+            }),
             ephem_public_jwk,
             "ECDH-ES",
             "A128GCM",
@@ -3764,7 +3780,7 @@ mod tests {
 
         // The wallet used the *second* origin; a first-only implementation
         // would reject this.
-        let transcript = build_session_transcript(&SessionTranscriptParams::DcApi {
+        let transcript = session_transcript_value(&SessionTranscriptParams::DcApi {
             origin: "https://second.example.com".to_string(),
             nonce: tx.nonce.clone(),
             jwk_thumbprint: Some(
@@ -3799,7 +3815,7 @@ mod tests {
         tx.transport = "dc_api".to_string();
         tx.response_mode = "dc_api.jwt".to_string();
 
-        let transcript = build_session_transcript(&SessionTranscriptParams::DcApi {
+        let transcript = session_transcript_value(&SessionTranscriptParams::DcApi {
             origin: "https://attacker.example.com".to_string(),
             nonce: tx.nonce.clone(),
             jwk_thumbprint: Some(
@@ -3845,7 +3861,7 @@ mod tests {
 
             let thumb = foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap();
             let build = |with_thumbprint: bool| {
-                build_session_transcript(&SessionTranscriptParams::DcApi {
+                session_transcript_value(&SessionTranscriptParams::DcApi {
                     origin: "https://origin.example.com".to_string(),
                     nonce: tx.nonce.clone(),
                     jwk_thumbprint: if with_thumbprint { Some(thumb) } else { None },

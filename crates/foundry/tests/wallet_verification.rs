@@ -16,7 +16,7 @@ use foundry_core::status_list::{StatusList, StatusListTokenClaims, build_status_
 use foundry_core::storage::SqliteStorage;
 use foundry_core::trust::build_x5c;
 use foundry_mdoc::builder::{MdocClaims, build_mdoc};
-use foundry_mdoc::types::{SessionTranscriptParams, build_session_transcript};
+use foundry_mdoc::types::{SessionTranscriptParams, session_transcript_value};
 use foundry_sd_jwt_vc::builder::{IssuerClaims, attach_kb_jwt, build_sd_jwt_vc};
 use foundry_verifier::{
     CreateVerificationResponse, VerificationResult, VerificationState, VerificationTransaction,
@@ -1332,42 +1332,32 @@ async fn mdoc_presentation_is_accepted() {
     // that a wallet and this verifier independently compute the same
     // transcript bytes -- which is exactly what GAP-VP-06 recorded as broken.
     let jwk_thumbprint = foundry_core::obs::thumbprint_bytes(&ephem_public_jwk).unwrap();
-    let transcript = build_session_transcript(&SessionTranscriptParams::Redirect {
+    let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
         client_id: client_id.clone(),
         nonce: nonce.clone(),
         jwk_thumbprint: Some(jwk_thumbprint),
         response_uri: response_uri.clone(),
     })
     .unwrap();
-    let protected = coset::HeaderBuilder::new()
-        .algorithm(coset::iana::Algorithm::ES256)
-        .build();
-    let partial = coset::CoseSign1Builder::new()
-        .protected(protected.clone())
-        .build();
-    let d_tbs = coset::sig_structure_data(
-        coset::SignatureContext::CoseSign1,
-        partial.protected.clone(),
-        None,
-        &[],
-        &transcript,
-    );
-    let sig = {
-        use foundry_core::crypto::Signer as _;
-        d_signer.sign(&d_tbs).unwrap()
-    };
-    let d_sign = coset::CoseSign1Builder::new()
-        .protected(protected)
-        .signature(sig)
-        .build();
-    let d_sig_bytes = coset::CborSerializable::to_vec(d_sign).unwrap();
 
-    let vp_token = serde_json::json!({
-        "mdoc": B64URL.encode(&mdoc_bytes),
-        "device_signature": B64URL.encode(&d_sig_bytes),
-    });
+    // Build what a conformant wallet sends: ONE base64url DeviceResponse
+    // (OpenID4VP L2825-L2828), with the DeviceSignature over
+    // DeviceAuthenticationBytes. This used to hand-roll a signature over the bare
+    // transcript and post foundry's own {mdoc, device_signature} object -- a
+    // shape no wallet produces, so the end-to-end claim this test makes was
+    // weaker than it looked.
+    let device_response = foundry_mdoc::builder::build_device_response(
+        &mdoc_bytes,
+        "org.iso.18013.5.1.mDL",
+        &d_signer,
+        &transcript,
+    )
+    .unwrap();
+
     let jwe_str = encrypt_compact(
-        &serde_json::json!({ "vp_token": { "c1": [vp_token] } }),
+        &serde_json::json!({
+            "vp_token": { "c1": [B64URL.encode(&device_response)] }
+        }),
         &ephem_public_jwk,
         "ECDH-ES",
         "A128GCM",

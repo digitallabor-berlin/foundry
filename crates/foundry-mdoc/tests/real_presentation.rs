@@ -51,8 +51,7 @@ fn encode(value: &ciborium::Value) -> Vec<u8> {
 fn real_mso() -> MobileSecurityObject {
     let issuer_signed = lookup(&document(), "issuerSigned").clone();
     let payload = issuer_auth_payload(&issuer_signed);
-    let wrapper: ciborium::Value =
-        ciborium::from_reader(payload.as_slice()).expect("payload CBOR");
+    let wrapper: ciborium::Value = ciborium::from_reader(payload.as_slice()).expect("payload CBOR");
     ciborium::from_reader(tag24_unwrap(&wrapper).expect("tag-24 unwraps")).expect("real MSO parses")
 }
 
@@ -78,7 +77,10 @@ fn the_capture_has_the_shape_openid4vp_requires() {
         "DeviceResponse.status must be 0"
     );
     assert_eq!(
-        lookup(&dr, "documents").as_array().expect("documents").len(),
+        lookup(&dr, "documents")
+            .as_array()
+            .expect("documents")
+            .len(),
         1,
         "one document per DeviceResponse"
     );
