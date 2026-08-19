@@ -368,6 +368,21 @@ pub async fn create_verification_request(
             obj.insert("transaction_data".to_string(), serde_json::json!(td));
         }
 
+        // The DC API counterpart of the signed Request Object dump in
+        // `build_signed_request_object`, emitted here because this transport
+        // has no signed form and no later build step -- this object is what
+        // the invoking page hands the wallet. Logged only once the conditional
+        // `transaction_data` member is in place, so the record is the final
+        // request rather than a prefix of it. Doubly gated for the same reason
+        // as its signed counterpart: it carries `nonce` and the ephemeral
+        // public JWK (root AGENTS.md sect-4.5).
+        if foundry_core::obs::sensitive_enabled() {
+            tracing::trace!(
+                dc_api_request = %dc_api_obj,
+                "SENSITIVE: DC API request object returned for wallet invocation"
+            );
+        }
+
         Ok(CreateVerificationResponse {
             verification_id: id,
             request_uri: None,
@@ -539,7 +554,34 @@ pub fn build_signed_request_object(
     let sig_bytes = signer.sign(signing_input.as_bytes())?;
     let sig_b64 = B64URL.encode(&sig_bytes);
 
-    Ok(format!("{signing_input}.{sig_b64}"))
+    let jws = format!("{signing_input}.{sig_b64}");
+
+    // Always-on and payload-free: records that a Request Object really was
+    // served for this transaction, and under which algorithm. `tx_id` is
+    // already on the span, so this threads into the rest of the flow.
+    tracing::debug!(
+        alg = %alg.as_str(),
+        jws_len = jws.len(),
+        "signed request object built"
+    );
+
+    // The Request Object the wallet actually receives, verbatim. Doubly gated
+    // per root AGENTS.md sect-4.5: it commits to `tx.nonce` and carries the
+    // ephemeral PUBLIC JWK in `client_metadata`, so a `debug`/`trace` level
+    // alone is not authorisation -- RUST_LOG=trace is not consent. Same tier,
+    // and the same justification, as the SessionTranscript diagnostic in
+    // `verify.rs`: a wallet-side rejection cannot be reproduced offline
+    // without the exact bytes that were sent.
+    if foundry_core::obs::sensitive_enabled() {
+        tracing::trace!(
+            request_object_jws = %jws,
+            request_object_header = %header_val,
+            request_object_payload = %payload_val,
+            "SENSITIVE: signed request object served to wallet"
+        );
+    }
+
+    Ok(jws)
 }
 
 #[cfg(test)]

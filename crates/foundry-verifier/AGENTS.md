@@ -321,6 +321,21 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   `SessionTranscript`. Do not collapse this back into one `verify_mdoc` call
   inside the loop: that re-ran full chain validation once per configured Origin
   purely to retry a single signature.
+- **The presentation request is logged verbatim at `trace`, gated on
+  `obs::sensitive_enabled()`, on BOTH transports.** `build_signed_request_object`
+  emits `request_object_jws` / `request_object_header` /
+  `request_object_payload` at the point the JWS is served, and the `dc_api`
+  branch of `create_verification_request` emits `dc_api_request` *after* the
+  conditional `transaction_data` member is inserted — logging it earlier would
+  record a prefix of the request rather than the request. Both are doubly gated
+  because the object commits to `tx.nonce` and carries the ephemeral **public**
+  JWK; a `debug`/`trace` level alone is not authorisation (root
+  [AGENTS.md](../../AGENTS.md) §4.5, whose thumbprint-only rule for public keys
+  names these fields as its one exception). The always-on companion at `debug`
+  carries `alg` and `jws_len` only — no contents. Pinned by
+  `the_request_object_served_to_the_wallet_stays_locked_by_default` and
+  `payload_logging_unlocks_the_request_object_served_to_the_wallet` (plus the
+  DC API pair) in `crates/foundry/tests/logging_redaction.rs`.
 - **The candidate `SessionTranscript` is logged at `trace`, gated on
   `obs::sensitive_enabled()`.** It commits to `tx.nonce`, so per root
   `AGENTS.md` §4.5 it requires BOTH the flag and the level — a level alone is not

@@ -203,7 +203,13 @@ Logging is a request-path concern and is governed like one.
   (`card.last_four`, the cardholder-recognisable `card.alias`, and card-art
   URLs, which may be personalised) — `create_offer` records their *presence*
   only, never their contents. Public keys appear only as RFC 7638 thumbprints
-  (`foundry_core::obs::thumbprint`).
+  (`foundry_core::obs::thumbprint`), with one exception: the verbatim
+  presentation-request diagnostics (`request_object_jws`,
+  `request_object_payload`, `dc_api_request`) reproduce the object as sent,
+  which includes the ephemeral **public** JWK in `client_metadata`. Reducing it
+  to a thumbprint there would defeat the field's only purpose — replaying the
+  exact bytes a wallet rejected. The ephemeral **private** JWK remains
+  unloggable in every mode.
 - **Payload fields require BOTH `foundry_core::obs::sensitive_enabled()` AND a
   `debug`/`trace` level** — never one alone. A level is not authorisation;
   `RUST_LOG=debug` is ordinary in production.
