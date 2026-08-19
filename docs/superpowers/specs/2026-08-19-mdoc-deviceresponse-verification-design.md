@@ -1,9 +1,11 @@
-# mdoc `DeviceResponse` Verification — Design
+# mdoc `DeviceResponse` Verification and ISO 18013-5 Format Internals — Design
 
 **Date:** 2026-08-19
+**Revised:** 2026-08-19 — scope widened after decoding the real MSO; see §1.6
 **Status:** approved (design); implementation plan pending
 **Crates touched:** `foundry-mdoc`, `foundry-verifier`
-**Closes:** `HAIP-0070`; divergence #1 in `crates/foundry-mdoc/AGENTS.md`
+**Closes:** `HAIP-0070`; divergences #1 and #2 in `crates/foundry-mdoc/AGENTS.md`; three
+`TODO(interop)` notes in `crates/foundry-mdoc/src/types.rs`
 **Opens:** one new issuance-leg gap (`GAP-VCI-<next free id>`, assigned when the row is written)
 
 ---
@@ -18,7 +20,8 @@ credential query 'av' declares format mso_mdoc, so its presentation
 must be an object, got a string
 ```
 
-The wallet was right and foundry was wrong.
+The wallet was right and foundry was wrong. That error is the **first** of six
+independent defects; the rest were found while planning the fix (§1.6).
 
 ### 1.1 What the wallet sent
 
@@ -74,7 +77,7 @@ every mdoc test in the workspace is a round trip between the two. A green mdoc
 suite proved only self-consistency — stated explicitly in
 `crates/foundry-mdoc/AGENTS.md`'s Gotchas.
 
-### 1.5 The second, deeper defect
+### 1.5 The device-authentication defect
 
 Fixing the envelope alone would not make a real presentation verify. Today:
 
@@ -93,19 +96,49 @@ foundry signs over the `SessionTranscript` **alone**. A conformant wallet signs
 over the `DeviceAuthentication` array that *contains* the transcript. The
 `external_aad` slot was already correct.
 
+### 1.6 Four further defects, found by decoding the captured MSO
+
+`verify_mdoc` cannot parse a real mdoc **at all**. Each row below is
+independently fatal.
+
+| # | Element | Real wallet | foundry today |
+| --- | --- | --- | --- |
+| 3 | `issuerAuth` payload | `#6.24(bstr .cbor MSO)` — begins `d818 5902 02` | passes `sign1.payload` straight to `ciborium::from_reader::<MobileSecurityObject>` |
+| 4 | `deviceKeyInfo.deviceKey` | COSE_Key **map** `{1:2, -1:1, -2:bstr32, -3:bstr32}` | `cbor_value_to_bytes` then `CoseKey::from_slice` — requires a byte string |
+| 5 | `validityInfo.*` | CBOR **tag-0 `tdate`** values, and a `validFrom` member foundry does not model | `String` fields parsed as RFC 3339 |
+| 6 | `IssuerSignedItem`s in `nameSpaces` | `#6.24(bstr …)`, with `valueDigests` computed over the **full tagged encoding** | `item_val.as_bytes()`, and hashes those inner bytes |
+
+Defect 6 is the most damaging because it fails *quietly*. `as_bytes()` returns
+`None` for a tagged value, so every item hits the loop's `continue`, the
+credential verifies with **zero reconstructed claims**, and the transaction then
+fails `dcql_match` — a **policy** outcome at HTTP 200 per root `AGENTS.md` §4.3.
+A reader would see `verified: false` with a DCQL mismatch and reasonably conclude
+the wallet sent the wrong claims.
+
+Defects 3, 5 and 6 are already recorded in the tree as `TODO(interop)` comments in
+`crates/foundry-mdoc/src/types.rs` — *"payload is not tag-24 embedded-CBOR
+wrapped"*, *"should be CBOR `tdate` (tag 0), not plain text"*, *"should be
+transported as tag-24 embedded CBOR"*. They read as cosmetic and are in fact
+three of the six reasons no real mdoc can be verified.
+
 ---
 
-## 2. Ground truth for `DeviceAuthentication`
+## 2. Ground truth
 
-ISO/IEC 18013-5 is a paid standard, is not vendored in this repository, and is
-listed as out of scope in `docs/conformance/openid4vc-conformance.md`
-("mdoc format internals … not vendorable — paid standard"). OpenID4VP restates
-the `SessionTranscript` changes but never the `DeviceAuthentication` structure.
+ISO/IEC 18013-5 is a paid standard, is not vendored here, and is listed as out of
+scope in `docs/conformance/openid4vc-conformance.md` ("mdoc format internals …
+not vendorable — paid standard"). OpenID4VP restates the `SessionTranscript`
+changes but nothing else of the format.
 
-The structure was therefore derived from **two independent open-source
-implementations, read at pinned commits**, which agree byte-for-byte:
+Ground truth therefore comes from two places, with **different and separately
+recorded strengths of evidence**:
 
-| Source | Language | Commit |
+- **Derived** (§2.1-§2.2) — from two independent open-source implementations read
+  at pinned commits, which agree byte-for-byte.
+- **Proven** (§2.3) — computed from the captured real presentation. Stronger: a
+  digest either matches or it does not.
+
+| Derivation source | Language | Commit |
 | --- | --- | --- |
 | `openwallet-foundation-labs/identity-credential` (multipaz) | Kotlin | `35bed72e20848a4bd8ec5c4bccece42021c9ee49` |
 | `spruceid/isomdl` | Rust | `fcb49d15ad9d54afa028a12183ee7fab1e46a5dc` |
@@ -114,7 +147,7 @@ multipaz is authoritative for the captured fixture specifically: the credential'
 issuer certificate is `CN=[Test] mDL Reference Implementation DS`, that project's
 own test PKI.
 
-### 2.1 The structure
+### 2.1 `DeviceAuthentication` (derived)
 
 ```cddl
 Sig_structure = ["Signature1", protected, h'', DeviceAuthenticationBytes]
@@ -134,15 +167,41 @@ COSE_Sign1 (`payload: null`), never the `Sig_structure` — multipaz states this
 a source comment: *"Next field is the payload, independently of how it's
 transported"*.
 
-### 2.2 Two hazards, both flagged independently by both sources
+### 2.2 Two hazards, flagged independently by both sources
 
 1. **`DeviceNameSpacesBytes` must be byte-preserved, never re-encoded.** Both
    verifiers reuse the received tag-24 item verbatim rather than rebuilding it
-   from the decoded map. For the captured empty-map case the bytes are
-   `d818 41 a0`.
+   from the decoded map.
 2. **tag-24 on `SessionTranscript` is a decoy.** multipaz *does* wrap the
    transcript in tag-24 — but only as a MAC key-derivation salt, never for
    signatures. Element [1] of `DeviceAuthentication` is the bare, untagged array.
+
+### 2.3 `IssuerSigned` internals (proven from the capture)
+
+**`valueDigests` are SHA-256 over the FULL tag-24 encoding** of each
+`IssuerSignedItemBytes`, not over the inner CBOR:
+
+```text
+digestID 4, MSO valueDigests : 7c85201a1c0ba374fb569d36beab6b52251483618b70dcb0782599a2e3e8f2f6
+sha256(full #6.24(bstr …))   : 7c85201a1c0ba374fb569d36beab6b52251483618b70dcb0782599a2e3e8f2f6   MATCH
+sha256(inner .cbor item)     : b27f1be959cd027d5308f86f331fb962bfb8eefdba39672330f9fac7845db11d   what foundry hashes
+```
+
+Other values read directly from the capture, to be used as test literals:
+
+```text
+issuerAuth payload prefix       d818 5902 02          ; #6.24(bstr(514))
+MSO version / digestAlgorithm   "1.0" / "SHA-256"
+MSO docType                     "eu.europa.ec.av.1"
+valueDigests digestIDs          0,1,2,3,4,5           ; 6 committed, 1 disclosed
+deviceKey (COSE_Key map)        {1: 2, -1: 1, -2: bstr32, -3: bstr32}
+validityInfo members            signed, validFrom, validUntil  ; all CBOR tag-0 tdate
+deviceSigned.nameSpaces         d81841a0              ; #6.24(bstr(1) = A0), empty map
+```
+
+The 6-committed / 1-disclosed split confirms ordinary selective disclosure and
+that the reconstruction loop must iterate the **received items**, not the MSO's
+digest list — which today's loop already does correctly.
 
 ---
 
@@ -150,40 +209,101 @@ transported"*.
 
 | # | Decision | Rationale |
 | --- | --- | --- |
-| 1 | **Verifier leg only.** Issuance stays as-is, recorded as a new gap. | The two legs are independently testable. Rewriting both sides of the only equality the mdoc tests assert, in one change, means a failure cannot be localised. |
-| 2 | **No `isomdl` dependency — not even `[dev-dependencies]`.** | Root `AGENTS.md` §3: no vendored third-party crates; prefer extending foundry-owned models over introducing a protocol dependency. Assessed and rejected: `isomdl` 0.2.0 collides on `x509-cert` (0.2 vs 0.3) and `base64` (0.13), imposes `generic-array = "=0.14.7"`, adds a second complete X.509 stack that foundry would never call (trust policy lives in `foundry-core`'s openssl-based `TrustStore`), and has 0 crates.io dependents. Used as a **read-only reference** instead. |
-| 3 | **Drop the bespoke `{mdoc, device_signature}` object; do not accept both shapes.** | No production producer exists, so "accept both" would preserve a shape whose only purpose was passing our own tests, while leaving the real contract ambiguous to the next reader. |
-| 4 | **Add a public `build_device_response()` to `foundry-mdoc::builder`.** | Synthetic tests in three crates need to produce a conformant presentation. The workspace has no `test-util` feature pattern, and `build_mdoc` is already plain-public and consumed cross-crate. |
-| 5 | **Reject a `DeviceResponse` carrying more than one document.** | Today `docs.first()` silently ignores extras — the same defect class `select_presentation` already refuses for presentation arrays. HAIP-0070 independently requires each mdoc in its own `DeviceResponse`. |
-| 6 | **Read and require `status == 0`.** | Currently never read. Verifying a document inside a response the wallet itself flagged as failed would report success for something the sender did not claim succeeded. |
-| 7 | **`DeviceMac` stays unimplemented, as a typed error.** | foundry accepts only ES256/COSE `-7` (VP-0225/VP-0226). Root `AGENTS.md` §4.4: unimplemented optional features are acceptable; incorrect implementations are not. |
-| 8 | **No change to trust or expiry policy.** | See §8. |
+| 1 | **Verifier leg *and* format internals.** The OpenID4VCI credential envelope is the only deferred piece (§7). | Revised from "verifier leg only" after §1.6. Format internals are not separable: every synthetic mdoc test round-trips through `build_mdoc`, so a verifier that requires conformant shapes needs a builder that emits them. Since `build_mdoc`'s output *is* what foundry issues, this necessarily changes the issued wire format. |
+| 2 | **Be strict, not liberal: do not also accept foundry's current non-conformant shapes.** | The tempting alternative — accept tag-24-or-bare, map-or-bstr, tdate-or-tstr — would let the builder stay untouched and avoid all test churn. Rejected: permanently accepting shapes no wallet emits is the same reflex that produced the bespoke envelope in §1.3, and it would leave the codebase with two live formats and no statement of which is real. |
+| 3 | **No `isomdl` dependency — not even `[dev-dependencies]`.** | Root `AGENTS.md` §3: no vendored third-party crates; prefer extending foundry-owned models over introducing a protocol dependency. Assessed and rejected: `isomdl` 0.2.0 collides on `x509-cert` (0.2 vs 0.3) and `base64` (0.13), imposes `generic-array = "=0.14.7"`, adds a second complete X.509 stack that foundry would never call (trust policy lives in `foundry-core`'s openssl-based `TrustStore`), and has 0 crates.io dependents. Used as a **read-only reference** instead. |
+| 4 | **Drop the bespoke `{mdoc, device_signature}` object; do not accept both shapes.** | No production producer exists, so "accept both" would preserve a shape whose only purpose was passing our own tests, while leaving the real contract ambiguous to the next reader. |
+| 5 | **Add a public `build_device_response()` to `foundry-mdoc::builder`.** | Synthetic tests in three crates need to produce a conformant presentation. The workspace has no `test-util` feature pattern, and `build_mdoc` is already plain-public and consumed cross-crate. |
+| 6 | **Reject a `DeviceResponse` carrying more than one document.** | Today `docs.first()` silently ignores extras — the same defect class `select_presentation` already refuses for presentation arrays. HAIP-0070 independently requires each mdoc in its own `DeviceResponse`. |
+| 7 | **Read and require `status == 0`.** | Currently never read. Verifying a document inside a response the wallet itself flagged as failed would report success for something the sender did not claim succeeded. |
+| 8 | **`DeviceMac` stays unimplemented, as a typed error.** | foundry accepts only ES256/COSE `-7` (VP-0225/VP-0226). Root `AGENTS.md` §4.4: unimplemented optional features are acceptable; incorrect implementations are not. |
+| 9 | **Check validity against `validFrom`…`validUntil`, not `signed`…`validUntil`.** | `validFrom` is present in real MSOs and is the member that bounds document validity; `signed` records when the MSO was signed. Today's check uses `signed` because the struct has no `validFrom` to use. |
+| 10 | **No change to trust or expiry policy.** | See §8. |
 
 ---
 
 ## 4. Design
 
-### 4.1 `foundry-mdoc` — public API
+### 4.1 `foundry-mdoc/src/types.rs` — model the real CBOR
 
 ```rust
-// types.rs — split the existing builder so the transcript is available by value
+/// MobileSecurityObject (ISO/IEC 18013-5 §9.1.2.4).
+///
+/// Transported as `#6.24(bstr .cbor MobileSecurityObject)` in the IssuerAuth
+/// COSE_Sign1 payload; the tag-24 wrapper is handled at the parse site, not
+/// here, because the IssuerAuth signature is computed over the wrapped bytes.
+pub struct MobileSecurityObject {
+    pub version: String,
+    #[serde(rename = "digestAlgorithm")]
+    pub digest_algorithm: String,
+    #[serde(rename = "docType")]
+    pub doc_type: String,
+    #[serde(rename = "valueDigests")]
+    pub value_digests: BTreeMap<String, BTreeMap<u64, Vec<u8>>>,
+    #[serde(rename = "deviceKeyInfo")]
+    pub device_key_info: DeviceKeyInfo,
+    #[serde(rename = "validityInfo")]
+    pub validity_info: ValidityInfo,
+}
+
+/// `deviceKey` is a COSE_Key **map**, not a byte string.
+pub struct DeviceKeyInfo {
+    #[serde(rename = "deviceKey")]
+    pub device_key: ciborium::Value,   // unchanged type; parse site changes
+}
+
+/// All three members are CBOR `tdate` — tag 0 over an RFC 3339 text string.
+/// `ciborium::tag::Required<String, 0>` both requires the tag on the way in and
+/// always emits it on the way out, so builder and verifier cannot drift.
+pub struct ValidityInfo {
+    pub signed: ciborium::tag::Required<String, 0>,
+    #[serde(rename = "validFrom")]
+    pub valid_from: ciborium::tag::Required<String, 0>,
+    #[serde(rename = "validUntil")]
+    pub valid_until: ciborium::tag::Required<String, 0>,
+}
+```
+
+`IssuerSignedItem` keeps its fields; what changes is that it is always
+transported inside `#6.24(bstr …)` and digested over that full encoding
+(§2.3). Its `TODO(interop)` comment is replaced by a statement of that contract.
+
+New helpers, used by both builder and verifier so the two cannot disagree:
+
+```rust
+/// Wrap pre-encoded CBOR as `#6.24(bstr .cbor …)`, returning the full tagged
+/// encoding — the form ISO digests and signs over.
+pub fn tag24_encode(inner_cbor: &[u8]) -> Result<Vec<u8>, String>;
+
+/// Unwrap `#6.24(bstr …)`, returning the inner CBOR bytes. Errors if the value
+/// is not tag 24 over a byte string.
+pub fn tag24_unwrap(value: &ciborium::Value) -> Result<&[u8], String>;
+
+/// The `SessionTranscript` as a `ciborium::Value`, for splicing by value into
+/// `DeviceAuthentication` element [1] without a decode/re-encode round trip.
 pub fn session_transcript_value(
     params: &SessionTranscriptParams,
 ) -> Result<ciborium::Value, String>;
 
-pub fn build_session_transcript(       // unchanged signature; now a thin wrapper
-    params: &SessionTranscriptParams,
-) -> Result<Vec<u8>, String>;
+/// Unchanged signature; now `encode_cbor(&session_transcript_value(params)?)`.
+pub fn build_session_transcript(params: &SessionTranscriptParams) -> Result<Vec<u8>, String>;
 ```
 
+### 4.2 `foundry-mdoc/src/verifier.rs` — split, and parse the real shapes
+
 ```rust
-// verifier.rs
 /// Borrowed structural view of a parsed DeviceResponse. Holds references into
 /// the caller's decoded CBOR rather than owning re-decoded types, so that
 /// `deviceSigned.nameSpaces` can be re-emitted byte-for-byte (§2.2 hazard 1).
-pub struct DeviceResponse<'a> { /* docType, issuerSigned, deviceSigned views */ }
+pub struct DeviceResponse<'a> { /* doc_type, issuer_signed, device_signed views */ }
 
 pub fn parse_device_response(bytes: &[u8]) -> Result<DeviceResponse<'_>, FormatError>;
+
+pub fn verify_issuer_signed(
+    resp: &DeviceResponse<'_>,
+    trust_store: &TrustStore,
+    now_unix: u64,
+) -> Result<IssuerVerified, FormatError>;   // claims + device key coords + x5c + doc_type
 
 pub fn verify_device_auth(
     resp: &DeviceResponse<'_>,
@@ -192,7 +312,7 @@ pub fn verify_device_auth(
     device_key_y: &[u8],
 ) -> Result<(), FormatError>;
 
-pub fn verify_mdoc(
+pub fn verify_mdoc(                        // thin orchestrator, existing call site
     device_response_bytes: &[u8],
     trust_store: &TrustStore,
     session_transcript: &ciborium::Value,
@@ -200,8 +320,44 @@ pub fn verify_mdoc(
 ) -> Result<MdocVerificationResult, FormatError>;
 ```
 
+Behaviour changes inside the issuer half, one per defect:
+
+- **#3** — the IssuerAuth signature is still verified over `sign1.payload`
+  **verbatim** (unchanged, and important not to "fix"); the MSO is then parsed
+  from `tag24_unwrap` of that payload.
+- **#4** — `deviceKey` is re-encoded from its `ciborium::Value` map and passed to
+  `CoseKey::from_slice`, so `kty`/`crv` are still validated. `cbor_value_to_bytes`
+  is no longer used on this path.
+- **#5** — validity is checked as `valid_from <= now <= valid_until`, both parsed
+  RFC 3339 out of the `Required<String, 0>` wrappers.
+- **#6** — each namespace item is `tag24_unwrap`ped to parse the
+  `IssuerSignedItem`, while the digest is computed over the item's **full tagged
+  encoding**. An item whose digest is absent from the MSO or does not match is
+  still dropped (existing behaviour), but an item that is not tag-24 at all is now
+  a structural error rather than a silent skip — silence there is what made
+  defect 6 invisible.
+
+`MdocVerificationResult` is unchanged (`claims`, `device_key_jwk`, `issuer_x5c`,
+`doc_type`).
+
+**Why three functions rather than one.** The captured fixture can never pass
+issuer validation here (§8), so the device-signature half must be verifiable
+*without* the issuer half. A design whose only entry point is "verify everything"
+makes the interop fixture impossible to write — which is how these divergences
+survived. `verify_mdoc` remains a thin orchestrator so the existing call site
+changes minimally.
+
+### 4.3 `foundry-mdoc/src/builder.rs` — emit the real shapes
+
+`build_mdoc` changes to emit: tag-24-wrapped `IssuerSignedItemBytes` with digests
+over the full tagged encoding; a tag-24-wrapped MSO as the IssuerAuth payload; a
+COSE_Key map for `deviceKey`; and tag-0 `tdate` validity values including
+`validFrom`. Its outer `{version, documents:[…]}` envelope is unchanged here —
+that is §7.
+
+New:
+
 ```rust
-// builder.rs
 pub fn build_device_response(
     issuer_signed_mdoc: &[u8],
     doc_type: &str,
@@ -210,63 +366,49 @@ pub fn build_device_response(
 ) -> Result<Vec<u8>, FormatError>;
 ```
 
-Changes from today:
+It emits `deviceSigned.nameSpaces` as `d81841a0` (empty map) and a detached
+`deviceSignature` over `DeviceAuthenticationBytes`, and sets `status: 0`.
 
-- `verify_mdoc` loses `device_signature_cose_sign1_bytes` — the signature now
-  comes from inside the document.
-- `verify_mdoc` takes the transcript as `&ciborium::Value`, not `&[u8]`. Element
-  [1] of `DeviceAuthentication` must be spliced **by value**; accepting bytes
-  would force a decode-then-re-encode round trip on the one structure least able
-  to tolerate perturbation.
-- `MdocVerificationResult` is unchanged (`claims`, `device_key_jwk`,
-  `issuer_x5c`, `doc_type`).
-
-**Why three functions rather than one.** The captured fixture can never pass
-issuer validation here (§8), so the device-signature half must be verifiable
-*without* the issuer half. A design whose only entry point is "verify everything"
-makes the interop fixture impossible to write — which is how divergence #1
-survived. `verify_mdoc` remains a thin orchestrator over the three so the
-existing call site changes minimally.
-
-### 4.2 `foundry-verifier` — envelope and candidate loop
+### 4.4 `foundry-verifier` — envelope and candidate loop
 
 - `SelectedPresentation::MsoMdoc` collapses from
   `{ mdoc_b64, device_signature_b64 }` to a single `device_response_b64: &str`.
 - The mso_mdoc arm of `select_presentation` accepts a **string**; a non-string
   presentation produces a structural error citing OpenID4VP L2825-L2828 and
   naming `DeviceResponse`.
-- The DC API Origin candidate loop restructures: `parse_device_response` and the
-  issuer half run **once**; only `verify_device_auth` repeats per candidate
-  Origin. Today the loop re-runs full chain validation, MSO validity and digest
-  matching for every configured Origin in order to retry one signature check.
+- The DC API Origin candidate loop restructures: `parse_device_response` and
+  `verify_issuer_signed` run **once**; only `verify_device_auth` repeats per
+  candidate Origin. Today the loop re-runs full chain validation, MSO validity
+  and digest matching for every configured Origin to retry one signature check.
 
-### 4.3 Data flow
+### 4.5 Data flow
 
 ```text
 vp_token["av"][0] : base64url string
-  → B64URL decode                                   → DeviceResponse CBOR bytes
-  → parse_device_response                            → structural checks (§3 decisions 5-6)
-  → verify_issuer_signed (once)                      → IssuerAuth chain, MSO validity,
-                                                       digest matching, device key
+  → B64URL decode                        → DeviceResponse CBOR bytes
+  → parse_device_response                → version, exactly one document, status == 0
+  → verify_issuer_signed (once)          → IssuerAuth chain + signature over the
+                                           tag-24 payload; MSO from tag24_unwrap;
+                                           validFrom..validUntil; digests over full
+                                           tag-24 item encodings; deviceKey from map
   → for each candidate Origin:
         session_transcript_value(DcApi{origin, nonce, thumbprint})
-        verify_device_auth(resp, transcript, device_key)
+        verify_device_auth(resp, transcript, device_key)   // DeviceAuthenticationBytes
   → first success wins; all failures → last error
   → MdocVerificationResult → cbor_value_to_json → DCQL match → status check
 ```
 
-### 4.4 Error handling
+### 4.6 Error handling
 
-All of the following are **structural** and surface as HTTP 400 per root
-`AGENTS.md` §4.3, as typed `FormatError` values — no panics, no `.unwrap()`
-(root `AGENTS.md` §4.1):
+Structural, surfacing as HTTP 400 per root `AGENTS.md` §4.3, as typed
+`FormatError` values — no panics, no `.unwrap()` (root `AGENTS.md` §4.1):
 
 - malformed outer CBOR; missing `version` / `documents` / `status`
-- more than one document (§3 decision 5)
-- `status != 0` (§3 decision 6)
+- more than one document (§3 decision 6); `status != 0` (§3 decision 7)
 - missing `deviceSigned`, `deviceAuth`, or `deviceSignature`
-- `deviceMac` present instead of `deviceSignature` → explicit "unsupported"
-  (§3 decision 7)
+- `deviceMac` instead of `deviceSignature` → explicit "unsupported" (§3 decision 8)
+- IssuerAuth payload not tag-24; a namespace item not tag-24 (defect 6)
+- `deviceKey` not a COSE_Key map; `validityInfo` member missing tag 0
 - unsupported COSE `alg` on either signature
 
 Device-signature mismatch remains `FormatError::KeyBinding`, folded into the
@@ -280,32 +422,39 @@ Device-signature mismatch remains `FormatError::KeyBinding`, folded into the
 The gate is root `AGENTS.md` §5.1 — whole workspace, `cargo nextest run`, never
 `cargo test`.
 
-1. **Pinned cross-implementation vectors.** `DeviceAuthenticationBytes` hex,
-   derived offline from the two reference implementations of §2 and pinned as a
-   literal. This follows the existing precedent in
-   `crates/foundry-mdoc/src/types.rs`, where the OpenID4VP `SessionTranscript`
-   vectors are pinned via a `spec_hex(…)` helper. Assert the intermediate
-   `DeviceAuthentication` encoding alongside the final tag-24 wrapping, for the
-   same reason the transcript test asserts `OpenID4VPHandoverInfo` separately: a
-   regression should say *which* layer drifted.
-2. **Interop golden fixture.** The captured real `DeviceResponse` plus its
+1. **Pinned digest vector (proven).** `sha256` of the captured item's full tag-24
+   encoding equals the MSO's `valueDigests[4]`, with the literals of §2.3. This
+   pins defect 6's resolution against real bytes, and asserts the *negative* too:
+   the inner-CBOR digest must **not** match.
+2. **Pinned `DeviceAuthenticationBytes` vector (derived).** Expected hex derived
+   offline from the two reference implementations of §2 and pinned as a literal,
+   following the existing `spec_hex(…)` precedent in
+   `crates/foundry-mdoc/src/types.rs`. Assert the intermediate
+   `DeviceAuthentication` encoding alongside the tag-24 wrapping, so a regression
+   says which layer drifted.
+3. **Real-shape parse tests.** The captured `DeviceResponse` parses: tag-24 MSO
+   unwraps, `deviceKey` map yields the expected coords, `validityInfo` tag-0
+   values parse, and the disclosed `age_over_18 = true` claim is reconstructed —
+   all without a trust store.
+4. **Interop golden fixture.** The captured `DeviceResponse` plus its
    transaction's `SessionTranscript`, asserting `verify_device_auth` succeeds.
-   PKI-free by construction, so the fixture's expired and unanchored issuer chain
-   is irrelevant. This is the first test in the workspace that proves mdoc
-   interoperability rather than self-consistency. **Blocked on §9.**
-3. **Synthetic round trip.** `build_device_response` → `verify_mdoc`, migrating
-   the existing mdoc tests in `crates/foundry-mdoc/src/verifier.rs`,
-   `crates/foundry-verifier/src/verify.rs`,
+   PKI-free, so the expired and unanchored issuer chain is irrelevant. First test
+   in the workspace proving mdoc interoperability rather than self-consistency.
+   **Blocked on §9.**
+5. **Synthetic round trip.** `build_mdoc` → `build_device_response` →
+   `verify_mdoc`, migrating the existing mdoc tests in
+   `crates/foundry-mdoc/src/verifier.rs`, `crates/foundry-verifier/src/verify.rs`,
    `crates/foundry-verifier/tests/conformance_vp.rs` and
    `crates/foundry/tests/wallet_verification.rs`.
-4. **Anti-regression on the old construction.** A device signature computed over
-   the bare `SessionTranscript` (today's behaviour) MUST now fail. Without this,
-   nothing stops a future edit reintroducing §1.5.
-5. **Byte-preservation.** A `deviceSigned.nameSpaces` whose re-encoding would
+6. **Anti-regression, per defect.** Each of the six old behaviours must now fail:
+   the bespoke envelope; a device signature over the bare `SessionTranscript`; a
+   bare (untagged) MSO payload; a byte-string `deviceKey`; text-string validity
+   values; an untagged namespace item. Without these, the migration in test 5
+   could silently preserve any of them.
+7. **Byte-preservation.** A `deviceSigned.nameSpaces` whose re-encoding would
    differ from its received bytes MUST still verify — pinning hazard 1 of §2.2.
-6. **Envelope rejection.** The bespoke object shape, a bare non-string, a
-   multi-document response and `status != 0` each produce the expected typed
-   structural error.
+8. **Envelope rejection.** Multi-document response and `status != 0` each produce
+   the expected typed structural error.
 
 ---
 
@@ -315,44 +464,48 @@ The gate is root `AGENTS.md` §5.1 — whole workspace, `cargo nextest run`, nev
   `AGENTS.md` §4.4's external-reference rule. Records the document's exact title
   and revision, why no copy is in-tree (paid standard, redistribution
   forbidden), where a reader obtains one, and the interface facts foundry relies
-  on **restated rather than quoted**, plus the two derivation sources at their
-  pinned commits. A stub does not acquire the precedence of a standards-track
-  specification.
+  on **restated rather than quoted** — the §2.1 structure, the §2.3 internals —
+  plus the two derivation sources at their pinned commits, and which facts are
+  derived versus proven. A stub does not acquire the precedence of a
+  standards-track specification.
 - **Row added** to §4.4's governing-documents table in the root `AGENTS.md`.
 - `crates/foundry-mdoc/AGENTS.md`: rewrite Gotchas divergence #1; **delete
   divergence #2**, which is stale — the `SessionTranscript` / `OpenID4VPHandover`
   work landed and VP-0229…VP-0246 are all `conforming`, pinned byte-for-byte
-  against published vectors. Update the module map and public-entry-point list.
+  against published vectors. Update the module map, the public-entry-point list,
+  and the "Namespace/digest matching" and "CBOR canonical encoding" gotchas,
+  which describe the pre-change behaviour.
 - `crates/foundry-verifier/AGENTS.md`: replace the per-format payload description
   of the bespoke mdoc shape.
 - `docs/conformance/openid4vc-conformance.md`:
   - `HAIP-0070` → `conforming`, citing the new fixture and vector tests.
-  - **New `GAP-VCI-xx`** for the deferred issuance leg (§7).
+  - **New `GAP-VCI-<next free id>`** for the deferred credential envelope (§7).
   - `VCI-0176` evidence corrected: it justifies the base64url *encoding* only,
-    not the CBOR *structure*.
+    not the CBOR *structure*. Re-check `VCI-0071` and `VCI-0176` against the new
+    credential bytes, since §4.3 changes what foundry issues.
 
 ---
 
-## 7. Deferred: the issuance leg
+## 7. Deferred: the OpenID4VCI credential envelope
 
-`build_mdoc` emits `{version, documents: [{docType, issuerSigned}]}` — a
+`build_mdoc` returns `{version, documents: [{docType, issuerSigned}]}` — a
 `DeviceResponse`-shaped wrapper minus `status` and `deviceSigned` — and
 `handle_credential_request` base64url-encodes that whole envelope as the
 OpenID4VCI `credential`. OpenID4VCI L2249 requires the `credential` claim to be
 the base64url-encoded CBOR **`IssuerSigned`** structure: the inner object only.
 
-Deliberately out of scope here (§3 decision 1). Recorded as a new gap so it is carried
-honestly rather than silently. Consequence to be aware of: a foundry-issued mdoc
-is not loadable as an mdoc credential by a conformant wallet, so mdoc issuance
-and mdoc presentation cannot yet be exercised as one end-to-end flow against
-third-party software.
+Deliberately out of scope (§3 decision 1) and recorded as a new gap. Note what
+this change *does* alter: after §4.3, the bytes inside that envelope become
+ISO-conformant even though the envelope around them does not. A wallet still
+cannot load a foundry-issued mdoc, so mdoc issuance and mdoc presentation remain
+un-exercisable as one end-to-end flow against third-party software.
 
 ---
 
 ## 8. Deferred: trust and expiry policy
 
 The captured credential fails issuer validation here for two independent reasons
-that this design does not address:
+this design does not address:
 
 1. Its chain roots at `[Test] mDL Reference Implementation IACA`, which is not in
    `trust_anchors`. There is exactly one trust store, built from
@@ -366,13 +519,13 @@ on the envelope and starts failing on issuer trust — a truthful rejection of a
 credential that is genuinely expired and genuinely unanchored in this deployment.
 Making it verify requires a security-policy decision (a trust-relaxation switch,
 with its own justification and its own conformance rows) or re-issuance under
-foundry's own PKI, which depends on §7. Neither belongs in a CBOR-parsing change.
+foundry's own PKI, which depends on §7. Neither belongs in a format change.
 
 ---
 
 ## 9. Open item: capturing the golden fixture
 
-Test 2 in §5 needs the exact `SessionTranscript` of a live transaction. The
+Test 4 in §5 needs the exact `SessionTranscript` of a live transaction. The
 transcript is derived from `tx.nonce`, the Origin and the response-encryption key
 thumbprint; the original transaction has aged out of storage
 (`transaction_ttl_secs: 600`), and neither the nonce nor the thumbprint was
@@ -381,21 +534,22 @@ logged.
 Required, in order:
 
 1. Add a permanent diagnostic to the mdoc branch of `verify.rs`: the candidate
-   `SessionTranscript` hex, gated on **both** `foundry_core::obs::sensitive_enabled()`
-   **and** `trace` level, per root `AGENTS.md` §4.5. This matches the existing
-   treatment of the decrypted response payload and is independently useful for
-   interop debugging.
+   `SessionTranscript` hex, gated on **both**
+   `foundry_core::obs::sensitive_enabled()` **and** `trace` level, per root
+   `AGENTS.md` §4.5. This matches the existing treatment of the decrypted
+   response payload and is independently useful for interop debugging.
 2. One fresh `av` run against the wallet, capturing the transcript hex alongside
    the `DeviceResponse`.
-3. Commit both as a fixture with provenance recorded: wallet, date, docType,
-   and the fact that its issuer chain is expired and unanchored by design.
+3. Commit both as a fixture with provenance recorded: wallet, date, docType, and
+   the fact that its issuer chain is expired and unanchored by design.
 
-Implementation is **not** blocked on this — §2 pins the construction from two
-independent sources, and tests 1 and 3-6 are writable immediately. Only the
-interop *proof* is blocked. If the capture never happens, this change ships with
-cross-implementation vectors and synthetic round trips but **no real-wallet
-evidence**, which is a materially weaker position and must be stated as such in
-the change record.
+Implementation is **not** blocked on this. Tests 1, 3 and 6 already run against
+the captured bytes without a transcript, §2.1 is pinned by two independent
+sources, and tests 2, 5, 7 and 8 are writable immediately. Only the end-to-end
+device-signature proof is blocked. If the capture never happens, this change
+ships with proven `IssuerSigned` internals, derived `DeviceAuthentication`
+vectors and synthetic round trips, but **no real-wallet proof of the device
+signature** — which must be stated as such in the change record.
 
 ---
 
@@ -403,8 +557,10 @@ the change record.
 
 | Risk | Mitigation |
 | --- | --- |
-| Hand-rolled construction is subtly wrong; no live oracle. | Pinned vectors from two independent implementations (§5 test 1) plus the interop fixture (§5 test 2). |
-| `ciborium` re-encoding perturbs `deviceSigned.nameSpaces`. | Borrowed views in `DeviceResponse<'a>`; explicit byte-preservation test (§5 test 5). |
+| `DeviceAuthentication` is derived, not proven; no live oracle. | Two independent implementations agreeing at pinned commits (§2.1), pinned vectors (§5 test 2), and the interop fixture (§5 test 4) once §9 lands. |
+| Changing `build_mdoc` changes issued credential bytes. | Intended (§3 decision 1) and called out in §6 as a `VCI-0071`/`VCI-0176` re-check. No stored-credential migration exists to break — issuance is demo-stage. |
+| Six simultaneous format changes make a failure hard to localise. | Per-defect anti-regression tests (§5 test 6) and per-layer vector assertions (§5 tests 1-2), so each defect has an independent witness. |
+| `ciborium` re-encoding perturbs `deviceSigned.nameSpaces`. | Borrowed views in `DeviceResponse<'a>`; explicit byte-preservation test (§5 test 7). |
 | Transcript decode/re-encode drift. | `session_transcript_value` returns the `Value` directly; no round trip. Existing published-vector tests continue to pin the byte form. |
-| Migrating ~8-10 mdoc tests hides a real regression behind churn. | Anti-regression test (§5 test 4) asserts the *old* construction now fails, so the migration cannot silently preserve it. |
-| ISO structure derived from implementations, not the standard. | Two independent sources agreeing, both pinned; recorded as a §4.4 reference stub, explicitly not granted specification precedence. |
+| `tag24_encode`/`tag24_unwrap` used inconsistently between builder and verifier. | One shared pair of helpers in `types.rs` (§4.1), exercised from both sides by the round-trip test (§5 test 5). |
+| ISO internals derived from implementations and one capture, not the standard. | §2 separates proven from derived facts and records both; the §6 reference stub carries that distinction forward rather than flattening it. |
