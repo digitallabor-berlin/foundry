@@ -350,7 +350,14 @@ pub async fn verify_vp_response(
             let mut result = VerificationResult {
                 verified: false,
                 checks,
-                // Nothing was verified, so there is no credential to report.
+                // Genuinely empty, not a convenience. This arm is now reachable
+                // only by transaction-level failures -- JWE decryption, a
+                // missing `vp_token`, trust-store construction,
+                // `select_presentations` -- all of which happen before any
+                // credential is examined. A per-credential failure no longer
+                // arrives here: it is recorded on its own credential and
+                // returned through `deferred`, so its neighbours' verdicts
+                // survive.
                 credentials: Vec::new(),
             };
             // Still derived: one check, not passed (root AGENTS.md §4.2).
@@ -590,37 +597,47 @@ struct CredentialVerifyCtx<'a> {
     client_id: &'a str,
 }
 
-/// Verify one credential from a `vp_token` and collect its checks.
+/// What the format-specific signature stage produces on success.
 ///
-/// Returns the credential record plus, when the status-list fetch was
-/// unavailable, its detail message. That is deliberately **not** an `Err`: the
-/// caller verifies every credential before deciding anything (a bad signature on
-/// one credential must not hide another's verdict), and a network fault still
-/// has to become HTTP 502 afterwards rather than a policy `passed: false` --
-/// "I could not determine whether this is revoked" is not "this is revoked".
-async fn verify_one_credential(
+/// Extracted so `verify_one_credential` can convert this stage's `Err` into a
+/// failed `CheckResult` in exactly one place, instead of every fallible call
+/// inside it having the option of `?`-ing out of the per-credential loop.
+struct FormatStage {
+    /// This credential's disclosed claims, never merged with another's.
+    claims: serde_json::Map<String, Value>,
+    /// The verified KB-JWT payload. `None` for `mso_mdoc`, which has no KB-JWT
+    /// (OpenID4VP L3144).
+    kb_jwt_payload: Option<Value>,
+    /// The mdoc `docType`, for DCQL doctype matching only. `None` for SD-JWT VC,
+    /// whose queries carry no `doctype_value`.
+    doc_type: Option<String>,
+}
+
+/// Verify one credential's format-specific signature stage.
+///
+/// `credential_type` is an out-parameter rather than part of the return value on
+/// purpose: it is filled as early as each format allows, so it is still
+/// populated when this function returns `Err`. A failed credential an operator
+/// cannot name is the defect that field exists to fix.
+async fn verify_credential_payload(
     ctx: &CredentialVerifyCtx<'_>,
-    query_id: &str,
     selected: SelectedPresentation<'_>,
-    resolver: &dyn StatusListResolver,
-) -> Result<(PresentedCredential, Option<String>), VerificationError> {
-    let presented_format = selected.format();
-    let mut checks: Vec<CheckResult> = Vec::new();
+    credential_type: &mut Option<String>,
+) -> Result<FormatStage, VerificationError> {
     let mut disclosed_claims = serde_json::Map::new();
     // Populated only for SD-JWT VC presentations, whose Key Binding JWT carries
     // `transaction_data_hashes` (L3144). An mdoc presentation has no KB-JWT, so
     // this stays `None` for that format -- checked below.
     let mut kb_jwt_payload: Option<Value> = None;
 
-    // Two distinct values, deliberately not one: `doc_type` feeds DCQL doctype
-    // matching and MUST stay `None` for SD-JWT VC, whose queries carry no
-    // `doctype_value`. `credential_type` is the type this credential ASSERTS,
-    // reported per credential so a verdict can be named.
-    let (doc_type, credential_type): (Option<String>, Option<String>) = match selected {
+    // `doc_type` feeds DCQL doctype matching and MUST stay `None` for SD-JWT VC,
+    // whose queries carry no `doctype_value`. The asserted credential type is a
+    // separate concern and travels through the out-parameter.
+    let doc_type: Option<String> = match selected {
         SelectedPresentation::SdJwtVc(jwt_str) => {
             // Read from the presentation before it is verified, so this cannot
             // become conditional on the verdict it helps explain.
-            let asserted_vct = asserted_vct_unverified(jwt_str);
+            *credential_type = asserted_vct_unverified(jwt_str);
 
             let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
                 jwt_str,
@@ -630,12 +647,6 @@ async fn verify_one_credential(
                 ctx.now_unix,
             )
             .map_err(|e| VerificationError::Failed(e.to_string()))?;
-
-            checks.push(CheckResult {
-                check: "sd_jwt_vc_signature_and_kb_jwt".to_string(),
-                passed: true,
-                detail: None,
-            });
 
             // Say out loud when a presentation was only accepted because the
             // operator enabled the draft-24 accommodation, so the flag can be
@@ -663,7 +674,7 @@ async fn verify_one_credential(
                     disclosed_claims.insert(k, v);
                 }
             }
-            (None, asserted_vct)
+            None
         }
         SelectedPresentation::MsoMdoc {
             device_response_b64,
@@ -675,6 +686,11 @@ async fn verify_one_credential(
                 .map_err(|e| VerificationError::Failed(format!("DeviceResponse: {e}")))?;
             let resp = foundry_mdoc::verifier::parse_device_response(&decoded)
                 .map_err(|e| VerificationError::Failed(format!("DeviceResponse: {e}")))?;
+
+            // Unverified at this point -- read from the DeviceResponse envelope
+            // so it is available if `verify_issuer_signed` below rejects the
+            // chain. Replaced with the authenticated MSO `docType` on success.
+            *credential_type = Some(resp.doc_type().to_string());
 
             // OpenID4VP L2870 (redirects) / L2999 (DC API): the third
             // `…HandoverInfo` element is the RFC 7638 thumbprint of the
@@ -772,6 +788,10 @@ async fn verify_one_credential(
                         VerificationError::Failed(format!("mdoc verification failed: {e}"))
                     })?;
 
+            // Now authenticated: this docType comes from the signed MSO, and may
+            // differ from the envelope copy read above, which nothing commits to.
+            *credential_type = Some(issuer.doc_type.clone());
+
             let mut accepted = false;
             let mut last_err = None;
             for params in &candidates {
@@ -814,12 +834,6 @@ async fn verify_one_credential(
                 doc_type: issuer.doc_type,
             };
 
-            checks.push(CheckResult {
-                check: "mdoc_issuer_auth_and_device_signature".to_string(),
-                passed: true,
-                detail: None,
-            });
-
             for (ns, elements) in mdoc_res.claims {
                 let mut ns_obj = serde_json::Map::new();
                 for (k, v) in elements {
@@ -827,13 +841,125 @@ async fn verify_one_credential(
                 }
                 disclosed_claims.insert(ns, Value::Object(ns_obj));
             }
-            // Authenticated: this docType comes from the signed MSO, so it is
-            // both the DCQL matching input and the asserted type.
-            (Some(mdoc_res.doc_type.clone()), Some(mdoc_res.doc_type))
+            Some(mdoc_res.doc_type)
         }
     };
 
-    let claims_value = Value::Object(disclosed_claims);
+    Ok(FormatStage {
+        claims: disclosed_claims,
+        kb_jwt_payload,
+        doc_type,
+    })
+}
+
+/// Name the credential query a per-credential error belongs to, without
+/// changing the error's kind.
+///
+/// With N credentials a bare "mdoc verification failed" does not say whose. A
+/// DCQL credential query id is operator-authored request structure, not a holder
+/// value, so naming it is safe (root AGENTS.md §4.5) -- the status-unavailability
+/// path already did exactly this.
+///
+/// `error.kind` is operator-facing API that operators alert on (§4.5), so a
+/// variant is never swapped for a more convenient one. The three
+/// `#[error(transparent)]` variants wrap a foreign error whose `Display` is the
+/// whole message and have no field to prefix, so they are returned unchanged;
+/// the per-credential log record names the credential in those cases.
+///
+/// Exhaustive with no catch-all, for the same reason `check_name_for` is: a new
+/// variant should be a deliberate decision, not a silent fallthrough.
+fn with_credential_context(query_id: &str, err: VerificationError) -> VerificationError {
+    let prefixed = |detail: String| format!("credential query '{query_id}': {detail}");
+    match err {
+        VerificationError::Failed(d) => VerificationError::Failed(prefixed(d)),
+        VerificationError::StatusUnavailable(d) => {
+            VerificationError::StatusUnavailable(prefixed(d))
+        }
+        VerificationError::Crypto(d) => VerificationError::Crypto(prefixed(d)),
+        VerificationError::Dcql(d) => VerificationError::Dcql(prefixed(d)),
+        VerificationError::Decryption(d) => VerificationError::Decryption(prefixed(d)),
+        VerificationError::Serialization(d) => VerificationError::Serialization(prefixed(d)),
+        VerificationError::NotFound(d) => VerificationError::NotFound(prefixed(d)),
+        VerificationError::InvalidState(d) => VerificationError::InvalidState(prefixed(d)),
+        VerificationError::InvalidRequest(d) => VerificationError::InvalidRequest(prefixed(d)),
+        e @ (VerificationError::Storage(_)
+        | VerificationError::CoreCrypto(_)
+        | VerificationError::Trust(_)) => e,
+    }
+}
+
+/// Verify one credential from a `vp_token` and collect its checks.
+///
+/// **Returns no `Result`, deliberately.** Root AGENTS.md §4.2 defines `verified`
+/// as the conjunction of the checks performed, which is only meaningful when
+/// they were all performed, and "PID signature bad, mDL fine" is a far more
+/// useful operator verdict than "PID signature bad, mDL unknown". That was
+/// already the documented intent; it was not the behaviour, because this
+/// function returned `Result` and its caller reached for `?`. The type won the
+/// argument with the comment. A non-`Result` return makes the defect
+/// unrepresentable rather than merely commented against.
+///
+/// The accompanying `Option<VerificationError>` is how a failure still reaches
+/// the HTTP layer: a bad signature is a structural failure and must stay a 400
+/// (root AGENTS.md §4.3), never a policy `200 verified:false`. The caller parks
+/// it, finishes the loop, and returns it after every credential has a verdict.
+async fn verify_one_credential(
+    ctx: &CredentialVerifyCtx<'_>,
+    query_id: &str,
+    selected: SelectedPresentation<'_>,
+    resolver: &dyn StatusListResolver,
+) -> (PresentedCredential, Option<VerificationError>) {
+    let presented_format = selected.format();
+    let format = match presented_format {
+        PresentedFormat::SdJwtVc => "dc+sd-jwt",
+        PresentedFormat::MsoMdoc => "mso_mdoc",
+    };
+    // The format's own check name, per root AGENTS.md §4.2's closed
+    // per-credential vocabulary. Every failure in the signature stage is
+    // recorded under it, with the real reason in `detail`.
+    let format_check = match presented_format {
+        PresentedFormat::SdJwtVc => "sd_jwt_vc_signature_and_kb_jwt",
+        PresentedFormat::MsoMdoc => "mdoc_issuer_auth_and_device_signature",
+    };
+
+    let mut checks: Vec<CheckResult> = Vec::new();
+    let mut credential_type: Option<String> = None;
+
+    let stage = match verify_credential_payload(ctx, selected, &mut credential_type).await {
+        Ok(stage) => {
+            checks.push(CheckResult {
+                check: format_check.to_string(),
+                passed: true,
+                detail: None,
+            });
+            stage
+        }
+        Err(err) => {
+            checks.push(CheckResult {
+                check: format_check.to_string(),
+                passed: false,
+                detail: Some(foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX)),
+            });
+            // The remaining checks are SKIPPED, not run against empty claims.
+            // `dcql_match: false` and `status_check: false` would report three
+            // failures where one occurred, two of them misattributed: "DCQL
+            // mismatch" when the truth is "we never obtained claims".
+            return (
+                PresentedCredential {
+                    query_id: query_id.to_string(),
+                    format: format.to_string(),
+                    credential_type,
+                    claims: Value::Object(serde_json::Map::new()),
+                    checks,
+                },
+                Some(with_credential_context(query_id, err)),
+            );
+        }
+    };
+
+    let claims_value = Value::Object(stage.claims);
+    let kb_jwt_payload = stage.kb_jwt_payload;
+    let doc_type = stage.doc_type;
 
     // Transaction Data binding (OpenID4VP L1523/L3144), only when the Verifier
     // requested transaction_data for this transaction. Already multi-credential
@@ -873,28 +999,28 @@ async fn verify_one_credential(
     // Token Status List revocation, against THIS credential's claims. Handing it
     // a map merged across credentials would read one credential's
     // `status.status_list` while reporting another's verdict.
-    let status_unavailable =
-        match check_status(&claims_value, ctx.trust_store, resolver, ctx.now_unix).await {
-            Ok(check) => {
-                checks.push(check);
-                None
-            }
-            Err(VerificationError::StatusUnavailable(detail)) => Some(detail),
-            Err(other) => return Err(other),
-        };
+    //
+    // Unavailability is NOT a policy failure -- "I could not determine whether
+    // this is revoked" is not "this is revoked" -- so no `status_check` record is
+    // pushed and the fault travels as an error for the caller's precedence rule
+    // to weigh. Every other `check_status` error travels the same way: before
+    // verify-all only `StatusUnavailable` was parked and the rest propagated with
+    // `?`, which is exactly the fail-fast this function's return type now forbids.
+    let mut deferred: Option<VerificationError> = None;
+    match check_status(&claims_value, ctx.trust_store, resolver, ctx.now_unix).await {
+        Ok(check) => checks.push(check),
+        Err(err) => deferred = Some(with_credential_context(query_id, err)),
+    }
 
     let credential = PresentedCredential {
         query_id: query_id.to_string(),
-        format: match presented_format {
-            PresentedFormat::SdJwtVc => "dc+sd-jwt".to_string(),
-            PresentedFormat::MsoMdoc => "mso_mdoc".to_string(),
-        },
+        format: format.to_string(),
         credential_type,
         claims: claims_value,
         checks,
     };
 
-    Ok((credential, status_unavailable))
+    (credential, deferred)
 }
 
 /// Did the wallet answer every credential query the request asked for?
@@ -1101,6 +1227,10 @@ async fn do_verify_vp_response(
     //    performed, which is only meaningful when they were all performed, and
     //    "PID signature bad, mDL fine" is a far more useful operator verdict
     //    than "PID signature bad, mDL unknown".
+    //
+    //    This is enforced by `verify_one_credential`'s return type, not by this
+    //    comment. It previously returned `Result` and this loop used `?`, so the
+    //    comment described an intent the type defeated.
     let selected = select_presentations(vp_token, &tx.dcql_query)?;
     let ctx = CredentialVerifyCtx {
         config,
@@ -1113,25 +1243,22 @@ async fn do_verify_vp_response(
     };
 
     let mut credentials = Vec::with_capacity(selected.len());
-    let mut deferred: Option<VerificationError> = None;
+    // EVERY credential's failure, not just the one that decides the response.
+    //
+    // Keeping only the winner loses information: a status-list unavailability
+    // pushes no per-credential `status_check` (unavailability is not a policy
+    // verdict), so if a crypto failure outranks it for the returned error, the
+    // unavailability would be recorded absolutely nowhere -- neither on its
+    // credential nor at the top level. Precedence decides the HTTP status; it
+    // must not decide what gets reported.
+    let mut faults: Vec<VerificationError> = Vec::new();
 
     for (query_id, payload) in selected {
-        let (credential, status_unavailable) =
-            verify_one_credential(&ctx, &query_id, payload, resolver).await?;
-
-        // First unavailability wins; the rest of the loop still runs so the
-        // operator keeps every other credential's verdict. Naming the credential
-        // matters: with N credentials a bare "status list unreachable" does not
-        // say whose.
-        if deferred.is_none()
-            && let Some(detail) = status_unavailable
-        {
-            deferred = Some(VerificationError::StatusUnavailable(format!(
-                "credential query '{query_id}': {detail}"
-            )));
-        }
-
+        let (credential, err) = verify_one_credential(&ctx, &query_id, payload, resolver).await;
         credentials.push(credential);
+        if let Some(err) = err {
+            faults.push(err);
+        }
     }
 
     // 4. Set-level policy: did every requested credential query get answered?
@@ -1146,13 +1273,45 @@ async fn do_verify_vp_response(
     //    a transaction that returned 502 -- a lie the admin console would render
     //    faithfully. Record the fault as a check so the verdict stays derived and
     //    honest, exactly as the wrapper's error arm already does.
-    if let Some(ref err) = deferred {
+    //
+    //    StatusUnavailable ONLY. Every other per-credential failure already has
+    //    a per-credential record from `verify_one_credential`, so adding a
+    //    top-level one would double-count one fault and inflate `failed_checks`.
+    //    One record per unavailability, and ONLY for unavailability -- every
+    //    other per-credential failure already has a per-credential record from
+    //    `verify_one_credential`, so a top-level copy would double-count one
+    //    fault and inflate `failed_checks`.
+    for err in faults
+        .iter()
+        .filter(|e| matches!(e, VerificationError::StatusUnavailable(_)))
+    {
         checks.push(CheckResult {
             check: check_name_for(err).to_string(),
             passed: false,
             detail: Some(foundry_core::obs::truncate(&err.to_string(), DETAIL_MAX)),
         });
     }
+
+    // 5b. Pick the ONE error that decides the response. Precedence (root
+    //     AGENTS.md §4.3): a structural/crypto failure (400) outranks a
+    //     status-list unavailability (502), because a bad signature is
+    //     deterministic and answering 502 would invite the wallet to retry a
+    //     presentation that can never succeed. Within one class the incumbent
+    //     wins, so the first credential in DCQL declaration order is reported.
+    //
+    //     This decides only what the WALLET is told. Step 5 has already recorded
+    //     every unavailability for the operator, so choosing a winner here can no
+    //     longer make a fault disappear -- which it did when a single slot held
+    //     both roles.
+    let deferred = faults.into_iter().reduce(|incumbent, challenger| {
+        let incumbent_is_status = matches!(incumbent, VerificationError::StatusUnavailable(_));
+        let challenger_is_status = matches!(challenger, VerificationError::StatusUnavailable(_));
+        if incumbent_is_status && !challenger_is_status {
+            challenger
+        } else {
+            incumbent
+        }
+    });
 
     // 6. Overall verdict: the conjunction over EVERY check, at both levels
     //    (root AGENTS.md §4.2). Derived, never assigned.
@@ -2559,6 +2718,29 @@ mod tests {
     /// `test_verify_vp_response_mdoc_presentation` in every respect except the
     /// anchor mismatch, so the only reason it can fail is issuer trust.
     async fn run_unanchored_mdoc_presentation() -> Result<VerificationResult, VerificationError> {
+        run_unanchored_mdoc_presentation_with_tx().await.0
+    }
+
+    /// The PERSISTED result of the same presentation.
+    ///
+    /// That is what an operator sees in the admin console, and it is reachable
+    /// only through `tx.result`: the call itself returns `Err`, because an
+    /// unanchored issuer chain is a structural failure (root AGENTS.md §4.3).
+    async fn run_unanchored_mdoc_presentation_reporting_result() -> VerificationResult {
+        let (_, tx) = run_unanchored_mdoc_presentation_with_tx().await;
+        tx.result
+            .expect("the result is persisted even on the error path")
+    }
+
+    /// The shared body of the two helpers above, handing back the mutated
+    /// transaction as well as the call's own outcome. One fixture rather than two
+    /// copies: a duplicated PKI/mdoc/transcript construction would be free to
+    /// drift, and then "identical except the anchor mismatch" would stop being
+    /// true without anything failing.
+    async fn run_unanchored_mdoc_presentation_with_tx() -> (
+        Result<VerificationResult, VerificationError>,
+        VerificationTransaction,
+    ) {
         // Two independent CAs: the trust store carries #1, the credential is
         // signed under #2's leaf.
         let (trusted_root_pem, _, _) = test_pki();
@@ -2634,7 +2816,8 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await;
+        (res, tx)
     }
 
     /// The candidate `SessionTranscript` diagnostic MUST survive an issuer-trust
@@ -2963,6 +3146,363 @@ mod tests {
         assert_eq!(asserted_vct_unverified("a.!!!not-base64!!!.c"), None);
         let no_vct = B64URL.encode(br#"{"iss":"x"}"#);
         assert_eq!(asserted_vct_unverified(&format!("a.{no_vct}.c")), None);
+    }
+
+    /// The reported defect, pinned. A two-credential `vp_token` where the mdoc's
+    /// issuer chain has no configured trust anchor must still report the SD-JWT
+    /// VC credential's passing verdict.
+    ///
+    /// Before this, `verify_one_credential`'s error propagated through `?` and
+    /// abandoned the loop, so the credential verified FIRST -- which had already
+    /// passed -- was discarded along with it, and the only log line named
+    /// neither credential. The comment above the loop claimed verify-all; the
+    /// return type said fail-fast, and the type won.
+    #[tokio::test]
+    async fn one_credentials_bad_chain_does_not_hide_anothers_passing_verdict() {
+        // The trust store carries CA #1; the mdoc is signed under CA #2's leaf,
+        // while the SD-JWT VC is signed under CA #1's -- so exactly one
+        // credential is untrusted and nothing else differs.
+        let (trusted_root_pem, trusted_leaf_cert, trusted_leaf_key) = test_pki();
+        let (_, foreign_leaf_cert, foreign_leaf_key) = test_pki();
+        let ca_str = String::from_utf8(trusted_root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let trusted_signer =
+            FileSigner::from_pem(&trusted_leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let foreign_signer =
+            FileSigner::from_pem(&foreign_leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        // `sd` is declared first, so DCQL declaration order verifies it before
+        // the failing mdoc -- reproducing the original ordering exactly.
+        tx.dcql_query = serde_json::json!({
+            "credentials": [
+                { "id": "sd", "format": "dc+sd-jwt" },
+                {
+                    "id": "md",
+                    "format": "mso_mdoc",
+                    "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                    "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+                }
+            ]
+        });
+
+        let sd = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &trusted_leaf_cert,
+            &trusted_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &foreign_signer,
+            Some(vec![der_b64(&foreign_leaf_cert)]),
+        )
+        .unwrap();
+
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+            client_id: expected_client_id(&config),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
+            &transcript,
+        )
+        .unwrap();
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {
+                "sd": [sd],
+                "md": [B64URL.encode(&device_response)],
+            }}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .expect_err("an unanchored issuer chain is a structural failure (§4.3 -> 400)");
+
+        // §4.3: still a crypto failure, so still the 400 class -- not a policy
+        // 200. The verdict on the wire does not change; what changes is what an
+        // operator can see.
+        assert_eq!(err.kind(), "failed", "got: {err}");
+        // The message names the credential it belongs to.
+        assert!(
+            err.to_string().contains("credential query 'md'"),
+            "the error must name the credential: {err}"
+        );
+
+        // The whole point: BOTH credentials are reported.
+        let result = tx.result.as_ref().expect("the result must be persisted");
+        assert!(!result.verified, "a failed credential fails the response");
+        assert_eq!(result.credentials.len(), 2, "every credential is reported");
+
+        let sd_cred = &result.credentials[0];
+        assert_eq!(sd_cred.query_id, "sd");
+        assert!(
+            sd_cred.checks.iter().all(|c| c.passed),
+            "the trusted credential's verdict must survive its neighbour's failure: {:?}",
+            sd_cred.checks
+        );
+        assert_eq!(
+            sd_cred.credential_type.as_deref(),
+            Some("https://localhost:8443/vct/pid")
+        );
+
+        let md_cred = &result.credentials[1];
+        assert_eq!(md_cred.query_id, "md");
+        assert_eq!(
+            md_cred.credential_type.as_deref(),
+            Some("org.iso.18013.5.1.mDL"),
+            "a failed credential must still be nameable"
+        );
+        assert_eq!(
+            md_cred.checks.len(),
+            1,
+            "a failed format check short-circuits the rest: {:?}",
+            md_cred.checks
+        );
+        assert_eq!(
+            md_cred.checks[0].check,
+            "mdoc_issuer_auth_and_device_signature"
+        );
+        assert!(!md_cred.checks[0].passed);
+        assert!(
+            md_cred.checks[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("trust anchor"),
+            "the real reason belongs in detail: {:?}",
+            md_cred.checks[0].detail
+        );
+        assert_eq!(tx.state, VerificationState::Failed);
+    }
+
+    /// A credential whose format check failed records exactly that one check.
+    ///
+    /// Running `dcql_match` and `status_check` against the empty claims map
+    /// would report three failures where one occurred, two of them
+    /// misattributed: "DCQL mismatch" when the truth is "we never obtained
+    /// claims". And the top-level `checks` list gains no fault record, because
+    /// the per-credential one already represents this fault -- recording both
+    /// would double-count it.
+    #[tokio::test]
+    async fn a_failed_format_check_short_circuits_without_double_counting() {
+        let result = run_unanchored_mdoc_presentation_reporting_result().await;
+
+        assert!(!result.verified);
+        assert_eq!(result.credentials.len(), 1);
+        let checks = &result.credentials[0].checks;
+        assert_eq!(checks.len(), 1, "only the format check: {checks:?}");
+        assert!(
+            !checks.iter().any(|c| c.check == "dcql_match"),
+            "dcql_match must not run on claims that were never obtained"
+        );
+        assert!(
+            !checks.iter().any(|c| c.check == "status_check"),
+            "status_check must not run on claims that were never obtained"
+        );
+
+        // Cross-cutting checks: jwe_decryption and requested_credentials_answered
+        // only. No top-level fault record, which would double-count.
+        let top: Vec<&str> = result.checks.iter().map(|c| c.check.as_str()).collect();
+        assert_eq!(
+            top,
+            vec!["jwe_decryption", "requested_credentials_answered"],
+            "the top-level deferred-fault record is StatusUnavailable-only"
+        );
+        assert_eq!(
+            result.all_checks().filter(|c| !c.passed).count(),
+            1,
+            "exactly one failure is counted"
+        );
+    }
+
+    /// Root AGENTS.md §4.3, made explicit. With one credential's chain untrusted
+    /// (a crypto failure -> 400) and another's status list unreachable (a
+    /// network fault -> 502), the response can carry only one status. The crypto
+    /// failure wins: it is deterministic, so answering 502 would invite the
+    /// wallet to retry a presentation that can never succeed.
+    ///
+    /// Before verify-all this was decided by accident -- `?` returned the crypto
+    /// error immediately while StatusUnavailable was parked in `deferred`.
+    #[tokio::test]
+    async fn a_crypto_failure_outranks_an_unreachable_status_list() {
+        let (trusted_root_pem, trusted_leaf_cert, trusted_leaf_key) = test_pki();
+        let (_, foreign_leaf_cert, foreign_leaf_key) = test_pki();
+        let ca_str = String::from_utf8(trusted_root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let trusted_signer =
+            FileSigner::from_pem(&trusted_leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let foreign_signer =
+            FileSigner::from_pem(&foreign_leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        // The SD-JWT is declared FIRST and is the one whose status list is
+        // unreachable, so its StatusUnavailable is parked before the mdoc's
+        // crypto failure is seen. That ordering is what makes this a real
+        // precedence test rather than a first-wins test.
+        tx.dcql_query = serde_json::json!({
+            "credentials": [
+                { "id": "sd", "format": "dc+sd-jwt" },
+                {
+                    "id": "md",
+                    "format": "mso_mdoc",
+                    "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                    "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+                }
+            ]
+        });
+
+        // A `status.status_list` claim makes `check_status` call the resolver,
+        // and `MockResolver { token: None }` answers StatusUnavailable.
+        let (holder_signer, holder_pub) = holder();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let sd_claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: Some(7),
+            status_list_uri: Some("https://localhost:8443/statuslists/1".to_string()),
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let sd_issued = build_sd_jwt_vc(
+            sd_claims,
+            &trusted_signer,
+            Some(vec![der_b64(&trusted_leaf_cert)]),
+        )
+        .unwrap();
+        let sd = attach_kb_jwt(
+            sd_issued,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
+
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &foreign_signer,
+            Some(vec![der_b64(&foreign_leaf_cert)]),
+        )
+        .unwrap();
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+            client_id: expected_client_id(&config),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
+            &transcript,
+        )
+        .unwrap();
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {
+                "sd": [sd],
+                "md": [B64URL.encode(&device_response)],
+            }}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .expect_err("both credentials failed, in different ways");
+
+        assert_eq!(
+            err.kind(),
+            "failed",
+            "the crypto failure decides the status, not the unreachable status list: {err}"
+        );
+        assert!(
+            !matches!(err, VerificationError::StatusUnavailable(_)),
+            "a 502 would tell the wallet to retry a permanently invalid presentation"
+        );
+
+        // Both credentials are still reported, each with its own reason.
+        let result = tx.result.as_ref().expect("the result must be persisted");
+        assert_eq!(result.credentials.len(), 2);
+        // The unavailability is not the returned error, but it is not lost
+        // either: it has no per-credential record (unavailability is not a
+        // policy verdict), so the top-level fault record is the only place it
+        // can be reported at all.
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.check == "status_check" && !c.passed),
+            "the parked unavailability is still recorded as a fault: {:?}",
+            result.checks
+        );
     }
 
     /// The claim-collision bug, pinned. Two credentials disclosing the SAME claim
