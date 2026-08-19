@@ -24,6 +24,8 @@ x509-cert = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# GAP-VCI-16's record decodes an issued mdoc credential to assert its CBOR shape.
+ciborium = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
 rcgen = { workspace = true }

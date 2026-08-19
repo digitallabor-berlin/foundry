@@ -769,6 +769,7 @@ name = "foundry-issuer"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "ciborium",
  "foundry-core",
  "foundry-mdoc",
  "foundry-sd-jwt-vc",

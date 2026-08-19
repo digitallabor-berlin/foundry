@@ -963,6 +963,63 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
 }
 
 // ---------------------------------------------------------------------------
+// GAP-VCI-16 — OpenID4VCI Format Profile / mdoc (L2249): the `credential`
+// claim MUST be the base64url-encoded CBOR `IssuerSigned` structure.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "GAP-VCI-16: OpenID4VCI Format Profile / mdoc (L2249) — build_mdoc returns a DeviceResponse-shaped wrapper {version, documents: [{docType, issuerSigned}]}, so the issued credential carries one layer more than the clause allows; a wallet parsing the payload as a bare IssuerSigned fails"]
+async fn gap_vci_16_mdoc_credential_is_not_a_bare_issuer_signed() {
+    let (_key_dir, key_path) = write_test_issuer_key();
+    let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "mdl").await;
+
+    let nonce = issue_nonce(&secret, 1_700_000_015).unwrap().c_nonce;
+    let proof_jwt = generate_proof_jwt(&nonce, "https://issuer.example.com");
+
+    let req = CredentialRequest {
+        credential_configuration_id: Some("mdl".to_string()),
+        format: Some("mso_mdoc".to_string()),
+        proofs: Some(ProofsRequest::from_jwts(vec![proof_jwt])),
+        credential_response_encryption: None,
+    };
+
+    let res = handle_credential_request(
+        &cfg,
+        &storage,
+        &access_token,
+        &req,
+        &secret,
+        &bearer_presentation(),
+        1_700_000_020,
+        false,
+    )
+    .await
+    .expect("mdoc issuance must succeed");
+
+    let bytes = URL_SAFE_NO_PAD
+        .decode(&res.credentials[0].credential)
+        .expect("credential is base64url (VCI-0071)");
+    let decoded: ciborium::Value =
+        ciborium::from_reader(bytes.as_slice()).expect("credential is CBOR");
+    let map = decoded.as_map().expect("IssuerSigned is a CBOR map");
+    let key = |name: &str| {
+        map.iter()
+            .any(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == name))
+    };
+
+    // L2249 asks for `IssuerSigned` itself, whose members are `nameSpaces` and
+    // `issuerAuth`. A `DeviceResponse` wrapper is a different structure that
+    // merely contains one.
+    assert!(
+        !key("documents") && !key("version"),
+        "the credential must be a bare IssuerSigned, not a DeviceResponse wrapper"
+    );
+    assert!(
+        key("nameSpaces") && key("issuerAuth"),
+        "IssuerSigned carries nameSpaces and issuerAuth at the top level"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // GAP-VCI-12 — OpenID4VCI Format Profile / mdoc (L2235): `doctype` is
 // REQUIRED and identifies the Credential type per ISO 18013-5.
 // ---------------------------------------------------------------------------
