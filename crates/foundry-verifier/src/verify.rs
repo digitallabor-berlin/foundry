@@ -552,6 +552,29 @@ fn check_transaction_data_binding(
     }
 }
 
+/// The `vct` a compact SD-JWT VC presentation **asserts**, read without
+/// verifying any signature.
+///
+/// Deliberately unauthenticated, and named to say so. It exists so a
+/// presentation that fails its signature check can still be named in a log
+/// record and in the admin console: a failed credential an operator cannot
+/// identify is the defect this serves. On the success path the value is
+/// identical to the verified payload's `vct`, because `verify_sd_jwt_vc` reads
+/// the same segment.
+///
+/// Every malformed shape yields `None` rather than an error. This is a
+/// diagnostic, and a diagnostic must not be able to change the verdict it
+/// describes.
+fn asserted_vct_unverified(presentation: &str) -> Option<String> {
+    // IETF SD-JWT compact serialization: the issuer-signed JWT is everything
+    // before the first `~`; the disclosures and the KB-JWT follow it.
+    let jwt = presentation.split('~').next()?;
+    let payload_b64 = jwt.split('.').nth(1)?;
+    let bytes = B64URL.decode(payload_b64).ok()?;
+    let payload: Value = serde_json::from_slice(&bytes).ok()?;
+    payload.get("vct")?.as_str().map(str::to_string)
+}
+
 /// Inputs shared by every credential in one `vp_token`, computed once.
 ///
 /// `base_url` and `client_id` are carried here because the mdoc
@@ -589,8 +612,16 @@ async fn verify_one_credential(
     // this stays `None` for that format -- checked below.
     let mut kb_jwt_payload: Option<Value> = None;
 
-    let doc_type: Option<String> = match selected {
+    // Two distinct values, deliberately not one: `doc_type` feeds DCQL doctype
+    // matching and MUST stay `None` for SD-JWT VC, whose queries carry no
+    // `doctype_value`. `credential_type` is the type this credential ASSERTS,
+    // reported per credential so a verdict can be named.
+    let (doc_type, credential_type): (Option<String>, Option<String>) = match selected {
         SelectedPresentation::SdJwtVc(jwt_str) => {
+            // Read from the presentation before it is verified, so this cannot
+            // become conditional on the verdict it helps explain.
+            let asserted_vct = asserted_vct_unverified(jwt_str);
+
             let verified = foundry_sd_jwt_vc::verifier::verify_sd_jwt_vc(
                 jwt_str,
                 ctx.trust_store,
@@ -632,7 +663,7 @@ async fn verify_one_credential(
                     disclosed_claims.insert(k, v);
                 }
             }
-            None
+            (None, asserted_vct)
         }
         SelectedPresentation::MsoMdoc {
             device_response_b64,
@@ -796,7 +827,9 @@ async fn verify_one_credential(
                 }
                 disclosed_claims.insert(ns, Value::Object(ns_obj));
             }
-            Some(mdoc_res.doc_type)
+            // Authenticated: this docType comes from the signed MSO, so it is
+            // both the DCQL matching input and the asserted type.
+            (Some(mdoc_res.doc_type.clone()), Some(mdoc_res.doc_type))
         }
     };
 
@@ -856,6 +889,7 @@ async fn verify_one_credential(
             PresentedFormat::SdJwtVc => "dc+sd-jwt".to_string(),
             PresentedFormat::MsoMdoc => "mso_mdoc".to_string(),
         },
+        credential_type,
         claims: claims_value,
         checks,
     };
@@ -2775,6 +2809,162 @@ mod tests {
         assert_eq!(tx.state, VerificationState::Verified);
     }
 
+    /// The asserted credential type is surfaced as its own field, so a log line
+    /// and the admin console can name a credential without the reader parsing
+    /// the claims blob. For SD-JWT VC that is `vct`.
+    #[tokio::test]
+    async fn credential_type_is_the_vct_for_an_sd_jwt_vc() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _pub) = two_sd_jwt_tx();
+        let pid = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("given_name", serde_json::json!("Alice"))],
+        );
+        let diploma = sd_jwt_presentation_for(
+            &config,
+            &tx,
+            &leaf_cert,
+            &issuer_signer,
+            &[("degree", serde_json::json!("MSc"))],
+        );
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {"pid": [pid], "diploma": [diploma]}}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .unwrap();
+
+        // `sd_jwt_presentation_for` mints both credentials with this vct.
+        assert_eq!(
+            res.credentials[0].credential_type.as_deref(),
+            Some("https://localhost:8443/vct/pid")
+        );
+        assert_eq!(
+            res.credentials[1].credential_type.as_deref(),
+            Some("https://localhost:8443/vct/pid")
+        );
+    }
+
+    /// For `mso_mdoc` the asserted credential type is the `docType`, and on the
+    /// success path it is the **authenticated** one from the MSO rather than the
+    /// unverified copy read from the DeviceResponse envelope.
+    #[tokio::test]
+    async fn credential_type_is_the_doctype_for_an_mdoc() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "mso_mdoc",
+                "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+            }]
+        });
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &issuer_signer,
+            Some(vec![der_b64(&leaf_cert)]),
+        )
+        .unwrap();
+
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+            client_id: expected_client_id(&config),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
+            &transcript,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({
+                "vp_token": { "c1": [B64URL.encode(&device_response)] }
+            }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            res.credentials[0].credential_type.as_deref(),
+            Some("org.iso.18013.5.1.mDL")
+        );
+    }
+
+    /// The helper reads the ISSUER-SIGNED JWT's payload, which is everything
+    /// before the first `~` in the compact SD-JWT serialization. Disclosures and
+    /// the KB-JWT follow and must not be mistaken for it.
+    #[test]
+    fn asserted_vct_reads_the_issuer_jwt_payload_and_never_errors() {
+        let payload = B64URL.encode(br#"{"vct":"com.emvco.dpc.card","iss":"x"}"#);
+        let presentation = format!("aGVhZGVy.{payload}.c2ln~WyJzYWx0IiwiYSIsMV0~a2I.a2I.a2I");
+        assert_eq!(
+            asserted_vct_unverified(&presentation).as_deref(),
+            Some("com.emvco.dpc.card")
+        );
+
+        // Every malformed shape yields None rather than an error: this is a
+        // diagnostic and must never be able to change a verdict.
+        assert_eq!(asserted_vct_unverified(""), None);
+        assert_eq!(asserted_vct_unverified("not-a-jwt"), None);
+        assert_eq!(asserted_vct_unverified("a.!!!not-base64!!!.c"), None);
+        let no_vct = B64URL.encode(br#"{"iss":"x"}"#);
+        assert_eq!(asserted_vct_unverified(&format!("a.{no_vct}.c")), None);
+    }
+
     /// The claim-collision bug, pinned. Two credentials disclosing the SAME claim
     /// name must not overwrite each other -- a single flat claims map reported one
     /// value as if both credentials agreed on it.
@@ -2892,12 +3082,15 @@ mod tests {
             PresentedCredential {
                 query_id: "pid".to_string(),
                 format: "dc+sd-jwt".to_string(),
+                // This check ignores the credential type; `None` documents that.
+                credential_type: None,
                 claims: serde_json::json!({}),
                 checks: Vec::new(),
             },
             PresentedCredential {
                 query_id: "mdl".to_string(),
                 format: "mso_mdoc".to_string(),
+                credential_type: None,
                 claims: serde_json::json!({}),
                 checks: Vec::new(),
             },

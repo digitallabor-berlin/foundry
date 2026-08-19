@@ -37,6 +37,18 @@ pub struct PresentedCredential {
     /// The credential format the answered query **declared**: `dc+sd-jwt` or
     /// `mso_mdoc`. Never inferred from the payload's JSON type.
     pub format: String,
+    /// The credential type the presentation **asserts**: `vct` for `dc+sd-jwt`
+    /// (IETF SD-JWT VC), `docType` for `mso_mdoc` (ISO/IEC 18013-5).
+    ///
+    /// Extracted BEFORE the format-specific signature check, so it survives a
+    /// failure -- a failed credential an operator cannot name is the defect this
+    /// field exists to fix. It is therefore only *authenticated* when that check
+    /// passed, exactly the caveat that already governs `claims`; on the mdoc
+    /// success path it is replaced with the MSO's authenticated `docType`.
+    ///
+    /// `None` when the presentation could not be decoded far enough to read a
+    /// type at all.
+    pub credential_type: Option<String>,
     /// This credential's disclosed claims only.
     pub claims: serde_json::Value,
     /// Checks scoped to this credential: its format-specific signature check,
@@ -182,6 +194,9 @@ mod tests {
             credentials: vec![PresentedCredential {
                 query_id: "c1".to_string(),
                 format: "dc+sd-jwt".to_string(),
+                // A real value, not a reflexive `None`: this asserts the new
+                // field survives a storage round trip.
+                credential_type: Some("https://example.test/vct/pid".to_string()),
                 claims: serde_json::json!({"given_name": "Alice"}),
                 checks: Vec::new(),
             }],
@@ -229,12 +244,14 @@ mod tests {
                 PresentedCredential {
                     query_id: "pid".to_string(),
                     format: "dc+sd-jwt".to_string(),
+                    credential_type: Some("https://example.test/vct/pid".to_string()),
                     claims: serde_json::json!({"given_name": "Alice"}),
                     checks: vec![pass("sd_jwt_vc_signature_and_kb_jwt"), pass("dcql_match")],
                 },
                 PresentedCredential {
                     query_id: "mdl".to_string(),
                     format: "mso_mdoc".to_string(),
+                    credential_type: Some("org.iso.18013.5.1.mDL".to_string()),
                     claims: serde_json::json!({}),
                     checks: vec![pass("mdoc_issuer_auth_and_device_signature")],
                 },

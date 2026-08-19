@@ -2864,6 +2864,15 @@ var qrcode = function() {
         fmt.className = 'fmt';
         fmt.textContent = cred.format;
         h.appendChild(fmt);
+        // The credential type the presentation asserted (vct / docType). Only
+        // authenticated when this credential's format check passed, same as its
+        // claims -- so it is shown as a label, never as a trust signal.
+        if (cred.credential_type) {
+          const ct = document.createElement('span');
+          ct.className = 'fmt';
+          ct.textContent = cred.credential_type;
+          h.appendChild(ct);
+        }
         wrap.appendChild(h);
 
         const ul = document.createElement('ul');
