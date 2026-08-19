@@ -1,7 +1,8 @@
 # mdoc `DeviceResponse` Verification and ISO 18013-5 Format Internals — Design
 
 **Date:** 2026-08-19
-**Revised:** 2026-08-19 — scope widened after decoding the real MSO; see §1.6
+**Revised:** 2026-08-19 — scope widened after decoding the real MSO (§1.6), then two
+suspected defects retracted after executing a probe against the capture (§1.7)
 **Status:** approved (design); implementation plan pending
 **Crates touched:** `foundry-mdoc`, `foundry-verifier`
 **Closes:** `HAIP-0070`; divergences #1 and #2 in `crates/foundry-mdoc/AGENTS.md`; three
@@ -20,8 +21,8 @@ credential query 'av' declares format mso_mdoc, so its presentation
 must be an object, got a string
 ```
 
-The wallet was right and foundry was wrong. That error is the **first** of six
-independent defects; the rest were found while planning the fix (§1.6).
+The wallet was right and foundry was wrong. That error is the **first** of four
+blocking defects; the rest were found while planning the fix (§1.6).
 
 ### 1.1 What the wallet sent
 
@@ -96,30 +97,48 @@ foundry signs over the `SessionTranscript` **alone**. A conformant wallet signs
 over the `DeviceAuthentication` array that *contains* the transcript. The
 `external_aad` slot was already correct.
 
-### 1.6 Four further defects, found by decoding the captured MSO
+### 1.6 Two further blocking defects, found by decoding the captured MSO
 
-`verify_mdoc` cannot parse a real mdoc **at all**. Each row below is
+`verify_mdoc` cannot parse a real mdoc **at all**. Both rows below are
 independently fatal.
 
 | # | Element | Real wallet | foundry today |
 | --- | --- | --- | --- |
-| 3 | `issuerAuth` payload | `#6.24(bstr .cbor MSO)` — begins `d818 5902 02` | passes `sign1.payload` straight to `ciborium::from_reader::<MobileSecurityObject>` |
-| 4 | `deviceKeyInfo.deviceKey` | COSE_Key **map** `{1:2, -1:1, -2:bstr32, -3:bstr32}` | `cbor_value_to_bytes` then `CoseKey::from_slice` — requires a byte string |
-| 5 | `validityInfo.*` | CBOR **tag-0 `tdate`** values, and a `validFrom` member foundry does not model | `String` fields parsed as RFC 3339 |
-| 6 | `IssuerSignedItem`s in `nameSpaces` | `#6.24(bstr …)`, with `valueDigests` computed over the **full tagged encoding** | `item_val.as_bytes()`, and hashes those inner bytes |
+| 3 | `issuerAuth` payload | `#6.24(bstr .cbor MSO)` — begins `d818 5902 02` | passes `sign1.payload` straight to `ciborium::from_reader::<MobileSecurityObject>`, which fails with `invalid type: bytes, expected map` |
+| 4 | `IssuerSignedItem`s in `nameSpaces` | `#6.24(bstr …)`, with `valueDigests` computed over the **full tagged encoding** | `item_val.as_bytes()`, and hashes those inner bytes |
 
-Defect 6 is the most damaging because it fails *quietly*. `as_bytes()` returns
+Defect 4 is the most damaging because it fails *quietly*. `as_bytes()` returns
 `None` for a tagged value, so every item hits the loop's `continue`, the
 credential verifies with **zero reconstructed claims**, and the transaction then
 fails `dcql_match` — a **policy** outcome at HTTP 200 per root `AGENTS.md` §4.3.
 A reader would see `verified: false` with a DCQL mismatch and reasonably conclude
 the wallet sent the wrong claims.
 
-Defects 3, 5 and 6 are already recorded in the tree as `TODO(interop)` comments in
+Both are already recorded in the tree as `TODO(interop)` comments in
 `crates/foundry-mdoc/src/types.rs` — *"payload is not tag-24 embedded-CBOR
-wrapped"*, *"should be CBOR `tdate` (tag 0), not plain text"*, *"should be
-transported as tag-24 embedded CBOR"*. They read as cosmetic and are in fact
-three of the six reasons no real mdoc can be verified.
+wrapped"* and *"should be transported as tag-24 embedded CBOR"*. They read as
+cosmetic and are in fact two of the four reasons no real mdoc can be verified.
+
+### 1.7 Two suspected defects, retracted
+
+A first pass at §1.6 listed two further defects. Both were **inferred from
+reading code** and both are wrong; a probe executed against the captured bytes
+retracted them. Recorded here because the reasoning is a trap worth naming.
+
+- **`deviceKeyInfo.deviceKey` is fine.** It *is* a COSE_Key map rather than a
+  byte string, but `cbor_value_to_bytes` is `ciborium::into_writer` — it
+  **re-encodes** any `Value`, so the map becomes COSE_Key bytes and
+  `CoseKey::from_slice` accepts it. (The builder's inverse helper is named
+  `cbor_to_value_bytes` and *decodes*; the two names invite exactly this
+  misreading.) No change required.
+- **`validityInfo` tag-0 `tdate` values parse today.** ciborium's deserializer
+  carries `Header::Tag(..) => continue` in every typed `deserialize_*`, so it
+  silently skips tags and a tag-0 value deserializes into `String` unharmed.
+
+What survives of the second point is narrower and belongs to issuance, not
+verification: foundry's **builder** emits untagged text where ISO wants tag-0,
+and foundry does not model `validFrom` at all. Both are in scope by decision
+(§3 decisions 9-10) as conformance fixes, not as blockers.
 
 ---
 
@@ -194,7 +213,7 @@ issuerAuth payload prefix       d818 5902 02          ; #6.24(bstr(514))
 MSO version / digestAlgorithm   "1.0" / "SHA-256"
 MSO docType                     "eu.europa.ec.av.1"
 valueDigests digestIDs          0,1,2,3,4,5           ; 6 committed, 1 disclosed
-deviceKey (COSE_Key map)        {1: 2, -1: 1, -2: bstr32, -3: bstr32}
+deviceKey (COSE_Key map)        {1: 2, -1: 1, -2: bstr32, -3: bstr32}   ; already handled, §1.7
 validityInfo members            signed, validFrom, validUntil  ; all CBOR tag-0 tdate
 deviceSigned.nameSpaces         d81841a0              ; #6.24(bstr(1) = A0), empty map
 ```
@@ -210,15 +229,16 @@ digest list — which today's loop already does correctly.
 | # | Decision | Rationale |
 | --- | --- | --- |
 | 1 | **Verifier leg *and* format internals.** The OpenID4VCI credential envelope is the only deferred piece (§7). | Revised from "verifier leg only" after §1.6. Format internals are not separable: every synthetic mdoc test round-trips through `build_mdoc`, so a verifier that requires conformant shapes needs a builder that emits them. Since `build_mdoc`'s output *is* what foundry issues, this necessarily changes the issued wire format. |
-| 2 | **Be strict, not liberal: do not also accept foundry's current non-conformant shapes.** | The tempting alternative — accept tag-24-or-bare, map-or-bstr, tdate-or-tstr — would let the builder stay untouched and avoid all test churn. Rejected: permanently accepting shapes no wallet emits is the same reflex that produced the bespoke envelope in §1.3, and it would leave the codebase with two live formats and no statement of which is real. |
+| 2 | **Be strict, not liberal: do not also accept foundry's current non-conformant shapes.** | The tempting alternative — accept tag-24-or-bare and tdate-or-tstr — would let the builder stay untouched and avoid all test churn. Rejected: permanently accepting shapes no wallet emits is the same reflex that produced the bespoke envelope in §1.3, and it would leave the codebase with two live formats and no statement of which is real. |
 | 3 | **No `isomdl` dependency — not even `[dev-dependencies]`.** | Root `AGENTS.md` §3: no vendored third-party crates; prefer extending foundry-owned models over introducing a protocol dependency. Assessed and rejected: `isomdl` 0.2.0 collides on `x509-cert` (0.2 vs 0.3) and `base64` (0.13), imposes `generic-array = "=0.14.7"`, adds a second complete X.509 stack that foundry would never call (trust policy lives in `foundry-core`'s openssl-based `TrustStore`), and has 0 crates.io dependents. Used as a **read-only reference** instead. |
 | 4 | **Drop the bespoke `{mdoc, device_signature}` object; do not accept both shapes.** | No production producer exists, so "accept both" would preserve a shape whose only purpose was passing our own tests, while leaving the real contract ambiguous to the next reader. |
 | 5 | **Add a public `build_device_response()` to `foundry-mdoc::builder`.** | Synthetic tests in three crates need to produce a conformant presentation. The workspace has no `test-util` feature pattern, and `build_mdoc` is already plain-public and consumed cross-crate. |
 | 6 | **Reject a `DeviceResponse` carrying more than one document.** | Today `docs.first()` silently ignores extras — the same defect class `select_presentation` already refuses for presentation arrays. HAIP-0070 independently requires each mdoc in its own `DeviceResponse`. |
 | 7 | **Read and require `status == 0`.** | Currently never read. Verifying a document inside a response the wallet itself flagged as failed would report success for something the sender did not claim succeeded. |
 | 8 | **`DeviceMac` stays unimplemented, as a typed error.** | foundry accepts only ES256/COSE `-7` (VP-0225/VP-0226). Root `AGENTS.md` §4.4: unimplemented optional features are acceptable; incorrect implementations are not. |
-| 9 | **Check validity against `validFrom`…`validUntil`, not `signed`…`validUntil`.** | `validFrom` is present in real MSOs and is the member that bounds document validity; `signed` records when the MSO was signed. Today's check uses `signed` because the struct has no `validFrom` to use. |
-| 10 | **No change to trust or expiry policy.** | See §8. |
+| 9 | **Emit and require tag-0 `tdate` validity values.** Not a blocker (§1.7) — included as a conformance fix. | The builder emits untagged text where ISO wants `tdate`, so foundry-issued MSOs are non-conformant on the wire. `ciborium::tag::Required<String, 0>` closes it declaratively and, per decision 2, also makes the verifier reject the untagged form rather than tolerating two encodings. Closes the third `TODO(interop)`. |
+| 10 | **Model `validFrom` and check validity against `validFrom`…`validUntil`, not `signed`…`validUntil`.** Not a blocker (§1.7) — included as a semantic fix. | `validFrom` is present in real MSOs and is the member that bounds document validity; `signed` records when the MSO was signed. Today's check uses `signed` only because the struct has no `validFrom` to use. |
+| 11 | **No change to trust or expiry policy.** | See §8. |
 
 ---
 
@@ -246,10 +266,11 @@ pub struct MobileSecurityObject {
     pub validity_info: ValidityInfo,
 }
 
-/// `deviceKey` is a COSE_Key **map**, not a byte string.
+/// `deviceKey` is a COSE_Key **map**. Unchanged by this design: the existing
+/// re-encode-then-`CoseKey::from_slice` path already handles it (§1.7).
 pub struct DeviceKeyInfo {
     #[serde(rename = "deviceKey")]
-    pub device_key: ciborium::Value,   // unchanged type; parse site changes
+    pub device_key: ciborium::Value,
 }
 
 /// All three members are CBOR `tdate` — tag 0 over an RFC 3339 text string.
@@ -325,17 +346,15 @@ Behaviour changes inside the issuer half, one per defect:
 - **#3** — the IssuerAuth signature is still verified over `sign1.payload`
   **verbatim** (unchanged, and important not to "fix"); the MSO is then parsed
   from `tag24_unwrap` of that payload.
-- **#4** — `deviceKey` is re-encoded from its `ciborium::Value` map and passed to
-  `CoseKey::from_slice`, so `kty`/`crv` are still validated. `cbor_value_to_bytes`
-  is no longer used on this path.
-- **#5** — validity is checked as `valid_from <= now <= valid_until`, both parsed
-  RFC 3339 out of the `Required<String, 0>` wrappers.
-- **#6** — each namespace item is `tag24_unwrap`ped to parse the
+- **#4** — each namespace item is `tag24_unwrap`ped to parse the
   `IssuerSignedItem`, while the digest is computed over the item's **full tagged
   encoding**. An item whose digest is absent from the MSO or does not match is
   still dropped (existing behaviour), but an item that is not tag-24 at all is now
   a structural error rather than a silent skip — silence there is what made
-  defect 6 invisible.
+  defect 4 invisible.
+- **Decisions 9-10** — validity is checked as `valid_from <= now <= valid_until`,
+  both parsed RFC 3339 out of the `Required<String, 0>` wrappers.
+- **`deviceKey` is untouched** (§1.7).
 
 `MdocVerificationResult` is unchanged (`claims`, `device_key_jwk`, `issuer_x5c`,
 `doc_type`).
@@ -350,10 +369,10 @@ changes minimally.
 ### 4.3 `foundry-mdoc/src/builder.rs` — emit the real shapes
 
 `build_mdoc` changes to emit: tag-24-wrapped `IssuerSignedItemBytes` with digests
-over the full tagged encoding; a tag-24-wrapped MSO as the IssuerAuth payload; a
-COSE_Key map for `deviceKey`; and tag-0 `tdate` validity values including
-`validFrom`. Its outer `{version, documents:[…]}` envelope is unchanged here —
-that is §7.
+over the full tagged encoding; a tag-24-wrapped MSO as the IssuerAuth payload;
+and tag-0 `tdate` validity values including `validFrom`. `deviceKey` already
+emits a COSE_Key map and is unchanged (§1.7). The outer
+`{version, documents:[…]}` envelope is unchanged here — that is §7.
 
 New:
 
@@ -390,7 +409,7 @@ vp_token["av"][0] : base64url string
   → verify_issuer_signed (once)          → IssuerAuth chain + signature over the
                                            tag-24 payload; MSO from tag24_unwrap;
                                            validFrom..validUntil; digests over full
-                                           tag-24 item encodings; deviceKey from map
+                                           tag-24 item encodings
   → for each candidate Origin:
         session_transcript_value(DcApi{origin, nonce, thumbprint})
         verify_device_auth(resp, transcript, device_key)   // DeviceAuthenticationBytes
@@ -407,8 +426,8 @@ Structural, surfacing as HTTP 400 per root `AGENTS.md` §4.3, as typed
 - more than one document (§3 decision 6); `status != 0` (§3 decision 7)
 - missing `deviceSigned`, `deviceAuth`, or `deviceSignature`
 - `deviceMac` instead of `deviceSignature` → explicit "unsupported" (§3 decision 8)
-- IssuerAuth payload not tag-24; a namespace item not tag-24 (defect 6)
-- `deviceKey` not a COSE_Key map; `validityInfo` member missing tag 0
+- IssuerAuth payload not tag-24 (defect 3); a namespace item not tag-24 (defect 4)
+- a `validityInfo` member missing tag 0 (§3 decision 9)
 - unsupported COSE `alg` on either signature
 
 Device-signature mismatch remains `FormatError::KeyBinding`, folded into the
@@ -424,7 +443,7 @@ The gate is root `AGENTS.md` §5.1 — whole workspace, `cargo nextest run`, nev
 
 1. **Pinned digest vector (proven).** `sha256` of the captured item's full tag-24
    encoding equals the MSO's `valueDigests[4]`, with the literals of §2.3. This
-   pins defect 6's resolution against real bytes, and asserts the *negative* too:
+   pins defect 4's resolution against real bytes, and asserts the *negative* too:
    the inner-CBOR digest must **not** match.
 2. **Pinned `DeviceAuthenticationBytes` vector (derived).** Expected hex derived
    offline from the two reference implementations of §2 and pinned as a literal,
@@ -446,11 +465,11 @@ The gate is root `AGENTS.md` §5.1 — whole workspace, `cargo nextest run`, nev
    `crates/foundry-mdoc/src/verifier.rs`, `crates/foundry-verifier/src/verify.rs`,
    `crates/foundry-verifier/tests/conformance_vp.rs` and
    `crates/foundry/tests/wallet_verification.rs`.
-6. **Anti-regression, per defect.** Each of the six old behaviours must now fail:
-   the bespoke envelope; a device signature over the bare `SessionTranscript`; a
-   bare (untagged) MSO payload; a byte-string `deviceKey`; text-string validity
-   values; an untagged namespace item. Without these, the migration in test 5
-   could silently preserve any of them.
+6. **Anti-regression, per defect.** Each old behaviour must now fail: the bespoke
+   envelope; a device signature over the bare `SessionTranscript`; a bare
+   (untagged) MSO payload; an untagged namespace item; and untagged (tstr)
+   validity values. Without these, the migration in test 5 could silently
+   preserve any of them.
 7. **Byte-preservation.** A `deviceSigned.nameSpaces` whose re-encoding would
    differ from its received bytes MUST still verify — pinning hazard 1 of §2.2.
 8. **Envelope rejection.** Multi-document response and `status != 0` each produce
@@ -559,7 +578,8 @@ signature** — which must be stated as such in the change record.
 | --- | --- |
 | `DeviceAuthentication` is derived, not proven; no live oracle. | Two independent implementations agreeing at pinned commits (§2.1), pinned vectors (§5 test 2), and the interop fixture (§5 test 4) once §9 lands. |
 | Changing `build_mdoc` changes issued credential bytes. | Intended (§3 decision 1) and called out in §6 as a `VCI-0071`/`VCI-0176` re-check. No stored-credential migration exists to break — issuance is demo-stage. |
-| Six simultaneous format changes make a failure hard to localise. | Per-defect anti-regression tests (§5 test 6) and per-layer vector assertions (§5 tests 1-2), so each defect has an independent witness. |
+| Several simultaneous format changes make a failure hard to localise. | Per-defect anti-regression tests (§5 test 6) and per-layer vector assertions (§5 tests 1-2), so each defect has an independent witness. The plan sequences one format flip per task. |
+| Defects inferred from reading rather than executing. | §1.7 records two such retractions and why. Every remaining structural claim is either proven against the capture (§2.3) or agreed by two independent implementations (§2.1). |
 | `ciborium` re-encoding perturbs `deviceSigned.nameSpaces`. | Borrowed views in `DeviceResponse<'a>`; explicit byte-preservation test (§5 test 7). |
 | Transcript decode/re-encode drift. | `session_transcript_value` returns the `Value` directly; no round trip. Existing published-vector tests continue to pin the byte form. |
 | `tag24_encode`/`tag24_unwrap` used inconsistently between builder and verifier. | One shared pair of helpers in `types.rs` (§4.1), exercised from both sides by the round-trip test (§5 test 5). |
