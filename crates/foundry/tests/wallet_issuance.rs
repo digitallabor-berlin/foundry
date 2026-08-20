@@ -88,8 +88,9 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
         },
-        credential_types: vec![CredentialType {
-            id: "pid".to_string(),
+        credential_types: vec![
+            CredentialType {
+                id: "pid".to_string(),
             format: "dc+sd-jwt".to_string(),
             vct: Some("https://issuer.example.com/vct/pid".to_string()),
             doctype: None,
@@ -103,7 +104,35 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 display: vec![],
             }],
             validity_seconds: None,
-        }],
+            },
+            CredentialType {
+                id: "eu.europa.ec.av.1".to_string(),
+                format: "mso_mdoc".to_string(),
+                // No vct: an mdoc is identified by doctype (OpenID4VCI L2235),
+                // and Config::validate() rejects vct on an mso_mdoc type.
+                vct: None,
+                doctype: Some("eu.europa.ec.av.1".to_string()),
+                scope: None,
+                cryptographic_holder_binding: true,
+                display: vec![],
+                // EU Age Verification Annex A §4.1.2's complete attribute set.
+                claims: vec![
+                    ClaimDef {
+                        path: vec!["age_over_18".to_string()],
+                        required: Some(true),
+                        selectively_disclosable: false,
+                        display: vec![],
+                    },
+                    ClaimDef {
+                        path: vec!["age_over_16".to_string()],
+                        required: Some(false),
+                        selectively_disclosable: false,
+                        display: vec![],
+                    },
+                ],
+                validity_seconds: Some(7_776_000),
+            },
+        ],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
             response_encryption: None,
@@ -1201,4 +1230,208 @@ async fn display_metadata_flows_from_offer_creation_through_to_the_credential_re
     // 5. And the credential itself was still issued.
     let credential_str = cred_json["credentials"][0]["credential"].as_str().unwrap();
     assert!(credential_str.contains('~'));
+}
+
+/// Drive a full `eu.europa.ec.av.1` issuance over the wallet routes and return
+/// the base64url `credential` string plus the holder keypair.
+///
+/// Goes through the HTTP surface rather than calling `foundry_issuer` directly,
+/// so what it returns is what a wallet actually receives. Mirrors
+/// `full_issuance_flow_end_to_end`'s request shapes step for step.
+async fn issue_av_credential(state: &AppState) -> (String, EcKeyPair) {
+    // 1. Offer, carrying a value for each declared attribute.
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let offer_body = serde_json::json!({
+        "credential_type_id": "eu.europa.ec.av.1",
+        "claims": { "age_over_18": true, "age_over_16": true },
+        "tx_code_required": false
+    });
+    let offer_req = Request::builder()
+        .method("POST")
+        .uri("/admin/issuance/offers")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(offer_body.to_string()))
+        .unwrap();
+    let offer_res = admin_app.oneshot(offer_req).await.unwrap();
+    assert_eq!(offer_res.status(), StatusCode::OK);
+    let offer_bytes = axum::body::to_bytes(offer_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let offer_json: serde_json::Value = serde_json::from_slice(&offer_bytes).unwrap();
+    let pre_auth_code = offer_json["credential_offer"]["grants"]
+        ["urn:ietf:params:oauth:grant-type:pre-authorized_code"]["pre-authorized_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 2. Token.
+    let wallet_app = wallet_router(state.clone());
+    let token_body = format!(
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Apre-authorized_code&pre-authorized_code={pre_auth_code}"
+    );
+    let token_req = Request::builder()
+        .method("POST")
+        .uri("/token")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(token_body))
+        .unwrap();
+    let token_res = wallet_app.oneshot(token_req).await.unwrap();
+    assert_eq!(token_res.status(), StatusCode::OK);
+    let token_bytes = axum::body::to_bytes(token_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let token_json: serde_json::Value = serde_json::from_slice(&token_bytes).unwrap();
+    let access_token = token_json["access_token"].as_str().unwrap().to_string();
+
+    // 3. Nonce.
+    let wallet_app = wallet_router(state.clone());
+    let nonce_req = Request::builder()
+        .method("POST")
+        .uri("/nonce")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let nonce_res = wallet_app.oneshot(nonce_req).await.unwrap();
+    assert_eq!(nonce_res.status(), StatusCode::OK);
+    let nonce_bytes = axum::body::to_bytes(nonce_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let nonce_json: serde_json::Value = serde_json::from_slice(&nonce_bytes).unwrap();
+    let c_nonce = nonce_json["c_nonce"].as_str().unwrap().to_string();
+
+    // 4. Credential.
+    let (proof_jwt, keypair) = create_proof(&c_nonce, "https://issuer.example.com");
+    let cred_body = serde_json::json!({
+        "credential_configuration_id": "eu.europa.ec.av.1",
+        "format": "mso_mdoc",
+        "proofs": { "jwt": [proof_jwt] },
+    });
+    let wallet_app = wallet_router(state.clone());
+    let cred_req = Request::builder()
+        .method("POST")
+        .uri("/credential")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {access_token}"))
+        .body(Body::from(cred_body.to_string()))
+        .unwrap();
+    let cred_res = wallet_app.oneshot(cred_req).await.unwrap();
+    assert_eq!(cred_res.status(), StatusCode::OK);
+    let cred_bytes = axum::body::to_bytes(cred_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).unwrap();
+    let credential = cred_json["credentials"][0]["credential"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    (credential, keypair)
+}
+
+/// Issue an `eu.europa.ec.av.1` Proof of Age over the real wallet routes and
+/// assert the credential's wire shape.
+///
+/// Every assertion is a clause foundry is accountable to, not a foundry
+/// convention:
+///   * OpenID4VCI L976  — a binary Credential Format is base64url;
+///   * OpenID4VCI L2249 — the payload IS an `IssuerSigned`, not a wrapper;
+///   * EU AV Annex A §4.1.2 — the namespace equals the doctype, and the
+///     attributes are the two declared booleans and nothing else;
+///   * ISO/IEC 18013-5 — elements travel as `#6.24(bstr .cbor
+///     IssuerSignedItem)`.
+#[tokio::test]
+async fn av_mdoc_issuance_emits_a_conformant_issuer_signed() {
+    use base64::Engine as _;
+
+    let (state, _dir) = setup_test_app().await;
+    let (credential, _holder) = issue_av_credential(&state).await;
+
+    // OpenID4VCI L976.
+    let cbor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&credential)
+        .expect("the credential is base64url (OpenID4VCI L976)");
+
+    // OpenID4VCI L2249.
+    let decoded: ciborium::Value = ciborium::from_reader(cbor.as_slice()).expect("CBOR");
+    let map = decoded.as_map().expect("IssuerSigned is a CBOR map");
+    let top_keys: Vec<&str> = map
+        .iter()
+        .filter_map(|(k, _)| match k {
+            ciborium::Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        top_keys,
+        vec!["nameSpaces", "issuerAuth"],
+        "L2249 wants IssuerSigned itself, not a DeviceResponse containing one"
+    );
+
+    // EU AV Annex A §4.1.2: attributes live in a namespace equal to the doctype.
+    let namespaces = map
+        .iter()
+        .find_map(|(k, v)| match k {
+            ciborium::Value::Text(s) if s == "nameSpaces" => v.as_map(),
+            _ => None,
+        })
+        .expect("nameSpaces is a map");
+    let ns_names: Vec<&str> = namespaces
+        .iter()
+        .filter_map(|(k, _)| match k {
+            ciborium::Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ns_names,
+        vec!["eu.europa.ec.av.1"],
+        "Annex A §4.1.2: all attributes belong to namespace eu.europa.ec.av.1"
+    );
+
+    // The two declared attributes, as CBOR booleans, and nothing else.
+    let items = namespaces[0].1.as_array().expect("an array of items");
+    let mut got: Vec<(String, bool)> = items
+        .iter()
+        .map(|item| {
+            // ISO/IEC 18013-5: #6.24(bstr .cbor IssuerSignedItem).
+            let inner = match item {
+                ciborium::Value::Tag(24, b) => match b.as_ref() {
+                    ciborium::Value::Bytes(bytes) => bytes.clone(),
+                    other => panic!("tag 24 must wrap a byte string, got {other:?}"),
+                },
+                other => panic!("elements travel tag-24 embedded, got {other:?}"),
+            };
+            let item: ciborium::Value =
+                ciborium::from_reader(inner.as_slice()).expect("item CBOR");
+            let m = item.as_map().expect("IssuerSignedItem is a map");
+            let field = |name: &str| {
+                m.iter().find_map(|(k, v)| match k {
+                    ciborium::Value::Text(s) if s == name => Some(v),
+                    _ => None,
+                })
+            };
+            let id = field("elementIdentifier")
+                .and_then(|v| v.as_text())
+                .expect("elementIdentifier")
+                .to_string();
+            let value = match field("elementValue").expect("elementValue") {
+                ciborium::Value::Bool(b) => *b,
+                other => panic!(
+                    "Annex A §4.1.2 encodes {id} as bool, got {other:?} -- a date-shaped \
+                     string here would mean the closed attribute set leaked"
+                ),
+            };
+            (id, value)
+        })
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            ("age_over_16".to_string(), true),
+            ("age_over_18".to_string(), true)
+        ],
+        "exactly the two declared attributes, both true"
+    );
 }

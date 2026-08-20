@@ -715,6 +715,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "ciborium",
  "clap",
  "coset",
  "foundry-core",
