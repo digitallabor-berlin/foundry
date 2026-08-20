@@ -426,18 +426,53 @@ pub async fn handle_credential_request(
                 })?
             }
             "mso_mdoc" => {
-                let doc_type = cred_type
-                    .vct
-                    .clone()
-                    .or_else(|| cred_type.doctype.clone())
-                    .unwrap_or_else(|| tx.credential_type_id.clone());
+                // OpenID4VCI Format Profile / mdoc (L2235): `doctype` is
+                // REQUIRED and identifies the Credential type per ISO 18013-5.
+                // `doctype` is the SOLE source — there is deliberately no
+                // fallback to `vct` or to the credential type id. Preferring
+                // `vct` produced an SD-JWT-VC-style URL where an ISO 18013-5
+                // reverse-DNS identifier belongs, which was GAP-VCI-12;
+                // `Config::validate()` now rejects `vct` on an `mso_mdoc` type
+                // outright, so a fallback chain here could only ever return
+                // `doctype` while documenting a precedence rule that no longer
+                // exists.
+                //
+                // Validation makes the `None` branch unreachable for a loaded
+                // config. It stays a typed error rather than an unwrap because
+                // this is a request path (root AGENTS.md §4.1).
+                let doc_type = cred_type.doctype.clone().ok_or_else(|| {
+                    IssuanceError::InvalidRequest(format!(
+                        "credential type '{}' has format mso_mdoc but no doctype",
+                        tx.credential_type_id
+                    ))
+                })?;
+
+                // The namespace is NOT always the docType. ISO mDL carries its
+                // elements in `org.iso.18013.5.1` under docType
+                // `org.iso.18013.5.1.mDL`; EUDI attestations do use the docType
+                // verbatim — EU Age Verification Annex A §4.1.2, "All attributes
+                // belong to namespace `eu.europa.ec.av.1`". See
+                // `foundry_core::config::mdoc`.
+                let namespace = foundry_core::config::mdoc::namespace_for_doctype(&doc_type);
+
+                // Elements come from the credential type's CONFIGURED claim
+                // list, with the offer supplying only values — the same rule the
+                // SD-JWT VC arm above follows. Iterating `tx.claims` instead
+                // would let an offer introduce an element the configured type
+                // never declared, defeating the profile checks
+                // `Config::validate()` performs against the closed attribute set
+                // of a doctype like `eu.europa.ec.av.1`.
+                let mut elem_map = BTreeMap::new();
+                for claim_def in &cred_type.claims {
+                    if let Some(top_key) = claim_def.path.first()
+                        && let Some(val) = tx.claims.get(top_key)
+                    {
+                        elem_map.insert(top_key.clone(), val.clone());
+                    }
+                }
 
                 let mut ns_map = BTreeMap::new();
-                let mut elem_map = BTreeMap::new();
-                for (k, v) in &tx.claims {
-                    elem_map.insert(k.clone(), v.clone());
-                }
-                ns_map.insert(doc_type.clone(), elem_map);
+                ns_map.insert(namespace.to_string(), elem_map);
 
                 let mdoc_claims = MdocClaims {
                     doc_type,
@@ -1726,6 +1761,114 @@ mod tests {
         assert!(
             !value.as_object().unwrap().contains_key("display"),
             "got: {value}"
+        );
+    }
+
+    /// An `eu.europa.ec.av.1` credential type declaring ONLY `age_over_18` —
+    /// the minimum EU Age Verification Annex A §4.1.2 admits. Deliberately
+    /// narrower than the shipped config's two attributes, so a test can offer a
+    /// value for an element the type never declared.
+    fn av_config(key_path: &str) -> Config {
+        let mut config = test_config(key_path);
+        config.credential_types[0].id = "eu.europa.ec.av.1".to_string();
+        config.credential_types[0].format = "mso_mdoc".to_string();
+        // No vct: an mdoc is identified by doctype (OpenID4VCI L2235), and
+        // Config::validate() rejects vct on an mso_mdoc type.
+        config.credential_types[0].vct = None;
+        config.credential_types[0].doctype = Some("eu.europa.ec.av.1".to_string());
+        config.credential_types[0].claims = vec![ClaimDef {
+            path: vec!["age_over_18".to_string()],
+            required: Some(true),
+            selectively_disclosable: false,
+            display: vec![],
+        }];
+        config
+    }
+
+    /// Element identifiers present in an issued mdoc credential, sorted.
+    ///
+    /// Decodes rather than trusting: base64url → CBOR `IssuerSigned` →
+    /// `nameSpaces[ns]` → each `#6.24(bstr .cbor IssuerSignedItem)` →
+    /// `elementIdentifier`.
+    fn issued_elements(credential_b64: &str, namespace: &str) -> Vec<String> {
+        let bytes = B64URL.decode(credential_b64).expect("base64url");
+        let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).expect("CBOR");
+        let map = decoded.as_map().expect("IssuerSigned map");
+        let namespaces = map
+            .iter()
+            .find_map(|(k, v)| match k {
+                ciborium::Value::Text(s) if s == "nameSpaces" => Some(v),
+                _ => None,
+            })
+            .expect("nameSpaces")
+            .as_map()
+            .expect("nameSpaces is a map");
+        let items = namespaces
+            .iter()
+            .find_map(|(k, v)| match k {
+                ciborium::Value::Text(s) if s == namespace => Some(v),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("namespace {namespace} is present"))
+            .as_array()
+            .expect("a namespace holds an array of IssuerSignedItemBytes");
+
+        let mut out = Vec::new();
+        for item in items {
+            let inner = match item {
+                ciborium::Value::Tag(24, b) => match b.as_ref() {
+                    ciborium::Value::Bytes(bytes) => bytes.clone(),
+                    other => panic!("tag 24 must wrap a byte string, got {other:?}"),
+                },
+                other => panic!("elements travel tag-24 embedded, got {other:?}"),
+            };
+            let item: ciborium::Value =
+                ciborium::from_reader(inner.as_slice()).expect("IssuerSignedItem CBOR");
+            out.push(
+                item.as_map()
+                    .expect("IssuerSignedItem map")
+                    .iter()
+                    .find_map(|(k, v)| match k {
+                        ciborium::Value::Text(s) if s == "elementIdentifier" => v.as_text(),
+                        _ => None,
+                    })
+                    .expect("elementIdentifier")
+                    .to_string(),
+            );
+        }
+        out.sort();
+        out
+    }
+
+    /// An offer may not introduce an mdoc data element the credential type did
+    /// not declare.
+    ///
+    /// `Config::validate()` checks a credential type's claim list against the
+    /// governing profile — for `eu.europa.ec.av.1`, Annex A §4.1.2's closed
+    /// attribute set. That check is worthless if the Credential Endpoint then
+    /// emits whatever the offer happened to carry, so the element **set** comes
+    /// from configuration and the offer supplies only **values**. The SD-JWT VC
+    /// arm has always worked this way; the two arms disagreeing was the defect.
+    #[tokio::test]
+    async fn an_offer_supplied_element_absent_from_config_is_not_issued() {
+        let (_key_dir, key_path) = issuer_key_for_test();
+        let config = av_config(&key_path);
+
+        let mut claims = serde_json::Map::new();
+        claims.insert("age_over_18".to_string(), serde_json::json!(true));
+        // Never declared by the credential type above. An offer carrying it must
+        // not be able to smuggle it into the credential.
+        claims.insert(
+            "issuing_country".to_string(),
+            serde_json::json!("Deutschland"),
+        );
+
+        let credential = issue_for_test_with_claims(&config, "eu.europa.ec.av.1", claims).await;
+
+        assert_eq!(
+            issued_elements(&credential, "eu.europa.ec.av.1"),
+            vec!["age_over_18".to_string()],
+            "an element the credential type never declared must not be issued"
         );
     }
 }
