@@ -41,6 +41,8 @@ base64 = { workspace = true }
 foundry-sd-jwt-vc = { path = "../foundry-sd-jwt-vc" }
 foundry-mdoc = { path = "../foundry-mdoc" }
 coset = { workspace = true }
+# Task 8/9 decode an issued mdoc credential to assert its CBOR shape.
+ciborium = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 x509-cert = { workspace = true }
 rcgen = { workspace = true }

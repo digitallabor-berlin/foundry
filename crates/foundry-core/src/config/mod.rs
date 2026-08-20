@@ -1,3 +1,4 @@
+pub mod mdoc;
 mod model;
 mod validate;
 

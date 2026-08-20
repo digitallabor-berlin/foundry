@@ -82,10 +82,11 @@ fn json_to_cbor_value(json: &JsonValue) -> Result<ciborium::Value, FormatError> 
 /// [`crate::types`] for which of those facts are proven against a real
 /// presentation and which are derived.
 ///
-/// The remaining known divergence is the **outer envelope**, not the CBOR inside
-/// it: this returns a `DeviceResponse`-shaped wrapper, where OpenID4VCI L2249
-/// wants a bare `IssuerSigned` for the credential. That is tracked as a
-/// conformance gap rather than fixed here.
+/// Returns the bare `IssuerSigned` structure — `{nameSpaces, issuerAuth}` —
+/// which is what OpenID4VCI's mdoc Format Profile (L2249) requires the
+/// `credential` claim to carry once base64url-encoded. It is deliberately NOT a
+/// `DeviceResponse`: wrapping one is the holder's job, and
+/// [`build_device_response`] does it for tests.
 pub fn build_mdoc(
     claims: MdocClaims,
     signer: &dyn Signer,
@@ -250,7 +251,7 @@ pub fn build_mdoc(
         .map_err(|e| FormatError::Serialization(format!("issuerAuth encode: {e}")))?;
     let issuer_auth_val = cbor_to_value_bytes(&issuer_auth_bytes)?;
 
-    // Outer mdoc CBOR.
+    // IssuerSigned = { nameSpaces, issuerAuth }.
     let issuer_signed: Vec<(ciborium::Value, ciborium::Value)> = vec![
         (
             ciborium::Value::Text("nameSpaces".to_string()),
@@ -267,30 +268,18 @@ pub fn build_mdoc(
         ),
     ];
 
-    let doc_map: Vec<(ciborium::Value, ciborium::Value)> = vec![
-        (
-            ciborium::Value::Text("docType".to_string()),
-            ciborium::Value::Text(claims.doc_type),
-        ),
-        (
-            ciborium::Value::Text("issuerSigned".to_string()),
-            ciborium::Value::Map(issuer_signed),
-        ),
-    ];
-
-    let outer: Vec<(ciborium::Value, ciborium::Value)> = vec![
-        (
-            ciborium::Value::Text("version".to_string()),
-            ciborium::Value::Text("1.0".to_string()),
-        ),
-        (
-            ciborium::Value::Text("documents".to_string()),
-            ciborium::Value::Array(vec![ciborium::Value::Map(doc_map)]),
-        ),
-    ];
-
+    // OpenID4VCI Format Profile / mdoc (L2249): the `credential` claim MUST be
+    // the base64url-encoded CBOR `IssuerSigned` structure. This function's
+    // output IS that structure — the Credential Endpoint only base64url-encodes
+    // it — so the bare `IssuerSigned` is returned, not a `DeviceResponse`
+    // wrapper containing one. A wallet following L2249 literally parses these
+    // bytes as `IssuerSigned` directly.
+    //
+    // The `docType` the wrapper used to carry is not lost: it is inside the
+    // signed `MobileSecurityObject` above, which is where a verifier must read
+    // it from anyway, since the wrapper's copy was unauthenticated.
     let mut final_bytes = Vec::new();
-    ciborium::into_writer(&ciborium::Value::Map(outer), &mut final_bytes)
+    ciborium::into_writer(&ciborium::Value::Map(issuer_signed), &mut final_bytes)
         .map_err(|e| FormatError::Serialization(e.to_string()))?;
     Ok(final_bytes)
 }
@@ -304,29 +293,28 @@ pub fn build_mdoc(
 /// foundry's own envelope. That circularity is what hid four format defects; see
 /// the design doc §1.4.
 ///
-/// `issuer_signed_mdoc` is [`build_mdoc`]'s output; its `documents[0].issuerSigned`
-/// is lifted out and rewrapped with a `deviceSigned` half disclosing nothing.
+/// `issuer_signed_mdoc` is [`build_mdoc`]'s output — a bare `IssuerSigned` — and
+/// is wrapped here with a `deviceSigned` half disclosing nothing.
 pub fn build_device_response(
     issuer_signed_mdoc: &[u8],
     doc_type: &str,
     device_signer: &dyn Signer,
     session_transcript: &ciborium::Value,
 ) -> Result<Vec<u8>, FormatError> {
-    let outer: ciborium::Value = ciborium::from_reader(issuer_signed_mdoc)
+    // `build_mdoc` returns the bare `IssuerSigned` (OpenID4VCI L2249), so there
+    // is no wrapper to unpick — this function's whole job is to ADD the
+    // DeviceResponse layer a holder sends.
+    let issuer_signed: ciborium::Value = ciborium::from_reader(issuer_signed_mdoc)
         .map_err(|e| FormatError::Deserialization(format!("issuer-signed mdoc CBOR: {e}")))?;
-    let issuer_signed = outer
+    if issuer_signed
         .as_map()
-        .and_then(|m| lookup(m, "documents"))
-        .and_then(|v| v.as_array())
-        .and_then(|docs| docs.first())
-        .and_then(|d| d.as_map())
-        .and_then(|d| lookup(d, "issuerSigned"))
-        .ok_or_else(|| {
-            FormatError::InvalidStructure(
-                "issuer-signed mdoc missing documents[0].issuerSigned".into(),
-            )
-        })?
-        .clone();
+        .and_then(|m| lookup(m, "issuerAuth"))
+        .is_none()
+    {
+        return Err(FormatError::InvalidStructure(
+            "issuer-signed mdoc is not an IssuerSigned map carrying issuerAuth".into(),
+        ));
+    }
 
     let device_namespaces = crate::types::empty_device_namespaces();
     let payload =
@@ -485,14 +473,8 @@ mod tests {
         let outer: ciborium::Value = ciborium::from_reader(mdoc).unwrap();
         let issuer_auth = outer
             .as_map()
-            .and_then(|m| lookup(m, "documents"))
-            .and_then(|v| v.as_array())
-            .and_then(|docs| docs.first())
-            .and_then(|d| d.as_map())
-            .and_then(|d| lookup(d, "issuerSigned"))
-            .and_then(|v| v.as_map())
             .and_then(|m| lookup(m, "issuerAuth"))
-            .expect("documents[0].issuerSigned.issuerAuth is present")
+            .expect("issuerAuth is present at the IssuerSigned top level")
             .clone();
 
         // COSE_Sign1 = [protected, unprotected, payload, signature].
@@ -569,6 +551,46 @@ mod tests {
             ders,
             vec![leaf, issuer],
             "the chain must stay ordered leaf-first"
+        );
+    }
+
+    /// OpenID4VCI Format Profile / mdoc (L2249): "The `credential` claim MUST be
+    /// the base64url-encoded CBOR `IssuerSigned` structure." `build_mdoc`'s
+    /// output IS that structure — the Credential Endpoint only base64url-encodes
+    /// it — so the top level must be `IssuerSigned` itself, `{nameSpaces,
+    /// issuerAuth}`, and not a `DeviceResponse` that merely contains one.
+    ///
+    /// Reads the CBOR directly and deliberately does NOT call
+    /// `foundry_mdoc::verifier`. The verifier parses a `DeviceResponse`, which
+    /// `build_device_response` still produces, so a round trip is blind to this
+    /// distinction and would pass for either envelope (crate AGENTS.md: a
+    /// passing round-trip is not evidence).
+    #[test]
+    fn build_mdoc_emits_a_bare_issuer_signed_not_a_device_response() {
+        let signer = test_signer();
+        let bytes = build_mdoc(sample_claims(), &signer, None).unwrap();
+
+        let decoded: ciborium::Value = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let map = decoded.as_map().expect("IssuerSigned is a CBOR map");
+
+        let keys: Vec<&str> = map
+            .iter()
+            .filter_map(|(k, _)| match k {
+                ciborium::Value::Text(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec!["nameSpaces", "issuerAuth"],
+            "IssuerSigned carries exactly nameSpaces and issuerAuth at the top level"
+        );
+        assert!(
+            !keys.contains(&"documents")
+                && !keys.contains(&"version")
+                && !keys.contains(&"docType"),
+            "a DeviceResponse wrapper is one layer too many for L2249, got {keys:?}"
         );
     }
 }
