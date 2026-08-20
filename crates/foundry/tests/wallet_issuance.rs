@@ -91,19 +91,19 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
         credential_types: vec![
             CredentialType {
                 id: "pid".to_string(),
-            format: "dc+sd-jwt".to_string(),
-            vct: Some("https://issuer.example.com/vct/pid".to_string()),
-            doctype: None,
-            scope: None,
-            cryptographic_holder_binding: true,
-            display: vec![],
-            claims: vec![ClaimDef {
-                path: vec!["given_name".to_string()],
-                required: None,
-                selectively_disclosable: true,
+                format: "dc+sd-jwt".to_string(),
+                vct: Some("https://issuer.example.com/vct/pid".to_string()),
+                doctype: None,
+                scope: None,
+                cryptographic_holder_binding: true,
                 display: vec![],
-            }],
-            validity_seconds: None,
+                claims: vec![ClaimDef {
+                    path: vec!["given_name".to_string()],
+                    required: None,
+                    selectively_disclosable: true,
+                    display: vec![],
+                }],
+                validity_seconds: None,
             },
             CredentialType {
                 id: "eu.europa.ec.av.1".to_string(),
@@ -1402,8 +1402,7 @@ async fn av_mdoc_issuance_emits_a_conformant_issuer_signed() {
                 },
                 other => panic!("elements travel tag-24 embedded, got {other:?}"),
             };
-            let item: ciborium::Value =
-                ciborium::from_reader(inner.as_slice()).expect("item CBOR");
+            let item: ciborium::Value = ciborium::from_reader(inner.as_slice()).expect("item CBOR");
             let m = item.as_map().expect("IssuerSignedItem is a map");
             let field = |name: &str| {
                 m.iter().find_map(|(k, v)| match k {
@@ -1434,4 +1433,122 @@ async fn av_mdoc_issuance_emits_a_conformant_issuer_signed() {
         ],
         "exactly the two declared attributes, both true"
     );
+}
+
+/// `setup_test_app()` plus a real certificate chain.
+///
+/// `setup_test_app` gives the issuer a bare EC key with `x5c: None`, so an mdoc
+/// it issues carries no `x5chain` and cannot be chain-verified. Here the issuer
+/// key becomes a CA-signed leaf whose certificate is wired into `x5c`, and the
+/// root is configured as a trust anchor. Returns the root CA PEM so the caller
+/// can build the matching `TrustStore`.
+async fn setup_test_app_with_pki() -> (AppState, tempfile::TempDir, String) {
+    use foundry_core::config::{KeyEntry, TrustAnchor};
+    use foundry_core::pki::{issue_leaf, new_ca};
+
+    let (base, dir) = setup_test_app().await;
+
+    let root = new_ca("Foundry Test Root CA", 365).unwrap();
+    let issuer_leaf = issue_leaf(
+        &root.cert_pem,
+        &root.key_pem,
+        "issuer.example.com",
+        &["issuer.example.com".to_string()],
+        365,
+    )
+    .unwrap();
+
+    let key_path = dir.path().join("issuer_leaf.pem");
+    let cert_path = dir.path().join("issuer_leaf_cert.pem");
+    let trust_root_path = dir.path().join("trust_root.pem");
+    std::fs::write(&key_path, &issuer_leaf.key_pem).unwrap();
+    std::fs::write(&cert_path, &issuer_leaf.cert_pem).unwrap();
+    std::fs::write(&trust_root_path, &root.cert_pem).unwrap();
+
+    let mut cfg = (*base.config).clone();
+    cfg.keys.insert(
+        "issuer_key".to_string(),
+        KeyEntry {
+            private_key: key_path.to_str().unwrap().to_string(),
+            x5c: Some(cert_path.to_str().unwrap().to_string()),
+            alg: "ES256".to_string(),
+        },
+    );
+    cfg.trust_anchors = vec![TrustAnchor {
+        name: "test_ca".to_string(),
+        certs: trust_root_path.to_str().unwrap().to_string(),
+    }];
+
+    (
+        AppState::new(base.storage.clone(), std::sync::Arc::new(cfg)),
+        dir,
+        root.cert_pem,
+    )
+}
+
+/// What the Credential Endpoint emitted must verify as an mdoc.
+///
+/// The only test that spans both halves. `wallet_verification.rs`'s mdoc test
+/// calls `build_mdoc` directly, so it never sees the endpoint's actual output;
+/// this takes the base64url credential a wallet received over HTTP, wraps it in
+/// the `DeviceResponse` a holder would send, and runs foundry's own verifier
+/// over it — chain, IssuerAuth signature, MSO validity and element digests.
+#[tokio::test]
+async fn an_issued_av_mdoc_verifies_as_an_mdoc() {
+    use base64::Engine as _;
+    use foundry_core::crypto::FileSigner;
+    use foundry_core::trust::TrustStore;
+    use foundry_mdoc::builder::build_device_response;
+    use foundry_mdoc::types::{SessionTranscriptParams, session_transcript_value};
+    use foundry_mdoc::verifier::{
+        decode_device_response, parse_device_response, verify_issuer_signed,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let (state, _dir, root_cert_pem) = setup_test_app_with_pki().await;
+    let (credential, holder) = issue_av_credential(&state).await;
+
+    let issuer_signed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&credential)
+        .expect("base64url (OpenID4VCI L976)");
+
+    // The holder half. Any transcript will do: `verify_issuer_signed` does not
+    // consult it, and binding the device signature is `wallet_verification.rs`'s
+    // subject, not this test's.
+    let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+        client_id: "x509_san_dns:issuer.example.com".to_string(),
+        nonce: "test-nonce".to_string(),
+        jwk_thumbprint: None,
+        response_uri: "https://issuer.example.com/vp/response/x".to_string(),
+    })
+    .expect("transcript");
+
+    let device_signer =
+        FileSigner::from_pem(&holder.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let device_response = build_device_response(
+        &issuer_signed,
+        "eu.europa.ec.av.1",
+        &device_signer,
+        &transcript,
+    )
+    .expect("a holder can wrap the issued credential");
+
+    // Verify the issuer half against the trust anchor the fixture configured.
+    let decoded = decode_device_response(&device_response).expect("decodes");
+    let parsed = parse_device_response(&decoded).expect("parses");
+    let trust_store = TrustStore::from_pems(&[root_cert_pem.into_bytes()]).unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let verified = verify_issuer_signed(&parsed, &trust_store, now)
+        .expect("the issued mdoc verifies: chain, IssuerAuth, MSO validity, digests");
+
+    assert_eq!(verified.doc_type, "eu.europa.ec.av.1");
+    let ns = verified
+        .claims
+        .get("eu.europa.ec.av.1")
+        .expect("the doctype namespace carries the claims");
+    assert_eq!(ns.get("age_over_18"), Some(&serde_json::json!(true)));
+    assert_eq!(ns.get("age_over_16"), Some(&serde_json::json!(true)));
 }
