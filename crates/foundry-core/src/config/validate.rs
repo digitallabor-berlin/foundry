@@ -1,3 +1,4 @@
+use super::mdoc;
 use super::model::Config;
 use crate::crypto::{FileSigner, SignatureAlgorithm, Signer};
 use crate::error::ConfigError;
@@ -34,11 +35,35 @@ impl Config {
                     }
                 }
                 "mso_mdoc" => {
-                    if ct.doctype.is_none() {
+                    // OpenID4VCI Format Profile / mdoc (L2235): `doctype` is
+                    // REQUIRED and identifies the Credential type per ISO
+                    // 18013-5.
+                    let Some(doctype) = ct.doctype.as_deref() else {
                         return Err(ConfigError::Validation(format!(
                             "credential_type '{}' (mso_mdoc) requires 'doctype'",
                             ct.id
                         )));
+                    };
+                    // `vct` is an SD-JWT-VC identifier (typically an HTTPS URL)
+                    // with no relationship to ISO 18013-5's reverse-DNS docType
+                    // convention. A type carrying both was config-legal and made
+                    // docType resolution ambiguous — GAP-VCI-12. Rejecting it
+                    // removes the ambiguous state rather than picking a winner
+                    // inside it, which is what lets `credential.rs` read
+                    // `doctype` with no fallback at all.
+                    if ct.vct.is_some() {
+                        return Err(ConfigError::Validation(format!(
+                            "credential_type '{}' (mso_mdoc) must not set 'vct'; an mdoc is \
+                             identified by 'doctype' (OpenID4VCI L2235)",
+                            ct.id
+                        )));
+                    }
+                    // EU Age Verification Annex A §4.1.2's closed attribute set.
+                    // Keyed on a known doctype, in the manner of
+                    // `create_offer.rs`'s DPC_VCT; see
+                    // docs/specs/eu-age-verification-annex-a-av-profile.md.
+                    if doctype == mdoc::AV_DOCTYPE {
+                        mdoc::validate_av_claims(&ct.id, &ct.claims)?;
                     }
                 }
                 other => {
@@ -630,6 +655,72 @@ mod tests {
             format!("{err}").contains("scope"),
             "the error must name the scope collision: {err}"
         );
+    }
+
+    /// OpenID4VCI L2235 identifies an mdoc by `doctype`. `vct` is an SD-JWT-VC
+    /// identifier with no meaning here, and a type carrying both left docType
+    /// resolution ambiguous — GAP-VCI-12. The ambiguous state is removed rather
+    /// than resolved, which is what lets the Credential Endpoint read `doctype`
+    /// with no fallback at all.
+    #[test]
+    fn vct_on_an_mso_mdoc_credential_type_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types = vec![CredentialType {
+            id: "av".to_string(),
+            format: "mso_mdoc".to_string(),
+            vct: Some("https://issuer.example.com/vct/av".to_string()),
+            doctype: Some(crate::config::mdoc::AV_DOCTYPE.to_string()),
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![ClaimDef {
+                path: vec!["age_over_18".to_string()],
+                required: Some(true),
+                selectively_disclosable: false,
+                display: vec![],
+            }],
+            validity_seconds: None,
+        }];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("must not set 'vct'"),
+            "an mso_mdoc type carrying vct must be rejected: {err}"
+        );
+    }
+
+    /// The closed attribute set is enforced at load, not merely documented.
+    /// Annex A §4.1.2: "A Proof of Age Attestation SHALL NOT include any other
+    /// attribute." Without this, an operator's `issuing_country` would be
+    /// issued as an mdoc data element the profile forbids.
+    #[test]
+    fn a_foreign_attribute_on_the_av_doctype_is_rejected_at_load() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types = vec![CredentialType {
+            id: "av".to_string(),
+            format: "mso_mdoc".to_string(),
+            vct: None,
+            doctype: Some(crate::config::mdoc::AV_DOCTYPE.to_string()),
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: vec![],
+            claims: vec![
+                ClaimDef {
+                    path: vec!["age_over_18".to_string()],
+                    required: Some(true),
+                    selectively_disclosable: false,
+                    display: vec![],
+                },
+                ClaimDef {
+                    path: vec!["issuing_country".to_string()],
+                    required: None,
+                    selectively_disclosable: false,
+                    display: vec![],
+                },
+            ],
+            validity_seconds: None,
+        }];
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("issuing_country"), "{err}");
     }
 
     #[test]
