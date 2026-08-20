@@ -1,3 +1,4 @@
+use crate::credential_sets::check_credential_sets_satisfied;
 use crate::dcql::{PresentedFormat, check_dcql_match};
 use crate::dcql_model::{CredentialFormat, DcqlQuery};
 use crate::error::VerificationError;
@@ -1072,13 +1073,65 @@ async fn verify_one_credential(
     (credential, deferred)
 }
 
+/// Choose and run the one cross-cutting completeness check this request calls
+/// for.
+///
+/// OpenID4VP 1.0 L991-L997 defines two different questions, and which one
+/// applies is decided by whether `credential_sets` is present:
+///
+/// - absent (L993) — every credential query is non-optional, so the question is
+///   "was each one answered?" → `requested_credentials_answered`.
+/// - present (L995-L997) — the sets decide which combinations answer the
+///   request → `credential_sets_satisfied`.
+///
+/// They are mutually exclusive by construction, mirroring the per-credential
+/// format checks (root AGENTS.md §4.2). Emitting both would fail the
+/// conjunctive check whenever a wallet correctly omitted an optional
+/// credential.
+fn check_response_completeness(
+    dcql_query: &Value,
+    answered: &[PresentedCredential],
+) -> CheckResult {
+    // Not reachable through the request path -- `select_presentations` has
+    // already parsed this query successfully, and `create_verification_request`
+    // validated it before persisting. Fail closed rather than pass on a query
+    // this function cannot read. The legacy check name is deliberate: without a
+    // parsed query there is no way to know which algebra was intended.
+    let query: DcqlQuery = match serde_json::from_value(dcql_query.clone()) {
+        Ok(q) => q,
+        Err(e) => {
+            let reason = format!("dcql_query is not a valid DCQL query: {e}");
+            tracing::warn!(
+                check = "requested_credentials_answered",
+                reason = %reason,
+                "cannot evaluate requested credentials"
+            );
+            return CheckResult {
+                check: "requested_credentials_answered".to_string(),
+                passed: false,
+                detail: Some(reason),
+            };
+        }
+    };
+
+    match query.credential_sets() {
+        Some(sets) => check_credential_sets_satisfied(sets, answered),
+        None => check_requested_credentials_answered(&query, answered),
+    }
+}
+
 /// Did the wallet answer every credential query the request asked for?
 ///
-/// OpenID4VP 1.0 L993: with `credential_sets` absent -- the only case foundry
-/// implements -- "the Verifier requests presentations for all Credentials in
-/// `credentials`", so every credential query is non-optional. L1007-1008: "If
-/// the Wallet cannot deliver all non-optional Credentials requested by the
-/// Verifier according to these rules, it MUST NOT return any Credential(s)."
+/// Applies ONLY when `credential_sets` is absent. OpenID4VP 1.0 L993: with
+/// `credential_sets` absent "the Verifier requests presentations for all
+/// Credentials in `credentials`", so every credential query is non-optional.
+/// L1007-1008: "If the Wallet cannot deliver all non-optional Credentials
+/// requested by the Verifier according to these rules, it MUST NOT return any
+/// Credential(s)."
+///
+/// When `credential_sets` IS present, `check_credential_sets_satisfied` answers
+/// the question instead and this function is not called
+/// (`check_response_completeness` chooses).
 ///
 /// A subset `vp_token` is therefore a **wallet MUST-violation**. It is
 /// nonetheless reported as a policy verdict (HTTP 200, `verified: false`) rather
@@ -1090,27 +1143,10 @@ async fn verify_one_credential(
 ///
 /// Never returns `Err` -- fail-closed, matching `check_dcql_match`.
 fn check_requested_credentials_answered(
-    dcql_query: &Value,
+    query: &DcqlQuery,
     answered: &[PresentedCredential],
 ) -> CheckResult {
     const CHECK: &str = "requested_credentials_answered";
-
-    let query: DcqlQuery = match serde_json::from_value(dcql_query.clone()) {
-        Ok(q) => q,
-        // Not reachable through the request path -- `select_presentations` has
-        // already parsed this query successfully, and `create_verification_request`
-        // validated it before persisting. Fail closed rather than pass on a query
-        // this function cannot read.
-        Err(e) => {
-            let reason = format!("dcql_query is not a valid DCQL query: {e}");
-            tracing::warn!(check = CHECK, reason = %reason, "cannot evaluate requested credentials");
-            return CheckResult {
-                check: CHECK.to_string(),
-                passed: false,
-                detail: Some(reason),
-            };
-        }
-    };
 
     let missing: Vec<&str> = query
         .credentials()
@@ -1317,11 +1353,11 @@ async fn do_verify_vp_response(
         }
     }
 
-    // 4. Set-level policy: did every requested credential query get answered?
-    checks.push(check_requested_credentials_answered(
-        &tx.dcql_query,
-        &credentials,
-    ));
+    // 4. Set-level policy: does the response answer what the request asked for?
+    //    Which question that is -- "every credential query" or "every required
+    //    credential set" -- depends on `credential_sets` (OpenID4VP 1.0
+    //    L991-L997).
+    checks.push(check_response_completeness(&tx.dcql_query, &credentials));
 
     // 5. A credential whose status fetch was unavailable pushed NO status_check
     //    record, because unavailability is not a policy failure. On its own that
@@ -3835,18 +3871,91 @@ mod tests {
             },
         ];
 
+        let query: crate::dcql_model::DcqlQuery = serde_json::from_value(query).unwrap();
         let check = check_requested_credentials_answered(&query, &answered);
         assert_eq!(check.check, "requested_credentials_answered");
         assert!(check.passed);
     }
 
+    /// The dispatcher owns the parse-failure path, because deciding which of the
+    /// two mutually-exclusive checks applies requires reading the query. It must
+    /// fail closed under the legacy name: it cannot know which algebra was
+    /// intended.
     #[test]
-    fn requested_credentials_answered_fails_closed_on_an_unreadable_query() {
-        let check = check_requested_credentials_answered(&serde_json::json!({}), &[]);
+    fn response_completeness_fails_closed_on_an_unreadable_query() {
+        let check = check_response_completeness(&serde_json::json!({}), &[]);
+        assert_eq!(check.check, "requested_credentials_answered");
         assert!(
             !check.passed,
             "an unreadable query must fail closed, never pass"
         );
+    }
+
+    /// Root AGENTS.md §4.2 / design §2.3: the two checks are mutually
+    /// exclusive. With `credential_sets` absent, only the conjunctive one.
+    #[test]
+    fn response_completeness_emits_only_the_conjunctive_check_without_sets() {
+        let query = serde_json::json!({"credentials": [
+            {"id": "pid", "format": "dc+sd-jwt"}
+        ]});
+        let check = check_response_completeness(&query, &presented(&["pid"]));
+
+        assert_eq!(check.check, "requested_credentials_answered");
+        assert!(check.passed);
+    }
+
+    /// And with `credential_sets` present, only the set check.
+    #[test]
+    fn response_completeness_emits_only_the_set_check_with_sets() {
+        let query = serde_json::json!({
+            "credentials": [
+                {"id": "pid", "format": "dc+sd-jwt"},
+                {"id": "av", "format": "dc+sd-jwt"}
+            ],
+            "credential_sets": [{ "options": [["pid"], ["av"]] }]
+        });
+        let check = check_response_completeness(&query, &presented(&["av"]));
+
+        assert_eq!(check.check, "credential_sets_satisfied");
+        assert!(
+            check.passed,
+            "the second option was answered: {:?}",
+            check.detail
+        );
+    }
+
+    /// The case the conjunctive check would get WRONG: a wallet that answers
+    /// one alternative has not "dropped" the other.
+    #[test]
+    fn an_unanswered_alternative_is_not_a_missing_credential() {
+        let query = serde_json::json!({
+            "credentials": [
+                {"id": "girocard", "format": "dc+sd-jwt"},
+                {"id": "visa", "format": "dc+sd-jwt"}
+            ],
+            "credential_sets": [{ "options": [["girocard"], ["visa"]] }]
+        });
+        let check = check_response_completeness(&query, &presented(&["girocard"]));
+
+        assert!(
+            check.passed,
+            "answering one option satisfies the set: {:?}",
+            check.detail
+        );
+    }
+
+    /// A shared constructor for the dispatch tests; the fields this check does
+    /// not read are neutral.
+    fn presented(ids: &[&str]) -> Vec<PresentedCredential> {
+        ids.iter()
+            .map(|id| PresentedCredential {
+                query_id: (*id).to_string(),
+                format: "dc+sd-jwt".to_string(),
+                credential_type: None,
+                claims: serde_json::json!({}),
+                checks: Vec::new(),
+            })
+            .collect()
     }
 
     /// An unreachable status list keeps its HTTP 502 -- "I could not determine

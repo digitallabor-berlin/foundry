@@ -6,10 +6,10 @@
 //! `vct` (SD-JWT VC) or `doctype` (mso_mdoc), all mandatory claim paths
 //! present, and any `values` constraints met.
 //!
-//! Scope: this codebase presents a single credential per `vp_token`, so we
-//! require the presented credential to satisfy at least one credential query
-//! of its format. Multi-credential and `credential_sets` combination logic is
-//! out of scope for this phase.
+//! Scope: this module judges ONE credential against ONE credential query. Which
+//! query a presentation answers is decided upstream by
+//! `verify::select_presentations`, and which COMBINATIONS of answered queries
+//! satisfy the request is decided by [`crate::credential_sets`].
 
 use crate::dcql_model::{ClaimsPathSegment, CredentialFormat, DcqlCredentialQuery, DcqlQuery};
 use crate::transaction::CheckResult;
