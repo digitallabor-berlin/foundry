@@ -1673,19 +1673,35 @@ async fn pending_verification_with_jwe() -> (axum::Router, String, String, tempf
 async fn pending_verification_with_vp_token(
     make_vp_token: impl FnOnce(String) -> serde_json::Value,
 ) -> (axum::Router, String, String, tempfile::TempDir) {
+    pending_verification_with_query(
+        serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        }),
+        make_vp_token,
+    )
+    .await
+}
+
+/// As `pending_verification_with_vp_token`, but lets the caller supply the DCQL
+/// query too, so `credential_sets` requests can be driven through the real server.
+///
+/// Issues exactly ONE SD-JWT VC (vct `.../vct/pid`), so a `credential_sets` query
+/// used here must be satisfiable by that single credential.
+async fn pending_verification_with_query(
+    dcql_query: serde_json::Value,
+    make_vp_token: impl FnOnce(String) -> serde_json::Value,
+) -> (axum::Router, String, String, tempfile::TempDir) {
     let (state, dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
 
     let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
     let wallet_app = wallet_router(state.clone());
 
     let create_req_body = serde_json::json!({
-        "dcql_query": {
-            "credentials": [{
-                "id": "c1",
-                "format": "dc+sd-jwt",
-                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
-            }]
-        },
+        "dcql_query": dcql_query,
         "transport": "request_uri"
     });
 
@@ -1953,4 +1969,174 @@ async fn extra_form_parameters_are_tolerated() {
 
     let result: VerificationResult = serde_json::from_str(&body).unwrap();
     assert!(result.verified);
+}
+
+// ---------------------------------------------------------------------------
+// DCQL `credential_sets` (OpenID4VP 1.0 L879-L894, L989-L1008)
+//
+// The helper issues ONE SD-JWT VC, so these queries are shaped so that one
+// credential is enough to satisfy every required set -- which is exactly the
+// point of alternatives.
+// ---------------------------------------------------------------------------
+
+/// A required set with two options, answered by the second; plus an optional set
+/// the wallet cannot satisfy. Per L995-L997 that verifies.
+#[tokio::test]
+async fn credential_sets_alternative_answered_by_one_option_verifies() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_query(
+        serde_json::json!({
+            "credentials": [
+                { "id": "visa_card", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/visa"] } },
+                { "id": "pid", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/pid"] } },
+                { "id": "loyalty", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/loyalty"] } }
+            ],
+            "credential_sets": [
+                { "options": [["visa_card"], ["pid"]] },
+                { "options": [["loyalty"]], "required": false }
+            ]
+        }),
+        |presentation| serde_json::json!({ "pid": [presentation] }),
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let result: VerificationResult = serde_json::from_str(&body).unwrap();
+    assert!(
+        result.verified,
+        "one option per required set is enough: {body}"
+    );
+
+    let check = result
+        .checks
+        .iter()
+        .find(|c| c.check == "credential_sets_satisfied")
+        .expect("the set check must be recorded");
+    assert!(check.passed);
+    let detail = check.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("optional credential set #1"),
+        "the unsatisfied optional set is worth reporting: {detail}"
+    );
+
+    assert!(
+        !result
+            .checks
+            .iter()
+            .any(|c| c.check == "requested_credentials_answered"),
+        "the two completeness checks are mutually exclusive: {:?}",
+        result.checks
+    );
+}
+
+/// A response answering NONE of a required set's options is a policy failure:
+/// HTTP 200 with `verified: false` (root AGENTS.md §4.3), naming the set.
+#[tokio::test]
+async fn credential_sets_unsatisfied_required_set_is_a_policy_failure() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_query(
+        serde_json::json!({
+            "credentials": [
+                { "id": "pid", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/pid"] } },
+                { "id": "girocard", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/girocard"] } },
+                { "id": "visa_card", "format": "dc+sd-jwt",
+                  "meta": { "vct_values": ["https://localhost:8443/vct/visa"] } }
+            ],
+            "credential_sets": [
+                { "options": [["pid"]] },
+                { "options": [["girocard"], ["visa_card"]] }
+            ]
+        }),
+        |presentation| serde_json::json!({ "pid": [presentation] }),
+    )
+    .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unsatisfied set is a policy verdict, not a structural error: {body}"
+    );
+
+    let result: VerificationResult = serde_json::from_str(&body).unwrap();
+    assert!(!result.verified);
+
+    let check = result
+        .checks
+        .iter()
+        .find(|c| c.check == "credential_sets_satisfied")
+        .expect("the set check must be recorded");
+    assert!(!check.passed);
+    let detail = check.detail.as_deref().unwrap_or_default();
+    assert!(
+        detail.contains("credential set #1"),
+        "name the unsatisfied set: {detail}"
+    );
+    assert!(
+        detail.contains("girocard") && detail.contains("visa_card"),
+        "name what would have satisfied it: {detail}"
+    );
+
+    // The credential that DID arrive is still fully verified and reported.
+    assert_eq!(result.credentials.len(), 1);
+    assert_eq!(result.credentials[0].query_id, "pid");
+    assert!(
+        result.credentials[0].checks.iter().all(|c| c.passed),
+        "the answered credential's own checks all pass: {:?}",
+        result.credentials[0].checks
+    );
+}
+
+/// The conjunctive path must be untouched: with `credential_sets` absent, the
+/// legacy check name is still the one emitted.
+#[tokio::test]
+async fn without_credential_sets_the_conjunctive_check_is_still_emitted() {
+    let (wallet_app, verification_id, jwe_str, _dir) = pending_verification_with_jwe().await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/vp/response/{verification_id}"))
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(format!("response={jwe_str}")))
+        .unwrap();
+
+    let (status, body) = status_and_body(wallet_app.clone().oneshot(req).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let result: VerificationResult = serde_json::from_str(&body).unwrap();
+    assert!(
+        result
+            .checks
+            .iter()
+            .any(|c| c.check == "requested_credentials_answered" && c.passed),
+        "checks: {:?}",
+        result.checks
+    );
+    assert!(
+        !result
+            .checks
+            .iter()
+            .any(|c| c.check == "credential_sets_satisfied"),
+        "checks: {:?}",
+        result.checks
+    );
 }
