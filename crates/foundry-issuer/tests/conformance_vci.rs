@@ -963,12 +963,16 @@ async fn vci_0071_mdoc_credential_string_is_base64url_encoded() {
 }
 
 // ---------------------------------------------------------------------------
-// GAP-VCI-16 — OpenID4VCI Format Profile / mdoc (L2249): the `credential`
-// claim MUST be the base64url-encoded CBOR `IssuerSigned` structure.
+// VCI-0176 — OpenID4VCI Format Profile / mdoc (L2249): the `credential` claim
+// MUST be the base64url-encoded CBOR `IssuerSigned` structure.
+//
+// Closed 2026-08-20: `build_mdoc` returns the bare `IssuerSigned`. The
+// assertions below are unchanged from when this test recorded GAP-VCI-16 — it
+// was written failing-first, so closing the gap is the code catching up to the
+// test, not the test changing its mind.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-16: OpenID4VCI Format Profile / mdoc (L2249) — build_mdoc returns a DeviceResponse-shaped wrapper {version, documents: [{docType, issuerSigned}]}, so the issued credential carries one layer more than the clause allows; a wallet parsing the payload as a bare IssuerSigned fails"]
-async fn gap_vci_16_mdoc_credential_is_not_a_bare_issuer_signed() {
+async fn vci_0176_mdoc_credential_is_a_bare_issuer_signed() {
     let (_key_dir, key_path) = write_test_issuer_key();
     let (cfg, storage, access_token, secret) = setup_credential_flow(&key_path, "mdl").await;
 
@@ -1020,16 +1024,22 @@ async fn gap_vci_16_mdoc_credential_is_not_a_bare_issuer_signed() {
 }
 
 // ---------------------------------------------------------------------------
-// GAP-VCI-12 — OpenID4VCI Format Profile / mdoc (L2235): `doctype` is
-// REQUIRED and identifies the Credential type per ISO 18013-5.
+// VCI-0175 — OpenID4VCI Format Profile / mdoc (L2235): `doctype` is REQUIRED
+// and identifies the Credential type per ISO 18013-5.
+//
+// Closed 2026-08-20 in two places: `Config::validate()` rejects `vct` on an
+// `mso_mdoc` credential type, and the Credential Endpoint reads `doctype` with
+// no fallback at all.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-#[ignore = "GAP-VCI-12: OpenID4VCI Format Profile / mdoc (L2235) — when a mso_mdoc credential_type config carries both `vct` and `doctype`, handle_credential_request's docType resolution prefers `vct` over `doctype`, producing a docType that is not a valid ISO 18013-5 identifier"]
-async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured() {
+async fn vci_0175_mdoc_doc_type_comes_from_doctype() {
     let (_key_dir, key_path) = write_test_issuer_key();
     let mut cfg = credential_test_config(&key_path);
-    // Mutate the existing "mdl" fixture to carry BOTH fields -- an unusual
-    // but entirely config-legal state nothing in Config::validate() rejects.
+    // Set BOTH fields. `Config::validate()` now REJECTS this, so it is not a
+    // state a loaded config can reach -- which is the point: the Config is
+    // built programmatically here, bypassing validation, to prove the credential
+    // path ITSELF never reads `vct`. Defence in depth behind the config-load
+    // check, not a redundant duplicate of it.
     for ct in cfg.credential_types.iter_mut() {
         if ct.id == "mdl" {
             ct.vct = Some("https://issuer.example.com/vct/mdl-should-not-be-used".to_string());
@@ -1105,20 +1115,21 @@ async fn gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured(
     .await
     .expect("mdoc issuance must succeed");
     let credential = &res.credentials[0].credential;
-    let cbor_bytes = base64::engine::general_purpose::STANDARD
+    // OpenID4VCI L976 / VCI-0071: binary Credential Formats are base64url, not
+    // standard base64. This line read `STANDARD` for exactly as long as the test
+    // was `#[ignore]`d — which is how long nothing could notice.
+    let cbor_bytes = URL_SAFE_NO_PAD
         .decode(credential)
-        .expect("mdoc credential must be valid base64 (GAP-VCI-03's own encoding)");
+        .expect("mdoc credential must be base64url (OpenID4VCI L976)");
 
     let doctype_needle = b"org.iso.18013.5.1.mDL";
     assert!(
         cbor_bytes
             .windows(doctype_needle.len())
             .any(|w| w == doctype_needle),
-        "OpenID4VCI Format Profile / mdoc (L2235) requires docType to identify the Credential \
-         type per ISO 18013-5 -- the configured `doctype` ('org.iso.18013.5.1.mDL') should \
-         appear in the encoded mdoc, but handle_credential_request's docType resolution \
-         prefers `vct` over `doctype` whenever both are configured, so the encoded docType is \
-         the vct string instead"
+        "OpenID4VCI Format Profile / mdoc (L2235): the docType must be the configured \
+         `doctype` ('org.iso.18013.5.1.mDL'), never the `vct`, even when a \
+         programmatically-built Config carries both"
     );
 }
 
