@@ -24,7 +24,7 @@ fn quickstart_config() -> Config {
 }
 
 #[test]
-fn quickstart_config_carries_both_credential_types() {
+fn quickstart_config_carries_all_credential_types() {
     let cfg = quickstart_config();
     let ids: Vec<&str> = cfg
         .credential_types
@@ -35,6 +35,46 @@ fn quickstart_config_carries_both_credential_types() {
     assert!(
         ids.contains(&"com.emvco.dpc.card"),
         "expected com.emvco.dpc.card, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"eu.europa.ec.av.1"),
+        "expected eu.europa.ec.av.1, got {ids:?}"
+    );
+}
+
+/// The Proof of Age type's shape is the whole point of shipping it: an mdoc
+/// identified by `doctype` with no `vct`, and exactly the two attributes EU Age
+/// Verification Annex A §4.1.2 admits — `age_over_18` mandatory, one optional
+/// `age_over_NN`.
+#[test]
+fn quickstart_av_type_has_the_expected_shape() {
+    let cfg = quickstart_config();
+    let av = cfg
+        .credential_types
+        .iter()
+        .find(|ct| ct.id == "eu.europa.ec.av.1")
+        .expect("av type present");
+
+    assert_eq!(av.format, "mso_mdoc");
+    assert_eq!(av.doctype.as_deref(), Some("eu.europa.ec.av.1"));
+    assert_eq!(
+        av.vct, None,
+        "an mdoc is identified by doctype; vct is rejected at load (OpenID4VCI L2235)"
+    );
+    assert!(av.cryptographic_holder_binding);
+    assert_eq!(av.resolved_validity_seconds(), 7_776_000);
+
+    let names: Vec<&str> = av.claims.iter().map(|c| c.path[0].as_str()).collect();
+    assert_eq!(names, vec!["age_over_18", "age_over_16"]);
+
+    let age_over_18 = av
+        .claims
+        .iter()
+        .find(|c| c.path == vec!["age_over_18".to_string()])
+        .expect("age_over_18 declared");
+    assert!(
+        age_over_18.is_required(),
+        "Annex A §4.1.2 records age_over_18 as Mandatory in issuance"
     );
 }
 

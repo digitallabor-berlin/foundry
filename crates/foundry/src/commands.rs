@@ -374,6 +374,40 @@ credential_types:
           - { locale: en-US, name: "Card Identifier" }
           - { locale: de-DE, name: "Karten-ID" }
           - { locale: fr-FR, name: "Identifiant de carte" }
+  # EUDI Proof of Age attestation, and the only mso_mdoc type this issuer mints.
+  # Governed by docs/specs/eu-age-verification-annex-a-av-profile.md -- EU Age
+  # Verification Solution Technical Specification, Annex A (normative).
+  - id: eu.europa.ec.av.1
+    format: mso_mdoc
+    # Annex A 4.1.1: "The document type for Proof of Age attestation SHALL be
+    # `eu.europa.ec.av.1`." Deliberately no `vct` -- that is an SD-JWT-VC
+    # identifier and Config::validate() rejects it on an mso_mdoc type
+    # (OpenID4VCI L2235). 4.1.2 puts the attributes in a namespace equal to the
+    # doctype, which foundry resolves in code rather than from config.
+    doctype: eu.europa.ec.av.1
+    cryptographic_holder_binding: true
+    # 90 days, matching Annex A A.11's example validity window. The MSO's
+    # validFrom equals its signed time, so this is a relative lifetime -- the
+    # profile specifies no absolute window.
+    validity_seconds: 7776000
+    display:
+      - { name: "Proof of Age", locale: en-US }
+      - { name: "Altersnachweis", locale: de-DE }
+    # Annex A 4.1.2 defines exactly two attributes, both `bool`, then closes the
+    # set: "A Proof of Age Attestation SHALL NOT include any other attribute."
+    # Config::validate() enforces that, so adding a claim here -- an issue_date,
+    # an issuing_country -- is a startup failure, not a silent divergence.
+    #
+    # `selectively_disclosable` is deliberately unset: every IssuerSignedItem is
+    # inherently selectively disclosable, so the flag has no meaning for mdoc.
+    # That is why `required` is stated explicitly rather than left to its
+    # `!selectively_disclosable` default, which would make the
+    # mandatory/optional distinction depend on a flag that does not apply here.
+    claims:
+      - path: [age_over_18]
+        required: true
+      - path: [age_over_16]
+        required: false
 verifier:
   # The Client Identifier Prefix is not configurable: HAIP OpenID4VP L256 mandates
   # `x509_hash` for signed requests, so it is always derived from the `x5c` leaf of
@@ -446,4 +480,16 @@ verifier:
           - options: [[pid], [av]]
           - options: [[loyalty]]
             required: false
-"#;
+
+    # The mdoc counterpart to `over18` above. An mdoc claims path is
+    # [namespace, element], and for this doctype the namespace equals the
+    # doctype (Annex A 4.1.2). `doctype_value` is REQUIRED in an mso_mdoc
+    # Credential Query's `meta` (OpenID4VP L2802).
+    - id: over18_mdoc
+      dcql:
+        credentials:
+          - id: av
+            format: mso_mdoc
+            meta: { doctype_value: eu.europa.ec.av.1 }
+            claims:
+              - path: [eu.europa.ec.av.1, age_over_18]"#;
