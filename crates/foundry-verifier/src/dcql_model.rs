@@ -4,16 +4,20 @@
 //! evaluates, written against OpenID4VP 1.0 §6 (Digital Credentials Query
 //! Language) and §7 (Claims Path Pointer).
 //!
-//! Scope is deliberately the subset [`crate::dcql`] consumes. `credential_sets`
-//! (§6.2), `claim_sets`, `multiple`, and `trusted_authorities` are not modelled;
-//! per §6, unknown properties are ignored rather than rejected, so queries
-//! carrying them still deserialize and are evaluated on the parts we do
-//! understand.
+//! Scope is deliberately the subset [`crate::dcql`] and
+//! [`crate::credential_sets`] consume. `claim_sets`, `multiple`, and
+//! `trusted_authorities` are not modelled; per §6, unknown properties are
+//! ignored rather than rejected, so queries carrying them still deserialize and
+//! are evaluated on the parts we do understand.
 //!
-//! Three non-empty constraints from the spec are enforced at deserialization,
+//! Five non-empty constraints from the spec are enforced at deserialization,
 //! because each one is fail-closed:
 //!
 //! - `credentials` (§6) — a query requesting nothing must not silently "match".
+//! - `credential_sets` (L726-L728) — likewise for a query constraining nothing.
+//! - `options` and each individual option (L886-L890) — an empty option would
+//!   be satisfied by the empty set, making its whole set unconditionally
+//!   satisfied.
 //! - `claims[].path` (§6.3) — an empty path would resolve to the credential
 //!   root and spuriously satisfy any claim requirement.
 //! - `claims[].values` (§6.3) — spec requires non-empty when present.
@@ -59,16 +63,58 @@ where
     non_empty(d, "values").map(Some)
 }
 
+fn non_empty_credential_sets<'de, D>(d: D) -> Result<Option<Vec<DcqlCredentialSetQuery>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    non_empty(d, "credential_sets").map(Some)
+}
+
+/// OpenID4VP 1.0 L886-L890: `options` is a non-empty array whose every element
+/// is itself a non-empty array of credential query identifiers. Both levels are
+/// enforced here because the inner one has no separate serde hook to hang off:
+/// `Vec<Vec<String>>` deserializes as a whole.
+fn non_empty_options<'de, D>(d: D) -> Result<Vec<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let options: Vec<Vec<String>> = non_empty(d, "options")?;
+    if let Some(idx) = options.iter().position(|option| option.is_empty()) {
+        return Err(D::Error::custom(format!(
+            "`options[{idx}]` must be a non-empty array"
+        )));
+    }
+    Ok(options)
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// A DCQL query (OpenID4VP 1.0 §6).
 #[derive(Debug, Clone, Deserialize)]
 pub struct DcqlQuery {
     #[serde(deserialize_with = "non_empty_credentials")]
     credentials: Vec<DcqlCredentialQuery>,
+    /// OpenID4VP 1.0 L726-L728: OPTIONAL, a non-empty array of Credential Set
+    /// Queries constraining WHICH of `credentials` to return.
+    ///
+    /// `Option` is load-bearing: absent (`None`) means every credential query is
+    /// non-optional (L993), while present means the set algebra decides
+    /// (L995-L997). `deserialize_with` runs only when the member is present, so
+    /// an absent one stays `None` while a present-but-empty one is rejected.
+    #[serde(default, deserialize_with = "non_empty_credential_sets")]
+    credential_sets: Option<Vec<DcqlCredentialSetQuery>>,
 }
 
 impl DcqlQuery {
     pub fn credentials(&self) -> &[DcqlCredentialQuery] {
         &self.credentials
+    }
+
+    /// `None` when the query carries no `credential_sets` member.
+    pub fn credential_sets(&self) -> Option<&[DcqlCredentialSetQuery]> {
+        self.credential_sets.as_deref()
     }
 }
 
@@ -103,6 +149,32 @@ impl DcqlCredentialQuery {
 
     pub fn claims(&self) -> Option<&Vec<DcqlClaimsQuery>> {
         self.claims.as_ref()
+    }
+}
+
+/// A Credential Set Query (OpenID4VP 1.0 L879-L894).
+///
+/// One entry expresses a single use case the Verifier needs satisfied, and its
+/// `options` are the alternative credential combinations that would satisfy it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DcqlCredentialSetQuery {
+    #[serde(deserialize_with = "non_empty_options")]
+    options: Vec<Vec<String>>,
+    /// L892-L894: "OPTIONAL A boolean which indicates whether this set of
+    /// Credentials is required ... If omitted, the default value is `true`."
+    #[serde(default = "default_true")]
+    required: bool,
+}
+
+impl DcqlCredentialSetQuery {
+    /// Each element is one alternative: a list of credential query ids that
+    /// together satisfy this set (L887-L888).
+    pub fn options(&self) -> &[Vec<String>] {
+        &self.options
+    }
+
+    pub fn required(&self) -> bool {
+        self.required
     }
 }
 
@@ -250,7 +322,7 @@ mod tests {
                 "trusted_authorities": [{ "type": "aki", "values": ["x"] }],
                 "claims": [{ "path": ["given_name"], "id": "gn", "future_member": 1 }]
             }],
-            "credential_sets": [{ "options": [["c1"]] }],
+            "claim_sets": [["gn"]],
             "future_top_level": "ignored"
         }))
         .unwrap();
@@ -421,5 +493,121 @@ mod tests {
         assert!(parse(json!({ "credentials": [{ "format": "dc+sd-jwt" }] })).is_err());
         assert!(parse(json!({ "credentials": [{ "id": "c1" }] })).is_err());
         assert!(parse(json!({})).is_err());
+    }
+
+    /// OpenID4VP 1.0 L892-L894: "If omitted, the default value is `true`."
+    #[test]
+    fn credential_set_required_defaults_to_true() {
+        let q = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": [{ "options": [["c1"]] }]
+        }))
+        .unwrap();
+
+        let sets = q
+            .credential_sets()
+            .expect("credential_sets must be modelled");
+        assert_eq!(sets.len(), 1);
+        assert!(sets[0].required(), "omitted `required` means true");
+        assert_eq!(sets[0].options(), [vec!["c1".to_string()]]);
+    }
+
+    #[test]
+    fn credential_set_required_false_round_trips() {
+        let q = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": [{ "options": [["c1"]], "required": false }]
+        }))
+        .unwrap();
+
+        assert!(!q.credential_sets().unwrap()[0].required());
+    }
+
+    /// An absent member is `None`, not an empty slice: the two mean different
+    /// things to the verifier (all-credentials-required vs. set algebra).
+    #[test]
+    fn absent_credential_sets_is_none() {
+        let q = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }]
+        }))
+        .unwrap();
+
+        assert!(q.credential_sets().is_none());
+    }
+
+    /// A multi-id option means "all of these together" (L887-L888).
+    #[test]
+    fn options_carry_multi_id_alternatives() {
+        let q = parse(json!({
+            "credentials": [
+                { "id": "pid", "format": "dc+sd-jwt", "meta": {} },
+                { "id": "av", "format": "dc+sd-jwt", "meta": {} }
+            ],
+            "credential_sets": [{ "options": [["pid", "av"], ["av"]] }]
+        }))
+        .unwrap();
+
+        let sets = q.credential_sets().unwrap();
+        assert_eq!(sets[0].options().len(), 2);
+        assert_eq!(
+            sets[0].options()[0],
+            vec!["pid".to_string(), "av".to_string()]
+        );
+    }
+
+    /// L726-L728: `credential_sets` is a NON-EMPTY array when present. An empty
+    /// one is fail-closed-rejected for the same reason `credentials` is: a query
+    /// constraining nothing must not silently "match".
+    #[test]
+    fn rejects_empty_credential_sets() {
+        let err = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": []
+        }))
+        .expect_err("an empty credential_sets array must be rejected");
+
+        assert!(
+            err.to_string().contains("credential_sets"),
+            "the message must name the field: {err}"
+        );
+    }
+
+    /// VP-0104 / L886-L890: `options` is REQUIRED and non-empty.
+    #[test]
+    fn rejects_empty_options_array() {
+        let err = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": [{ "options": [] }]
+        }))
+        .expect_err("an empty options array must be rejected");
+
+        assert!(err.to_string().contains("options"), "{err}");
+    }
+
+    /// VP-0104 / L889-L890: "The value of each element in the `options` array is
+    /// a non-empty array of identifiers."
+    #[test]
+    fn rejects_an_empty_option() {
+        let err = parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": [{ "options": [["c1"], []] }]
+        }))
+        .expect_err("an empty option must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("options[1]"),
+            "name the offending index: {msg}"
+        );
+    }
+
+    /// VP-0104: `options` is REQUIRED, so a set without it is malformed.
+    #[test]
+    fn rejects_a_credential_set_without_options() {
+        parse(json!({
+            "credentials": [{ "id": "c1", "format": "dc+sd-jwt", "meta": {} }],
+            "credential_sets": [{ "required": true }]
+        }))
+        .expect_err("`options` is REQUIRED");
     }
 }
