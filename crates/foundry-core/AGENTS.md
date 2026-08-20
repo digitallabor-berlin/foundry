@@ -27,6 +27,7 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | --- | --- |
 | `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
 | `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
+| `config/mdoc.rs` | What foundry knows about specific mdoc doctypes, keyed on the doctype string: `namespace_for_doctype` (ISO mDL is the exception — doctype `org.iso.18013.5.1.mDL`, namespace `org.iso.18013.5.1`; every EUDI attestation uses its doctype verbatim) and `validate_av_claims`, which enforces EU Age Verification Annex A §4.1.2's closed attribute set for `AV_DOCTYPE`. Also exports `AV_DOCTYPE` / `MDL_DOCTYPE`. Lives here because both `config/validate.rs` and `foundry-issuer` need it and core is the only crate below both |
 | `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`) |
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
@@ -225,3 +226,17 @@ cargo nextest run -p foundry-core                                 # narrow, whil
   enumeration value, by contrast, **is** a hard parse error: unlike an unread
   authorization tag, a security level foundry cannot rank is not safe to treat
   as `Software` (weakest) or ignore.
+
+- **`vct` on an `mso_mdoc` credential type is rejected at load.** `Config::validate()`
+  requires `doctype` and forbids `vct` for that format, because `vct` is an
+  SD-JWT-VC identifier with no meaning for an mdoc and a type carrying both made
+  docType resolution ambiguous. Downstream code therefore needs **no** fallback
+  chain: `foundry-issuer`'s Credential Endpoint reads `cred_type.doctype` alone.
+  Removing the ambiguous state, rather than picking a winner inside it, is what
+  makes that safe — reintroducing a `vct` fallback would re-document a precedence
+  rule that no longer exists.
+- **An `eu.europa.ec.av.1` type is additionally checked against a closed
+  attribute set.** EU Age Verification Annex A §4.1.2 admits only `age_over_18`
+  (Mandatory in issuance, so it must also be `required`) and `age_over_NN`, and
+  states a Proof of Age Attestation SHALL NOT include any other attribute. That
+  is a startup failure, not a silent divergence; see `config/mdoc.rs`.

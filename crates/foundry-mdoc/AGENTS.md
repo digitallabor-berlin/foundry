@@ -173,16 +173,28 @@ the whole workspace — `cargo nextest run --workspace --no-fail-fast
   transcript applies is an OpenID4VP question (invocation method, Response Mode,
   Origin) and this crate sees none of it. The `Value` form also avoids a
   decode/re-encode round trip when it is spliced into `DeviceAuthentication`.
-- **The remaining known non-conformance is the OpenID4VCI credential envelope,
-  on the issuance side.** `build_mdoc` returns a `DeviceResponse`-shaped wrapper
-  where OpenID4VCI L2249 wants a bare `IssuerSigned`. The CBOR *inside* the
-  envelope is conformant; the wrapper is not. Tracked as a conformance gap in
-  `docs/conformance/openid4vc-conformance.md`. That "inside is conformant" claim
-  was overstated when first written on 2026-08-19 — the enclosed `issuerAuth`
-  still carried a one-element `x5chain` array, which RFC 9360's grammar does not
-  admit. It became true only when the encoding was fixed later the same day (see
-  the `x5chain` entry below); state it as a property of the current code, not as
-  a standing guarantee.
+- **`build_mdoc` returns the bare `IssuerSigned`, and `build_device_response`
+  adds the `DeviceResponse` layer.** As of 2026-08-20 the builder emits exactly
+  `{nameSpaces, issuerAuth}` — the structure OpenID4VCI L2249 requires the
+  `credential` claim to carry once base64url-encoded — so the Credential
+  Endpoint only encodes it. Wrapping a `DeviceResponse` is the holder's job and
+  now happens *only* in `build_device_response`, which production never calls.
+  The verifier's `version` / `documents` traversal is unchanged and remains
+  correct: it parses **presentations**, which are still `DeviceResponse`s. This
+  is a statement about the current code, not a standing guarantee — the previous
+  version of this entry overstated conformance once already, so verify before
+  repeating it. The guard is
+  `build_mdoc_emits_a_bare_issuer_signed_not_a_device_response`, which reads the
+  CBOR directly: a round trip cannot see this class of defect, because
+  `verify_mdoc` parses a `DeviceResponse` and `build_device_response` still
+  produces one, so both sides moved together and would agree either way.
+- **The mdoc namespace is not always the docType.**
+  `foundry_core::config::mdoc::namespace_for_doctype` resolves it: ISO mDL's
+  doctype `org.iso.18013.5.1.mDL` maps to namespace `org.iso.18013.5.1`, while
+  every EUDI attestation uses its doctype verbatim (EU Age Verification Annex A
+  §4.1.2, "All attributes belong to namespace `eu.europa.ec.av.1`").
+  `build_mdoc` itself has no opinion — it takes the namespace as a key of
+  `MdocClaims::namespaces`; the caller resolves it.
 - **A green mdoc test no longer proves only self-consistency — but only one test
   earns that.** Everything except `tests/real_presentation.rs` round-trips
   foundry's builder through its own verifier, which is precisely how five format

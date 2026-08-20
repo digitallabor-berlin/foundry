@@ -145,6 +145,16 @@ cargo nextest run -p foundry --test wallet_issuance               # issuance flo
 
 ## Gotchas
 
+- **The mdoc arm takes its element *set* from `cred_type.claims` and only its
+  *values* from `tx.claims`.** The SD-JWT VC arm has always worked this way; the
+  two arms disagreeing was a defect. It matters because `Config::validate()`
+  checks a credential type's claim list against the governing profile — for
+  `eu.europa.ec.av.1`, Annex A §4.1.2's closed attribute set — and that check is
+  void if the Credential Endpoint then emits whatever the offer happened to
+  carry. Iterating `tx.claims` let an offer introduce an element the configured
+  type never declared. Guarded by
+  `an_offer_supplied_element_absent_from_config_is_not_issued`.
+
 - **Never call `ES256.verifier_from_jwk` directly on a key that arrived inline
   with the message it verifies — use `jose::es256_verifier_from_inline_jwk`.**
   josekit copies the JWK's own `kid` member into the verifier, after which

@@ -63,8 +63,11 @@ unanchored expired chain above is irrelevant to it. That is why this half is
 provable from a capture and the issuer half is not.
 
 **Still not proven here:** issuer-chain trust and MSO expiry policy (design doc
-§8), and the OpenID4VCI credential envelope on the issuance side (design doc §7,
-`GAP-VCI-16`).
+§8). The OpenID4VCI credential envelope on the issuance side (design doc §7) is
+no longer among them: it was closed on 2026-08-20, and `build_mdoc` now returns
+the bare `IssuerSigned` L2249 requires. That is guarded by
+`build_mdoc_emits_a_bare_issuer_signed_not_a_device_response`, which — like this
+fixture — asserts on bytes rather than on a round trip.
 
 ## Capturing a fresh pair
 
