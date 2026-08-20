@@ -193,10 +193,11 @@ set is worthless without this. The two format arms disagreeing about whether
 config or offer defines the claim set is itself the defect; they are made to
 agree.
 
-### 2.6 Namespace is configurable, defaulting to doctype
+### 2.6 Namespace is resolved from the doctype, in code
 
-**Decided:** `CredentialType` gains an optional `namespace`, defaulting to
-`doctype`.
+**Decided:** a doctype-keyed resolver — `org.iso.18013.5.1.mDL` →
+`org.iso.18013.5.1`, and **doctype itself** for every other doctype, including
+`eu.europa.ec.av.1`. No new config surface.
 
 Namespace-equals-doctype is **correct** for EUDI attestations — Annex A §4.1.2:
 *"All attributes belong to namespace `eu.europa.ec.av.1`"* — and **wrong** for
@@ -208,13 +209,30 @@ namespace is one config entry away from being emitted.
 
 **Rejected — record mDL's namespace as a new conformance gap.** §4.4 admits
 unimplemented optional features but not incorrect implementations, and emitting
-mDL elements under the doctype as namespace is the second kind. The fix is one
-optional field and one line at the call site; deferring it would bank a known
-wrong wire format to save less work than writing the gap row.
+mDL elements under the doctype as namespace is the second kind.
 
-This is the only *additive* config surface in this change. It is not
-mdoc-specific in name, but it is mdoc-only in effect: `dc+sd-jwt` has no
-namespaces.
+**Rejected — an optional `namespace` field on `CredentialType`.** This was the
+original decision, on the stated grounds that it cost "one optional field and one
+line at the call site." That estimate was asserted without being measured and is
+false: `CredentialType` is built as a struct literal in **33 places across 13
+files**, and Rust struct literals do not tolerate a new field regardless of
+`#[serde(default)]` (the type has no `Default` impl). The real cost was 33
+mechanical edits across four crates, in a change whose subject is one
+age-verification credential — a review surface several times the size of the
+behaviour being added.
+
+The resolver is better on the merits, not merely cheaper. §2.2 already commits
+this change to a doctype-keyed table for the closed attribute set, so the
+namespace costs approximately nothing architecturally and the two facts foundry
+knows about a given doctype live in one place. It fails **safe**: an unrecognised
+doctype resolves to namespace-equals-doctype, which is the EUDI convention and
+correct for every EUDI attestation.
+
+The accepted cost: issuing a non-EUDI, non-mDL mdoc whose namespace differs from
+its doctype needs a one-line code change rather than a config line. foundry ships
+zero mdoc credential types today, so nothing is regressed by that trade.
+
+This change therefore adds **no config surface at all**.
 
 ---
 
@@ -252,22 +270,34 @@ of `MdocClaims::namespaces`, and §2.6's change is entirely in the caller.
 
 ### 3.3 `foundry-core`
 
-`config/model.rs`: `CredentialType` gains `namespace: Option<String>` with
-`#[serde(default)]`, plus a `resolved_namespace()` accessor in the manner of
-`resolved_scope()` / `resolved_validity_seconds()`, returning `doctype` when
-unset.
+`config/model.rs` is **unchanged** — no new field (§2.6).
+
+New module `config/mdoc.rs`, holding everything foundry knows about a specific
+mdoc doctype, so the two doctype-keyed facts cannot drift apart:
+
+- `pub const AV_DOCTYPE: &str = "eu.europa.ec.av.1"` and
+  `pub const MDL_DOCTYPE: &str = "org.iso.18013.5.1.mDL"`, each carrying its
+  citation;
+- `pub fn namespace_for_doctype(doctype: &str) -> &str` — `MDL_DOCTYPE` maps to
+  `"org.iso.18013.5.1"`, everything else returns the doctype unchanged (§2.6);
+- `pub fn validate_av_claims(...)` — the closed attribute set check (§2.2),
+  called from `validate.rs` so the rule is testable without constructing a whole
+  `Config`.
+
+It lives in `foundry-core` rather than `foundry-issuer` because both
+`config/validate.rs` (below) and `foundry-issuer` need it, and `foundry-core` is
+the only crate below both — root `AGENTS.md` §3.
 
 `config/validate.rs`, `"mso_mdoc"` arm: `doctype` still required; `vct` newly
-rejected; and for `doctype == "eu.europa.ec.av.1"`, the closed attribute set
-enforced per §2.2. A module constant names the doctype, with the Annex A citation
-on it.
+rejected; and for `AV_DOCTYPE`, `validate_av_claims` enforced per §2.2.
 
 ### 3.4 `foundry-issuer`
 
 `credential.rs`, `"mso_mdoc"` arm only:
 
 - doctype from `cred_type.doctype`, no fallback, typed error on absence (§2.4);
-- namespace from `cred_type.resolved_namespace()` (§2.6);
+- namespace from `foundry_core::config::mdoc::namespace_for_doctype(&doc_type)`
+  (§2.6);
 - elements built by iterating `cred_type.claims` (§2.5);
 - each change carrying its spec citation in a comment.
 
@@ -283,6 +313,13 @@ attestation re-issuance (using refresh tokens) and revocation"* as out of scope,
 and no MSO example contains a `status` element.
 
 ### 3.5 `foundry` (binary)
+
+Two configs must stay in sync, not one: the repository's `config.yaml`, and the
+`QUICKSTART_CONFIG` template in `crates/foundry/src/commands.rs` that
+`foundry quickstart` writes out. They are near-identical twins today, and
+`quickstart_config.rs` exists precisely because the template is a `const &str`
+that nothing else in the suite would notice drifting. Both gain the credential
+type and the named query.
 
 `config.yaml` gains the credential type:
 
@@ -321,7 +358,7 @@ issued through foundry's own verifier.
 | `foundry-mdoc/src/builder.rs` | **Byte-level, verifier-free:** decode `build_mdoc`'s output and assert the top-level map keys are exactly `nameSpaces` and `issuerAuth`, with no `documents` or `version` |
 | `foundry-mdoc` existing tests | Updated for the new return shape |
 | `foundry-core` validate tests | `vct` on `mso_mdoc` rejected; a foreign attribute on av.1 rejected; missing `age_over_18` rejected; `age_over_banana` rejected; the shipped `config.yaml` accepted |
-| `foundry-issuer/tests/conformance_vci.rs` | Both `#[ignore]`s removed, and both tests renamed — they now assert conformance rather than record a gap. `gap_vci_16_mdoc_credential_is_not_a_bare_issuer_signed` → `vci_0176_mdoc_credential_is_a_bare_issuer_signed`; `gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured` → `vci_0175_mdoc_doc_type_comes_from_doctype`. Note the first inverts its assertion, not just its name |
+| `foundry-issuer/tests/conformance_vci.rs` | Both `#[ignore]`s removed, and both tests renamed — they now assert conformance rather than record a gap. `gap_vci_16_mdoc_credential_is_not_a_bare_issuer_signed` → `vci_0176_mdoc_credential_is_a_bare_issuer_signed`; `gap_vci_12_mdoc_doc_type_prefers_vct_over_doctype_when_both_configured` → `vci_0175_mdoc_doc_type_comes_from_doctype`. **Both already assert the conformant behaviour** — they were written failing-first and `#[ignore]`d, so the assertions stand as-is. One latent trap: `gap_vci_12`'s body decodes with `base64::engine::general_purpose::STANDARD`, which cannot decode the base64url the credential has carried since VCI-0071 was closed. Because the test never ran, that never surfaced; un-ignoring it panics on `.expect()` until the engine is corrected to `URL_SAFE_NO_PAD` |
 | `foundry-issuer/src/credential.rs` | An offer-supplied claim absent from `cred_type.claims` is **not** emitted (§2.5) |
 | `crates/foundry/tests/wallet_issuance.rs` | Full flow: offer → `/token` → `/credential` → base64url-decode → parse as a bare `IssuerSigned` → `verify_issuer_signed`; then build a device response and run `verify_mdoc`, mirroring `wallet_verification.rs` |
 | `crates/foundry/tests/quickstart_config.rs` | `quickstart_config_carries_both_credential_types` → `quickstart_config_carries_all_credential_types`, asserting all three ids. Renamed because "both" becomes false, and a test whose name contradicts its body is how the next person is misled |
@@ -329,8 +366,11 @@ issued through foundry's own verifier.
 The `foundry-mdoc` test is byte-level **by design**, not by preference. That
 crate's `AGENTS.md` records that five format defects survived a green suite
 because every test round-tripped foundry's builder through foundry's own
-verifier; the verifier is being changed here too, so a round trip would agree
-with itself about the envelope. The guard mirrors
+verifier. A round trip is structurally blind to this change: `verify_mdoc`
+parses a `DeviceResponse`, and `build_device_response` still produces one, so the
+round trip is unchanged by the envelope moving and would pass either way. The
+verifier is **not** modified by this design at all — its `version` / `documents`
+traversal is correct for a presentation and stays. The guard therefore mirrors
 `single_certificate_x5chain_is_a_bare_byte_string`, which reads CBOR directly and
 deliberately does not call the verifier.
 
@@ -369,8 +409,8 @@ before the branch is opened as a PR, since `config.yaml` changes and
   and gains the namespace-versus-doctype note.
 - `crates/foundry-core/AGENTS.md`: the av.1 validation and the `namespace` field.
 - `crates/foundry-issuer/AGENTS.md`: doctype resolution, config-filtered claims.
-- `README.md` (`credential_types` section): the new credential type and the
-  `namespace` field.
+- `README.md` (`credential_types` section): the new credential type. No
+  `namespace` field is documented, because none is added (§2.6).
 - **No OpenAPI regeneration.** No endpoint path, method, request/response shape
   or status code changes; `CreateOfferRequest` is untouched because validity is
   relative and claims are already carried there.
@@ -389,8 +429,9 @@ Recorded so a later reader can tell a decision from an omission.
 - **`expectedUpdate`** in `validityInfo`. Optional in ISO 18013-5, unused here.
 - **Absolute or per-offer validity windows.** Explicitly declined; see §1.1.
 - **Shipping an `org.iso.18013.5.1.mDL` credential type.** §2.6 makes its
-  namespace expressible; issuing one would additionally require the claim-typing
-  machinery this design declines.
+  namespace *correct* should one be configured; issuing one for real would
+  additionally require the claim-typing machinery this design declines.
+- **Configurable mdoc namespaces.** §2.6 resolves them from the doctype in code.
 - **ISO/IEC 23220-3.** Annex A lists *"Profile of OpenID4VCI to issue ISO mDoc
   [ISO.18013-5]"* as out of its scope, deferring to 23220-3, which is neither
   vendored nor consulted here. foundry's OpenID4VCI behaviour continues to be
