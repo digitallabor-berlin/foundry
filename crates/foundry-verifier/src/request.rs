@@ -267,6 +267,65 @@ pub async fn create_verification_request(
         }
     }
 
+    // OpenID4VP 1.0 L991-L997: once `credential_sets` is present, the Verifier
+    // requests only the combinations those sets describe -- so a set the wallet
+    // could never satisfy, or a credential query no set names, is an operator
+    // error with no possible wallet response. Caught here, as a 400, for the
+    // same reason the id-uniqueness check above is: this is where operator
+    // mistakes stop looking like the wallet's fault.
+    if let Some(sets) = parsed.credential_sets() {
+        let declared: std::collections::HashSet<&str> =
+            parsed.credentials().iter().map(|cq| cq.id()).collect();
+
+        // L889-L890: option entries reference elements in `credentials`.
+        for (set_index, set) in sets.iter().enumerate() {
+            for (option_index, option) in set.options().iter().enumerate() {
+                for id in option {
+                    if !declared.contains(id.as_str()) {
+                        return Err(VerificationError::Dcql(format!(
+                            "credential set #{set_index} option #{option_index} references \
+                             credential query '{id}', which is not declared in 'credentials'; \
+                             OpenID4VP 1.0 requires option entries to reference elements in \
+                             'credentials'"
+                        )));
+                    }
+                }
+            }
+        }
+
+        // The converse: a declared credential query that no set references can
+        // never be requested (L991-L997), so it is unreachable dead weight and
+        // almost certainly a missing reference.
+        let referenced: std::collections::HashSet<&str> = sets
+            .iter()
+            .flat_map(|set| set.options().iter())
+            .flat_map(|option| option.iter())
+            .map(String::as_str)
+            .collect();
+        for cq in parsed.credentials() {
+            if !referenced.contains(cq.id()) {
+                return Err(VerificationError::Dcql(format!(
+                    "credential query '{}' is declared in 'credentials' but referenced by no \
+                     credential set; with 'credential_sets' present, OpenID4VP 1.0 requests \
+                     only the combinations those sets describe, so it would never be requested",
+                    cq.id()
+                )));
+            }
+        }
+
+        // A query whose every set is optional is satisfied by an empty
+        // response, so it would report `verified: true` having verified
+        // nothing. Not a spec violation -- an operator one.
+        if !sets.iter().any(|set| set.required()) {
+            return Err(VerificationError::Dcql(
+                "dcql_query declares no required credential set; every set has \
+                 required: false, so this request would verify successfully against an \
+                 empty response"
+                    .to_string(),
+            ));
+        }
+    }
+
     let id = format!("v_{}", Uuid::new_v4().simple());
     let nonce = format!("vn_{}", Uuid::new_v4().simple());
 
@@ -1836,5 +1895,149 @@ mod tests {
                 if m.contains("not_in_the_query")),
             "expected InvalidRequest naming the unknown id, got: {err}"
         );
+    }
+
+    /// A helper for the credential_sets validation tests: everything is
+    /// identical except the query under test.
+    async fn create_with_query(query: serde_json::Value) -> Result<(), VerificationError> {
+        let storage = test_storage().await;
+        let config = sample_config("/tmp/fake_key.pem");
+        let req = CreateVerificationRequest {
+            dcql_query: Some(query),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .map(|_| ())
+    }
+
+    /// OpenID4VP 1.0 L889-L890: option entries "reference elements in
+    /// `credentials`". A typo'd reference makes its set permanently
+    /// unsatisfiable, so no wallet response could ever verify -- an operator
+    /// error, caught at 400 rather than surfacing later as the wallet's fault.
+    #[tokio::test]
+    async fn create_rejects_a_credential_set_option_referencing_an_unknown_id() {
+        let err = create_with_query(serde_json::json!({
+            "credentials": [{ "id": "visa", "format": "dc+sd-jwt" }],
+            "credential_sets": [{ "options": [["vsia"]] }]
+        }))
+        .await
+        .expect_err("a dangling option reference must be rejected");
+
+        let msg = err.to_string();
+        assert!(matches!(err, VerificationError::Dcql(_)), "{msg}");
+        assert!(msg.contains("vsia"), "name the dangling id: {msg}");
+        assert!(msg.contains("credential set #0"), "locate it: {msg}");
+    }
+
+    /// L991-L997: with `credential_sets` present, only what satisfies a set is
+    /// requested -- so a credential query no set references would never be
+    /// asked for at all.
+    #[tokio::test]
+    async fn create_rejects_a_credential_query_no_set_references() {
+        let err = create_with_query(serde_json::json!({
+            "credentials": [
+                { "id": "pid", "format": "dc+sd-jwt" },
+                { "id": "orphan", "format": "dc+sd-jwt" }
+            ],
+            "credential_sets": [{ "options": [["pid"]] }]
+        }))
+        .await
+        .expect_err("an unreferenced credential query must be rejected");
+
+        let msg = err.to_string();
+        assert!(matches!(err, VerificationError::Dcql(_)), "{msg}");
+        assert!(msg.contains("orphan"), "name the orphan: {msg}");
+    }
+
+    /// A request whose every set is optional passes `credential_sets_satisfied`
+    /// unconditionally -- including against an empty `vp_token`, yielding
+    /// `verified: true` with zero credentials. Spec-permissible, operationally
+    /// meaningless: a verification request that cannot fail is not a
+    /// verification.
+    #[tokio::test]
+    async fn create_rejects_an_all_optional_credential_sets_query() {
+        let err = create_with_query(serde_json::json!({
+            "credentials": [{ "id": "loyalty", "format": "dc+sd-jwt" }],
+            "credential_sets": [{ "options": [["loyalty"]], "required": false }]
+        }))
+        .await
+        .expect_err("a query with no required set must be rejected");
+
+        let msg = err.to_string();
+        assert!(matches!(err, VerificationError::Dcql(_)), "{msg}");
+        assert!(
+            msg.contains("no required credential set"),
+            "say what is missing: {msg}"
+        );
+    }
+
+    /// The structural constraints are enforced at deserialization (Task 1), so
+    /// they must arrive here as the SAME "not a valid DCQL query" 400 an empty
+    /// `credentials` array already produces -- not as a panic or a 500.
+    #[tokio::test]
+    async fn create_rejects_structurally_invalid_credential_sets() {
+        for query in [
+            serde_json::json!({
+                "credentials": [{ "id": "c1", "format": "dc+sd-jwt" }],
+                "credential_sets": []
+            }),
+            serde_json::json!({
+                "credentials": [{ "id": "c1", "format": "dc+sd-jwt" }],
+                "credential_sets": [{ "options": [] }]
+            }),
+            serde_json::json!({
+                "credentials": [{ "id": "c1", "format": "dc+sd-jwt" }],
+                "credential_sets": [{ "options": [["c1"], []] }]
+            }),
+        ] {
+            let Err(err) = create_with_query(query.clone()).await else {
+                panic!("must be rejected: {query}");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not a valid DCQL query"),
+                "structural failures keep the existing message: {msg}"
+            );
+        }
+    }
+
+    /// The same id in several sets is legitimate and useful -- a PID that
+    /// satisfies both an identity set and an age set -- so orphan detection
+    /// works off the UNION of referenced ids, never a partition.
+    #[tokio::test]
+    async fn create_accepts_one_credential_query_referenced_by_several_sets() {
+        create_with_query(serde_json::json!({
+            "credentials": [{ "id": "pid", "format": "dc+sd-jwt" }],
+            "credential_sets": [
+                { "options": [["pid"]] },
+                { "options": [["pid"]], "required": false }
+            ]
+        }))
+        .await
+        .expect("an id may appear in several sets");
+    }
+
+    /// The driving use case must be creatable end to end.
+    #[tokio::test]
+    async fn create_accepts_the_payment_age_loyalty_query() {
+        create_with_query(serde_json::json!({
+            "credentials": [
+                { "id": "dpc_card", "format": "dc+sd-jwt" },
+                { "id": "visa_card", "format": "dc+sd-jwt" },
+                { "id": "pid", "format": "dc+sd-jwt" },
+                { "id": "av", "format": "dc+sd-jwt" },
+                { "id": "loyalty", "format": "dc+sd-jwt" }
+            ],
+            "credential_sets": [
+                { "options": [["dpc_card"], ["visa_card"]] },
+                { "options": [["pid"], ["av"]] },
+                { "options": [["loyalty"]], "required": false }
+            ]
+        }))
+        .await
+        .expect("the payment/age/loyalty query must be accepted");
     }
 }
