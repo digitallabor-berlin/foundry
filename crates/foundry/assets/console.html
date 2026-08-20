@@ -2844,7 +2844,8 @@ var qrcode = function() {
     statusEl.className = 'badge ' + tx.state;
 
     if (tx.result) {
-      // Cross-cutting checks only: jwe_decryption, requested_credentials_answered.
+      // Cross-cutting checks only: jwe_decryption, requested_credentials_answered,
+      // credential_sets_satisfied (mutually exclusive with the former).
       checksEl.innerHTML = '';
       appendChecksTo(checksEl, tx.result.checks);
       checksEl.classList.remove('hidden');

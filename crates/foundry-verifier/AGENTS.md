@@ -30,7 +30,8 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
 | `verify.rs` | The orchestrator: JWE decrypt → `select_presentations` → a per-credential verify-all loop (`verify_one_credential`, which returns **no `Result`**) → `requested_credentials_answered`, then computes `verified` as the conjunction over **both** check levels. Returns a `VerifyOutcome` internally so a per-credential failure can become HTTP 400/502 without discarding the other credentials' checks. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
-| `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Three spec non-empty constraints are enforced at deserialization (`credentials`, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
+| `credential_sets.rs` | **Crate-private** DCQL Credential Set Query satisfaction — which *combinations* of answered credential queries answer the request (`check_credential_sets_satisfied`, OpenID4VP 1.0 L879-L894, L989-L1008). Pure, total, fail-closed like `check_dcql_match`: a required set is satisfied when at least one of its `options` is a subset of the answered credential query ids |
+| `dcql_model.rs` | **Crate-private** DCQL wire model per OpenID4VP 1.0 §6/§7: `DcqlQuery`, `DcqlCredentialQuery`, `DcqlClaimsQuery`, `DcqlCredentialSetQuery`, `ClaimsPathSegment`, `ClaimValue`, `CredentialFormat`. Five spec non-empty constraints are enforced at deserialization (`credentials`, `credential_sets`, `options` and each individual option, `claims[].path`, `claims[].values`) because each is fail-closed. `CredentialFormat::Other(String)` is **required**, not cosmetic: without it an unimplemented format would fail parsing and be reported as a malformed query instead of simply not matching. Never add `deny_unknown_fields` — §6 requires unknown properties to be ignored |
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
 | `transaction.rs` | `VerificationTransaction`, `VerificationState`, `CheckResult`, `VerificationResult`, and `Storage`-backed persistence (namespace `verification_tx`) — **note: the result/check types live here, not in `error.rs`** |
 | `error.rs` | The `VerificationError` enum only |
@@ -256,6 +257,27 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   naming the unanswered ids — and the detail attributes the fault to the
   wallet. An id the request never asked for stays structural (400): there is
   no credential query to attribute a verdict to.
+- **The two completeness checks are mutually exclusive, and which one applies
+  is decided by the query.** `verify::check_response_completeness` parses
+  `dcql_query` once and emits `requested_credentials_answered` when
+  `credential_sets` is ABSENT (OpenID4VP L993 — every credential query is then
+  non-optional) or `credential_sets_satisfied` when it is PRESENT (L995-L997 —
+  the sets decide which combinations answer the request). Never both: emitting
+  both would fail the conjunctive check every time a wallet correctly omitted
+  an optional credential. Check names are operator-facing API (root
+  [AGENTS.md](../../AGENTS.md) §4.2/§4.5), so adding a third emitter, renaming
+  one, or changing which branch emits which name is a breaking change. The
+  parse-failure branch keeps the LEGACY name deliberately — without a parsed
+  query there is no way to know which algebra was intended.
+- **Set satisfaction is defined on PRESENCE, not validity.** A revoked or
+  otherwise failing credential still satisfies its option; the verdict still
+  goes to `false` via §4.2's conjunction over that credential's own
+  `status_check`. Making the set check validity-aware would make one revoked
+  credential produce two failed checks reporting the same fact, and would
+  yield a `credential_sets_satisfied: false` that does not actually mean the
+  combination was wrong. An unsatisfied REQUIRED set is policy (HTTP 200 +
+  `verified: false`); an unsatisfied OPTIONAL set can never fail the check and
+  is reported in `detail` only.
 - **An unavailable status list still returns 502, but must not be lossy.**
   `do_verify_vp_response` returns `VerifyOutcome { result, deferred }`; the
   wrapper persists `result` first, then re-raises. It also pushes a top-level

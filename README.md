@@ -1011,7 +1011,9 @@ foundry serve --config config.yaml 2>&1 | grep '<the x-request-id value>'
 
 A failed verification records which stage rejected the presentation, using the
 same check names the successful path reports, at two levels. **Cross-cutting**:
-`jwe_decryption`, `requested_credentials_answered`. **Per-credential**:
+`jwe_decryption`, plus exactly one of `requested_credentials_answered` (DCQL
+query without `credential_sets`) or `credential_sets_satisfied` (with
+`credential_sets`) — mutually exclusive. **Per-credential**:
 `sd_jwt_vc_signature_and_kb_jwt` or `mdoc_issuer_auth_and_device_signature`,
 `dcql_match`, `status_check`, `transaction_data_binding` (only present when the
 request carried `transaction_data`). The reason is also persisted on the
@@ -1024,7 +1026,9 @@ credential query id it belongs to — so `check=dcql_match passed=false` says
 *whose*. The final verdict record carries `credentials_requested` and
 `credentials_answered`, which are **counts, never identifiers**: a wallet that
 returned fewer credentials than were asked for is visible at a glance, and the
-failed `requested_credentials_answered` check names the missing query ids.
+failed `requested_credentials_answered` check names the missing query ids — or,
+for a `credential_sets` request, the failed `credential_sets_satisfied` check
+names the unsatisfied set and the options that would have satisfied it.
 
 Each credential also gets one **roll-up record** — `credential verified` at
 `INFO`, or `credential failed` at `WARN` — carrying `credential` (the DCQL query

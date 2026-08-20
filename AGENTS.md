@@ -86,8 +86,11 @@ that point back here.
   this rule exists to prevent.
 - **Never hardcode `verified: true`.**
 - Every verification step pushes a named `CheckResult`, at one of two levels.
-  **Cross-cutting** (`result.checks`): `jwe_decryption`,
-  `requested_credentials_answered`. **Per-credential**
+  **Cross-cutting** (`result.checks`): `jwe_decryption`, and exactly one of
+  `requested_credentials_answered` (DCQL query without `credential_sets`) or
+  `credential_sets_satisfied` (with `credential_sets`) — mutually exclusive,
+  chosen by the query, the same way the per-credential format checks are chosen
+  by the answered query's declared format. **Per-credential**
   (`result.credentials[i].checks`): `sd_jwt_vc_signature_and_kb_jwt` or
   `mdoc_issuer_auth_and_device_signature` (mutually exclusive, chosen by the
   answered credential query's declared format), `dcql_match`, `status_check`,

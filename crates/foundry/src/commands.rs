@@ -414,4 +414,36 @@ verifier:
             meta: { vct_values: ["https://localhost:8443/vct/pid"] }
             claims:
               - path: [birthdate]
+    # Demonstrates DCQL `credential_sets` (OpenID4VP 1.0 L879-L894): a payment
+    # credential (either of two), an age assertion (either of two), and an
+    # optional loyalty card. `dpc_card` and `pid` are the two credential types
+    # this issuer actually mints, so a wallet holding both satisfies each
+    # required set via its FIRST option. `visa_card`, `av` and `loyalty` name
+    # vcts this issuer does NOT mint; they exist to exercise the alternative and
+    # optional branches, and a wallet will simply never answer them.
+    - id: payment-age-loyalty
+      dcql:
+        credentials:
+          - id: dpc_card
+            format: dc+sd-jwt
+            meta: { vct_values: ["com.emvco.dpc.card"] }
+          - id: visa_card
+            format: dc+sd-jwt
+            meta: { vct_values: ["https://localhost:8443/vct/visa"] }
+          - id: pid
+            format: dc+sd-jwt
+            meta: { vct_values: ["https://localhost:8443/vct/pid"] }
+            claims:
+              - path: [birthdate]
+          - id: av
+            format: dc+sd-jwt
+            meta: { vct_values: ["https://localhost:8443/vct/av"] }
+          - id: loyalty
+            format: dc+sd-jwt
+            meta: { vct_values: ["https://localhost:8443/vct/loyalty"] }
+        credential_sets:
+          - options: [[dpc_card], [visa_card]]
+          - options: [[pid], [av]]
+          - options: [[loyalty]]
+            required: false
 "#;

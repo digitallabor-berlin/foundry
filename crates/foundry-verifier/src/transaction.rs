@@ -60,9 +60,11 @@ pub struct PresentedCredential {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct VerificationResult {
     pub verified: bool,
-    /// **Cross-cutting checks only** -- `jwe_decryption` and
-    /// `requested_credentials_answered`. Per-credential checks live in
-    /// `credentials[i].checks`.
+    /// **Cross-cutting checks only** -- `jwe_decryption`, plus exactly one of
+    /// `requested_credentials_answered` (when the DCQL query carries no
+    /// `credential_sets`) or `credential_sets_satisfied` (when it does). The two
+    /// are mutually exclusive; they answer different questions (OpenID4VP 1.0
+    /// L991-L997). Per-credential checks live in `credentials[i].checks`.
     pub checks: Vec<CheckResult>,
     /// One entry per credential the `vp_token` answered, in DCQL declaration
     /// order (not `vp_token` key order, which depends on serde_json's map type).
