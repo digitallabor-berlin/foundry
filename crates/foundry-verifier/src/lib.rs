@@ -1,3 +1,4 @@
+mod credential_sets;
 pub mod dcql;
 mod dcql_model;
 pub mod error;
