@@ -3,8 +3,70 @@
 //! from a generic protocol library's types.
 
 use foundry_core::config::{Config, Mode};
+use foundry_core::crypto::SignatureAlgorithm;
 use serde::Serialize;
 use std::collections::BTreeMap;
+
+/// One entry of `credential_signing_alg_values_supported`.
+///
+/// OpenID4VCI 1.0 L1393 makes the identifier *type* a property of the
+/// Credential Format rather than of this parameter: "Algorithm identifier types
+/// and values used are determined by the Credential Format." The two formats
+/// foundry issues sit in different registries:
+///
+/// * `mso_mdoc` (L2223) — the **numeric** COSE algorithm identifiers securing
+///   the `IssuerAuth` COSE structure, e.g. `-7`.
+/// * `dc+sd-jwt` (L2265) — case-sensitive **strings** from the IANA JOSE
+///   registry, e.g. `"ES256"`.
+///
+/// Modelled as an untagged enum rather than `Vec<String>` so the mdoc case is
+/// expressible at all: a `Vec<String>` silently forces every format into the
+/// JOSE spelling, which is the defect this type exists to make impossible.
+/// Untagged serialisation emits the bare scalar — `"ES256"` or `-7` — with no
+/// wrapper object.
+#[derive(Debug, Clone, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(untagged)]
+pub enum CredentialSigningAlg {
+    /// A JOSE Algorithm Name, for JWS-secured formats (L2265).
+    Jose(String),
+    /// A numeric COSE algorithm identifier, for COSE-secured formats (L2223).
+    Cose(i64),
+}
+
+/// The algorithm identifiers to advertise for one credential configuration,
+/// in the registry its Credential Format uses.
+///
+/// Derived from the key that actually signs credentials
+/// (`Config::credential_signing_key`) rather than hardcoded: L2223 asks the
+/// advertised `mso_mdoc` value to match the `alg` in the `IssuerAuth` COSE
+/// header, and an issuer configured with an ES384 key that advertises ES256
+/// misdescribes every credential it issues in either format.
+///
+/// Empty when no signing key resolves or its `alg` does not parse — a state
+/// `Config::validate_key_material` rejects at startup, so it is unreachable in
+/// a running issuer. Empty means the parameter is omitted entirely, which L1393
+/// permits (it is OPTIONAL); emitting `[]` would not, since L1393 requires "a
+/// non-empty array".
+fn credential_signing_algs(cfg: &Config, format: &str) -> Vec<CredentialSigningAlg> {
+    let Some((_, key)) = cfg.credential_signing_key() else {
+        return Vec::new();
+    };
+    let Ok(alg) = key.alg.parse::<SignatureAlgorithm>() else {
+        return Vec::new();
+    };
+
+    match format {
+        // L2223: the numeric COSE identifier securing `IssuerAuth`. Kept in
+        // lockstep with the header `foundry-mdoc`'s `alg_label` writes by
+        // `SignatureAlgorithm::cose_value`, which owns the correspondence.
+        "mso_mdoc" => vec![CredentialSigningAlg::Cose(alg.cose_value())],
+        // L2265 for `dc+sd-jwt`. Also the fallback: every non-COSE Credential
+        // Format profile in OpenID4VCI 1.0 uses JOSE Algorithm Names, and
+        // `Config::validate()` admits no format beyond these two, so an unknown
+        // format here cannot arise from configuration.
+        _ => vec![CredentialSigningAlg::Jose(alg.as_str().to_string())],
+    }
+}
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CredentialIssuerMetadata {
@@ -38,7 +100,12 @@ pub struct CredentialConfigurationSupported {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doctype: Option<String>,
     pub cryptographic_binding_methods_supported: Vec<String>,
-    pub credential_signing_alg_values_supported: Vec<String>,
+    /// L1393: OPTIONAL, and "a non-empty array" when present — hence
+    /// `skip_serializing_if` rather than an emitted `[]`. See
+    /// [`credential_signing_algs`] for how the values are derived and why the
+    /// element type is not `String`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub credential_signing_alg_values_supported: Vec<CredentialSigningAlg>,
     pub proof_types_supported: BTreeMap<String, ProofTypeSupported>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<Object>)]
@@ -157,7 +224,7 @@ pub fn build_issuer_metadata(
                 vct: ct.vct.clone(),
                 doctype: ct.doctype.clone(),
                 cryptographic_binding_methods_supported,
-                credential_signing_alg_values_supported: vec!["ES256".to_string()],
+                credential_signing_alg_values_supported: credential_signing_algs(cfg, &ct.format),
                 proof_types_supported: {
                     // OpenID4VCI L1395: each name here identifies a proof type
                     // this issuer *supports*, and the Wallet picks from this set
@@ -306,7 +373,7 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
 mod tests {
     use super::*;
     use foundry_core::config::{
-        AdminConfig, AttestationMode, ClaimDef, CredentialType, DpopConfig, IssuerConfig,
+        AdminConfig, AttestationMode, ClaimDef, CredentialType, DpopConfig, IssuerConfig, KeyEntry,
         LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
         WalletFacingConfig,
     };
@@ -490,6 +557,138 @@ mod tests {
         // user_auth_types is deliberately absent: advertising a requirement
         // foundry does not enforce is the failure mode the design rejects.
         assert!(required.get("user_auth_types").is_none());
+    }
+
+    /// A signing key entry for the tests below. The path never has to exist:
+    /// `build_issuer_metadata` reads `alg` only and does no filesystem I/O.
+    fn key(alg: &str) -> KeyEntry {
+        KeyEntry {
+            private_key: "unused-by-metadata.pem".to_string(),
+            x5c: None,
+            alg: alg.to_string(),
+        }
+    }
+
+    /// Turn the shipped `pid` configuration into an mdoc one, in place, so these
+    /// tests do not have to restate every `CredentialType` field.
+    fn make_mdoc(cfg: &mut Config) {
+        let ct = &mut cfg.credential_types[0];
+        ct.format = "mso_mdoc".to_string();
+        ct.vct = None;
+        ct.doctype = Some("eu.europa.ec.av.1".to_string());
+    }
+
+    fn advertised_algs(cfg: &Config) -> serde_json::Value {
+        let meta = build_issuer_metadata(cfg, &[]);
+        let json = serde_json::to_value(&meta).expect("metadata serialises");
+        json["credential_configurations_supported"]["pid"]
+            ["credential_signing_alg_values_supported"]
+            .clone()
+    }
+
+    /// OpenID4VCI 1.0 L2223: for `mso_mdoc` the values "correspond to the
+    /// numeric COSE algorithm identifiers used to secure the `IssuerAuth` COSE
+    /// structure". A JOSE name string there is what a conformant wallet rejects
+    /// — mdocs are COSE-signed, so the value space is the COSE registry.
+    ///
+    /// Asserted on the SERIALISED document, not on the Rust value: the defect
+    /// this pins was observable only on the wire (`"ES256"` where `-7` belongs),
+    /// and an untagged enum is exactly the kind of type whose Debug
+    /// representation can look right while its JSON does not.
+    #[test]
+    fn mso_mdoc_advertises_a_numeric_cose_algorithm() {
+        let mut cfg = test_config();
+        cfg.keys.insert("issuer_key".to_string(), key("ES256"));
+        make_mdoc(&mut cfg);
+
+        let algs = advertised_algs(&cfg);
+        assert_eq!(
+            algs,
+            serde_json::json!([-7]),
+            "mso_mdoc must advertise the numeric COSE identifier (L2223), not a JOSE name"
+        );
+        assert!(
+            algs[0].is_number(),
+            "the entry must be a JSON number, not a string: {algs}"
+        );
+    }
+
+    /// OpenID4VCI 1.0 L2265: for the SD-JWT VC profile the values are "case
+    /// sensitive strings" from the IANA JOSE registry. The counterpart to the
+    /// test above — the same parameter, the other registry, chosen by format.
+    #[test]
+    fn sd_jwt_vc_advertises_a_jose_algorithm_name() {
+        let mut cfg = test_config();
+        cfg.keys.insert("issuer_key".to_string(), key("ES256"));
+
+        let algs = advertised_algs(&cfg);
+        assert_eq!(algs, serde_json::json!(["ES256"]));
+        assert!(
+            algs[0].is_string(),
+            "the entry must be a JSON string, not a number: {algs}"
+        );
+    }
+
+    /// L2223 asks the advertised value to match the `alg` the issuer actually
+    /// signs with, so the value must follow the configured key rather than a
+    /// hardcoded ES256. An ES384 deployment that advertises ES256 misdescribes
+    /// every credential it issues, in either format.
+    #[test]
+    fn the_advertised_algorithm_follows_the_configured_key() {
+        let mut sd_jwt = test_config();
+        sd_jwt.keys.insert("issuer_key".to_string(), key("ES384"));
+        assert_eq!(advertised_algs(&sd_jwt), serde_json::json!(["ES384"]));
+
+        let mut mdoc = test_config();
+        mdoc.keys.insert("issuer_key".to_string(), key("ES384"));
+        make_mdoc(&mut mdoc);
+        assert_eq!(
+            advertised_algs(&mdoc),
+            serde_json::json!([-35]),
+            "the COSE identifier must be ES384's, not ES256's"
+        );
+    }
+
+    /// The metadata must describe the key that *signs*, which
+    /// `handle_credential_request` resolves through
+    /// `Config::credential_signing_key`: `issuer.status_list.signing_key` first,
+    /// the first entry in `keys` only as a fallback.
+    ///
+    /// The two keys here carry different algorithms and are named so that map
+    /// order puts the WRONG one first — a metadata builder that reached for
+    /// `keys.first()` unconditionally would advertise ES256 while the issuer
+    /// signed with ES384, and no other test in this file would notice.
+    #[test]
+    fn the_advertised_algorithm_comes_from_the_key_that_signs() {
+        let mut cfg = test_config();
+        cfg.keys.insert("aaa_other_key".to_string(), key("ES256"));
+        cfg.keys.insert("zzz_signing_key".to_string(), key("ES512"));
+        cfg.issuer.status_list.signing_key = Some("zzz_signing_key".to_string());
+
+        assert_eq!(advertised_algs(&cfg), serde_json::json!(["ES512"]));
+    }
+
+    /// L1393 makes the parameter OPTIONAL but requires "a non-empty array" when
+    /// present, so an issuer that cannot resolve a signing key must omit the
+    /// member rather than emit `[]`.
+    ///
+    /// Unreachable in a running issuer — `Config::validate_key_material` rejects
+    /// this configuration at startup — which is precisely why it is pinned here:
+    /// the branch has no other observable consumer.
+    #[test]
+    fn the_parameter_is_omitted_when_no_signing_key_resolves() {
+        let cfg = test_config();
+        assert!(cfg.keys.is_empty(), "precondition: no keys configured");
+
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let json = serde_json::to_value(&meta).expect("metadata serialises");
+        let pid = &json["credential_configurations_supported"]["pid"];
+
+        assert!(
+            pid.get("credential_signing_alg_values_supported").is_none(),
+            "an unresolvable signing key must omit the OPTIONAL parameter, not emit an \
+             empty array: {pid}"
+        );
     }
 
     #[test]

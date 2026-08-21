@@ -57,6 +57,11 @@ pub fn generate_admin_openapi_spec() -> String {
     components(schemas(
         foundry_issuer::CredentialIssuerMetadata,
         foundry_issuer::CredentialConfigurationSupported,
+        // Registered explicitly: it is reachable only as the item type of
+        // `credential_signing_alg_values_supported`, and utoipa emits a `$ref`
+        // to it there without pulling the component in. Omit it and the spec
+        // ships a dangling reference.
+        foundry_issuer::CredentialSigningAlg,
         foundry_issuer::ProofTypeSupported,
         foundry_issuer::CredentialRequestEncryption,
         foundry_issuer::CredentialResponseEncryption,

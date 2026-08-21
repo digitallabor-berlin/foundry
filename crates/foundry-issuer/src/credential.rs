@@ -339,18 +339,15 @@ pub async fn handle_credential_request(
         .find(|ct| ct.id == tx.credential_type_id)
         .ok_or_else(|| IssuanceError::UnknownCredentialType(tx.credential_type_id.clone()))?;
 
-    let status_signing_key_name = config
-        .issuer
-        .status_list
-        .signing_key
-        .as_deref()
-        .or_else(|| config.keys.keys().next().map(|s| s.as_str()))
+    // Resolved through `Config::credential_signing_key` rather than inline, so
+    // that `build_issuer_metadata` advertises the algorithm of the key this
+    // actually signs with. OpenID4VCI 1.0 L2223 requires the advertised
+    // `credential_signing_alg_values_supported` value for `mso_mdoc` to match
+    // the `alg` in the `IssuerAuth` COSE header produced below, so the two
+    // sites cannot be allowed to resolve the key independently.
+    let (_, issuer_key) = config
+        .credential_signing_key()
         .ok_or_else(|| IssuanceError::InvalidRequest("no signing key configured".into()))?;
-
-    let issuer_key = config
-        .keys
-        .get(status_signing_key_name)
-        .ok_or_else(|| IssuanceError::InvalidRequest("configured signing key not found".into()))?;
 
     let signer = FileSigner::from_pem_file(&issuer_key.private_key, issuer_key.alg.parse()?)?;
     let x5c = if let Some(ref path) = issuer_key.x5c {

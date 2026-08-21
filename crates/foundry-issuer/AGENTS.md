@@ -145,6 +145,24 @@ cargo nextest run -p foundry --test wallet_issuance               # issuance flo
 
 ## Gotchas
 
+- **`credential_signing_alg_values_supported` lives in TWO algorithm registries,
+  and which one applies is decided by the Credential Format — never globally.**
+  OpenID4VCI L1393: "Algorithm identifier types and values used are determined by
+  the Credential Format." `mso_mdoc` (L2223) takes the **numeric COSE**
+  identifiers securing `IssuerAuth` (`-7`, not `"ES256"`); SD-JWT VC (L2265)
+  takes **JOSE Algorithm Name strings**. `credential_signing_algs`
+  (`metadata.rs`) makes the choice, and the element type is the untagged
+  `CredentialSigningAlg` enum precisely so the mdoc case is expressible — the
+  field was a `Vec<String>` hardcoded to `["ES256"]`, which a conformant wallet
+  rejected for the av.1 configuration. Do not "simplify" it back to `String`.
+  Two further constraints hold it in place: the value is derived from
+  `Config::credential_signing_key` (the same resolver `handle_credential_request`
+  uses, so metadata cannot describe a different key than the one that signs), and
+  `SignatureAlgorithm::cose_value` is the single owner of the JOSE/COSE
+  correspondence, pinned against `foundry-mdoc`'s `alg_label` by
+  `alg_label_agrees_with_cose_value`. `proof_signing_alg_values_supported` is
+  unaffected — L2646 puts the `jwt` proof type in the JOSE registry whatever the
+  credential format. Rows VCI-0234/VCI-0235.
 - **The mdoc arm takes its element *set* from `cred_type.claims` and only its
   *values* from `tx.claims`.** The SD-JWT VC arm has always worked this way; the
   two arms disagreeing was a defect. It matters because `Config::validate()`

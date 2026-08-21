@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use foundry::server::{AppState, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
-    LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
+    KeyEntry, LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
     WalletFacingConfig,
 };
 use foundry_core::storage::SqliteStorage;
@@ -97,6 +97,96 @@ async fn test_app() -> axum::Router {
     let config = Arc::new(test_config());
     std::mem::forget(dir);
     wallet_router(AppState::new(storage, config))
+}
+
+/// Both Credential Format profiles' algorithm registries, in one served
+/// document.
+///
+/// OpenID4VCI 1.0 L1393 makes the identifier type a property of the Credential
+/// Format: L2223 puts `mso_mdoc` in the **numeric COSE** registry (the values
+/// securing the `IssuerAuth` COSE structure), while L2265 puts SD-JWT VC in the
+/// **string JOSE** registry. A single hardcoded `["ES256"]` satisfied neither
+/// requirement honestly — it was simply the JOSE spelling applied to everything,
+/// and a conformant wallet rejected the mdoc configuration for it.
+///
+/// Pinned at the HTTP layer, not only in `foundry-issuer`'s unit tests, because
+/// what a wallet parses is this response body — after serde's untagged
+/// serialisation and the router. Asserting both configurations together is the
+/// point: it shows the choice is made per format, not once per document.
+#[tokio::test]
+async fn issuer_metadata_uses_each_formats_own_algorithm_registry() {
+    let mut cfg = test_config();
+    cfg.keys.insert(
+        "issuer_key".to_string(),
+        KeyEntry {
+            // Never opened: metadata reads `alg` and does no filesystem I/O.
+            private_key: "unused-by-metadata.pem".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+    // The EUDI Proof of Age attestation shipped in config.yaml, and the only
+    // mso_mdoc type foundry mints (docs/specs/eu-age-verification-annex-a-av-profile.md).
+    cfg.credential_types.push(CredentialType {
+        id: "eu.europa.ec.av.1".to_string(),
+        format: "mso_mdoc".to_string(),
+        vct: None,
+        doctype: Some("eu.europa.ec.av.1".to_string()),
+        scope: None,
+        cryptographic_holder_binding: true,
+        display: vec![],
+        claims: vec![ClaimDef {
+            path: vec!["age_over_18".to_string()],
+            required: None,
+            selectively_disclosable: true,
+            display: vec![],
+        }],
+        validity_seconds: None,
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("w.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    std::mem::forget(dir);
+    let app = wallet_router(AppState::new(storage, Arc::new(cfg)));
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/.well-known/openid-credential-issuer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let configs = &json["credential_configurations_supported"];
+
+    // L2223: numeric COSE identifier. -7 is ECDSA with SHA-256, the label
+    // foundry-mdoc writes into the IssuerAuth COSE header for an ES256 key.
+    let mdoc_algs = &configs["eu.europa.ec.av.1"]["credential_signing_alg_values_supported"];
+    assert_eq!(configs["eu.europa.ec.av.1"]["format"], "mso_mdoc");
+    assert_eq!(
+        *mdoc_algs,
+        serde_json::json!([-7]),
+        "mso_mdoc must advertise the numeric COSE identifier (L2223): {mdoc_algs}"
+    );
+    assert!(
+        mdoc_algs[0].is_number(),
+        "a JOSE name string here is what a conformant wallet rejects: {mdoc_algs}"
+    );
+
+    // L2265: JOSE Algorithm Name, in the same document, from the same key.
+    let sd_jwt_algs = &configs["pid"]["credential_signing_alg_values_supported"];
+    assert_eq!(configs["pid"]["format"], "dc+sd-jwt");
+    assert_eq!(*sd_jwt_algs, serde_json::json!(["ES256"]));
+    assert!(
+        sd_jwt_algs[0].is_string(),
+        "dc+sd-jwt stays in the JOSE registry: {sd_jwt_algs}"
+    );
 }
 
 #[tokio::test]

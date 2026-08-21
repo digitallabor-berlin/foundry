@@ -20,6 +20,29 @@ impl SignatureAlgorithm {
             SignatureAlgorithm::Es512 => "ES512",
         }
     }
+
+    /// The numeric COSE algorithm identifier (IANA COSE Algorithms registry)
+    /// corresponding to this JOSE algorithm.
+    ///
+    /// COSE-secured formats identify algorithms by integer, not by JWS name:
+    /// an mdoc's `IssuerAuth` COSE header carries `-7`, never `"ES256"`. Both
+    /// spellings of the same algorithm are therefore needed, and they must not
+    /// be maintained independently — OpenID4VCI 1.0 L2223 requires the value an
+    /// issuer *advertises* for `mso_mdoc` to match the `alg` it actually *signs*
+    /// with, so a divergence between the two mappings is a conformance defect
+    /// that no single crate's tests would catch. This method is the one owner of
+    /// the correspondence; `foundry-mdoc`'s `alg_label` is pinned against it.
+    ///
+    /// Deliberately total and infallible: every variant of this enum is an
+    /// ECDSA algorithm with a registered COSE identifier, so there is no
+    /// "unsupported" case to report.
+    pub fn cose_value(&self) -> i64 {
+        match self {
+            SignatureAlgorithm::Es256 => -7,
+            SignatureAlgorithm::Es384 => -35,
+            SignatureAlgorithm::Es512 => -36,
+        }
+    }
 }
 
 impl std::str::FromStr for SignatureAlgorithm {
@@ -84,5 +107,37 @@ mod tests {
     fn as_str_and_display_round_trip() {
         assert_eq!(SignatureAlgorithm::Es256.as_str(), "ES256");
         assert_eq!(format!("{}", SignatureAlgorithm::Es512), "ES512");
+    }
+
+    /// The IANA COSE Algorithms registry values for the three ECDSA algorithms
+    /// this enum admits. Pinned literally rather than derived, because these are
+    /// external registry assignments: the point of the test is that a future
+    /// edit cannot quietly renumber them.
+    #[test]
+    fn cose_values_match_the_iana_cose_registry() {
+        assert_eq!(SignatureAlgorithm::Es256.cose_value(), -7);
+        assert_eq!(SignatureAlgorithm::Es384.cose_value(), -35);
+        assert_eq!(SignatureAlgorithm::Es512.cose_value(), -36);
+    }
+
+    /// The JOSE and COSE spellings must stay in bijection: two algorithms
+    /// sharing a COSE value would let an issuer advertise one and sign with the
+    /// other, which is precisely the class of defect `cose_value` exists to
+    /// prevent.
+    #[test]
+    fn cose_values_are_distinct_per_algorithm() {
+        let all = [
+            SignatureAlgorithm::Es256,
+            SignatureAlgorithm::Es384,
+            SignatureAlgorithm::Es512,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for alg in all {
+            assert!(
+                seen.insert(alg.cose_value()),
+                "{alg} reuses COSE value {}",
+                alg.cose_value()
+            );
+        }
     }
 }

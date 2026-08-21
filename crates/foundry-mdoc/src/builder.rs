@@ -36,8 +36,18 @@ fn cbor_to_value_bytes(bytes: &[u8]) -> Result<ciborium::Value, FormatError> {
     ciborium::from_reader(bytes).map_err(|e| FormatError::Serialization(e.to_string()))
 }
 
-fn alg_label(signer: &dyn Signer) -> iana::Algorithm {
-    match signer.algorithm() {
+/// The COSE `alg` header label for a JOSE signature algorithm.
+///
+/// Takes the algorithm rather than the `Signer` that carries it so the mapping
+/// is exercisable for every variant without materialising a P-384 or P-521 key;
+/// see `alg_label_agrees_with_cose_value` below, which pins it against
+/// `SignatureAlgorithm::cose_value` — the single owner of the JOSE/COSE
+/// correspondence. The two must agree: OpenID4VCI 1.0 L2223 requires the
+/// `credential_signing_alg_values_supported` value an issuer advertises for
+/// `mso_mdoc` to match the `alg` in the `IssuerAuth` COSE header this function
+/// produces, and nothing else checks that across crate boundaries.
+fn alg_label(alg: foundry_core::crypto::SignatureAlgorithm) -> iana::Algorithm {
+    match alg {
         foundry_core::crypto::SignatureAlgorithm::Es256 => iana::Algorithm::ES256,
         foundry_core::crypto::SignatureAlgorithm::Es384 => iana::Algorithm::ES384,
         foundry_core::crypto::SignatureAlgorithm::Es512 => iana::Algorithm::ES512,
@@ -186,7 +196,9 @@ pub fn build_mdoc(
     let mso_bytes = crate::types::tag24_encode(&mso_inner).map_err(FormatError::Serialization)?;
 
     // IssuerAuth COSE_Sign1.
-    let protected = HeaderBuilder::new().algorithm(alg_label(signer)).build();
+    let protected = HeaderBuilder::new()
+        .algorithm(alg_label(signer.algorithm()))
+        .build();
 
     let mut unprotected = Header::default();
     if let Some(chain) = x5c {
@@ -322,7 +334,7 @@ pub fn build_device_response(
             .map_err(FormatError::Serialization)?;
 
     let protected = HeaderBuilder::new()
-        .algorithm(alg_label(device_signer))
+        .algorithm(alg_label(device_signer.algorithm()))
         .build();
     let tbs = coset::sig_structure_data(
         coset::SignatureContext::CoseSign1,
@@ -411,6 +423,7 @@ fn lookup<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coset::iana::EnumI64 as _;
     use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
     use josekit::jwk::alg::ec::{EcCurve, EcKeyPair};
     use josekit::jwk::{Jwk, KeyPair as _};
@@ -419,6 +432,32 @@ mod tests {
         let jwk = Jwk::generate_ec_key(EcCurve::P256).unwrap();
         let kp = EcKeyPair::from_jwk(&jwk).unwrap();
         FileSigner::from_pem(&kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap()
+    }
+
+    /// The `alg` this crate writes into the `IssuerAuth` COSE header and the
+    /// COSE value `foundry-issuer` advertises in
+    /// `credential_signing_alg_values_supported` must be the same number
+    /// (OpenID4VCI 1.0 L2223: the advertised value SHOULD exactly match the
+    /// `alg` in the `IssuerAuth` COSE header).
+    ///
+    /// The two are computed in different crates from different types — an
+    /// `iana::Algorithm` here, an `i64` in `foundry-core` — so nothing but this
+    /// assertion stops them from drifting. Without it, adding a fourth
+    /// algorithm to `SignatureAlgorithm` and forgetting one of the two mappings
+    /// would ship an issuer that advertises an algorithm it does not sign with.
+    #[test]
+    fn alg_label_agrees_with_cose_value() {
+        for alg in [
+            SignatureAlgorithm::Es256,
+            SignatureAlgorithm::Es384,
+            SignatureAlgorithm::Es512,
+        ] {
+            assert_eq!(
+                alg_label(alg).to_i64(),
+                alg.cose_value(),
+                "COSE label for {alg} disagrees with SignatureAlgorithm::cose_value"
+            );
+        }
     }
 
     #[test]

@@ -31,6 +31,37 @@ impl Config {
         }
     }
 
+    /// The key that signs issued credentials, as `(name, entry)`.
+    ///
+    /// Resolution order — `issuer.status_list.signing_key`, else the first entry
+    /// in `keys` — is the behaviour `handle_credential_request` has always had.
+    /// The name is a historical artefact: one configured key signs both Status
+    /// List Tokens and credentials, and only the status-list spelling was ever
+    /// given a config field. It is preserved verbatim rather than tidied,
+    /// because changing which key signs credentials would silently re-key every
+    /// existing deployment.
+    ///
+    /// It exists as a method because two call sites need the *same* answer:
+    /// `handle_credential_request` builds the signer from it, and
+    /// `build_issuer_metadata` advertises its algorithm in
+    /// `credential_signing_alg_values_supported`. Resolved independently, the
+    /// two can disagree — and then the issuer advertises one algorithm and
+    /// signs with another, which OpenID4VCI 1.0 L2223 makes a conformance
+    /// defect for `mso_mdoc` specifically (the advertised COSE value SHOULD
+    /// match the `alg` in the `IssuerAuth` header).
+    ///
+    /// `None` only when `keys` is empty, which `Config::validate_key_material`
+    /// rejects at startup for any issuer that can serve a credential.
+    pub fn credential_signing_key(&self) -> Option<(&str, &KeyEntry)> {
+        let name = self
+            .issuer
+            .status_list
+            .signing_key
+            .as_deref()
+            .or_else(|| self.keys.keys().next().map(|s| s.as_str()))?;
+        self.keys.get_key_value(name).map(|(k, v)| (k.as_str(), v))
+    }
+
     /// Load the private keys that decrypt Credential Requests.
     ///
     /// Called once at startup — never per request. Returns an empty vector when
