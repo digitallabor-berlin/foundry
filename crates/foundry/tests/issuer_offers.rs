@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header::AUTHORIZATION};
 use foundry::admin_auth::AdminApiKey;
-use foundry::server::{AppState, admin_router};
+use foundry::server::{AppState, admin_router, wallet_router};
 use foundry_core::config::{
     AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
     LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, VerifierConfig,
@@ -61,6 +61,7 @@ fn test_config(status_list_enabled: bool) -> Config {
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -395,4 +396,196 @@ async fn offer_status_requires_the_admin_bearer_token() {
         .unwrap();
 
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+// ---------------------------------------------------------------------------
+// By-reference Credential Offer delivery — OpenID4VCI §4.2 (L432-L452),
+// `GET /credential-offer/:id` on the wallet-facing listener.
+// ---------------------------------------------------------------------------
+
+/// An admin router and a wallet router over the **same** storage and config,
+/// with `issuer.offer_by_reference` enabled. Both are needed: the offer is
+/// created through the admin listener and fetched through the wallet one.
+async fn by_reference_apps() -> (axum::Router, axum::Router) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("o.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    std::mem::forget(dir);
+
+    let mut cfg = test_config(true);
+    cfg.issuer.offer_by_reference = true;
+    let config = Arc::new(cfg);
+
+    let admin = admin_router(
+        AppState::new(storage.clone(), config.clone()),
+        AdminApiKey(Some("test-admin-key".to_string())),
+    );
+    let wallet = wallet_router(AppState::new(storage, config));
+    (admin, wallet)
+}
+
+/// Recover the URL a wallet would GET, undoing the deep link's
+/// percent-encoding.
+fn referenced_url(offer_uri: &str) -> String {
+    let encoded = offer_uri
+        .strip_prefix("openid-credential-offer://?credential_offer_uri=")
+        .expect("a by-reference link carries exactly this prefix");
+    percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .expect("the encoded URL is valid UTF-8")
+        .to_string()
+}
+
+/// The path component the wallet router is asked for, i.e. the URL minus its
+/// origin.
+fn referenced_path(offer_uri: &str) -> String {
+    let url = referenced_url(offer_uri);
+    url.strip_prefix("https://localhost:8443")
+        .expect("the referenced URL addresses the configured wallet-facing base URL")
+        .to_string()
+}
+
+async fn get_wallet(app: &axum::Router, path: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = res.status();
+    let content_type = res
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, content_type, bytes.to_vec())
+}
+
+async fn create_by_reference_offer(admin: &axum::Router) -> serde_json::Value {
+    let body =
+        serde_json::json!({ "credential_type_id": "pid", "claims": {}, "tx_code_required": false });
+    let res = admin
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/issuance/offers")
+                .header("content-type", "application/json")
+                .header(AUTHORIZATION, "Bearer test-admin-key")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// OpenID4VCI L445: the response carrying a Credential Offer Object MUST use
+/// media type `application/json`.
+#[tokio::test]
+async fn a_referenced_offer_is_served_as_application_json() {
+    let (admin, wallet) = by_reference_apps().await;
+    let offer = create_by_reference_offer(&admin).await;
+    let path = referenced_path(offer["credential_offer_uri"].as_str().unwrap());
+
+    let (status, content_type, _) = get_wallet(&wallet, &path).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("application/json"));
+}
+
+/// The wallet must receive exactly the offer the operator was shown --
+/// otherwise the two disagree about what is being issued.
+#[tokio::test]
+async fn the_served_offer_matches_the_one_returned_to_the_admin_caller() {
+    let (admin, wallet) = by_reference_apps().await;
+    let offer = create_by_reference_offer(&admin).await;
+    let path = referenced_path(offer["credential_offer_uri"].as_str().unwrap());
+
+    let (_, _, body) = get_wallet(&wallet, &path).await;
+    let served: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(served, offer["credential_offer"]);
+}
+
+/// The served document must be a usable Credential Offer: a wallet reads the
+/// `pre-authorized_code` from it to call `/token`.
+#[tokio::test]
+async fn the_served_offer_carries_the_grant_the_wallet_needs() {
+    let (admin, wallet) = by_reference_apps().await;
+    let offer = create_by_reference_offer(&admin).await;
+    let path = referenced_path(offer["credential_offer_uri"].as_str().unwrap());
+
+    let (_, _, body) = get_wallet(&wallet, &path).await;
+    let served: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(served["credential_issuer"], "https://localhost:8443");
+    assert!(
+        served["grants"]["urn:ietf:params:oauth:grant-type:pre-authorized_code"]
+            ["pre-authorized_code"]
+            .is_string()
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_offer_id_returns_404() {
+    let (_, wallet) = by_reference_apps().await;
+
+    let (status, _, _) = get_wallet(&wallet, "/credential-offer/no-such-offer").await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The security-critical assertion at the HTTP boundary: the wallet-facing
+/// resource hands out the `pre-authorized_code` in full, so knowing a
+/// transaction id must not be enough to fetch it.
+#[tokio::test]
+async fn the_transaction_id_does_not_address_the_referenced_offer() {
+    let (admin, wallet) = by_reference_apps().await;
+    let offer = create_by_reference_offer(&admin).await;
+    let tx_id = offer["transaction_id"].as_str().unwrap();
+
+    let (status, _, _) = get_wallet(&wallet, &format!("/credential-offer/{tx_id}")).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The route is registered unconditionally, so flipping the toggle off does not
+/// strand offers already in flight.
+#[tokio::test]
+async fn the_route_exists_even_when_the_toggle_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("o.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    std::mem::forget(dir);
+    let wallet = wallet_router(AppState::new(storage, Arc::new(test_config(true))));
+
+    // 404 because the offer is unknown, not because the route is absent.
+    let (status, _, _) = get_wallet(&wallet, "/credential-offer/anything").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Fetching does not consume the offer: a wallet retry after a dropped
+/// connection must still work. Single-use-ness belongs to the
+/// `pre-authorized_code` (L396), not to the retrieval.
+#[tokio::test]
+async fn a_referenced_offer_can_be_fetched_twice() {
+    let (admin, wallet) = by_reference_apps().await;
+    let offer = create_by_reference_offer(&admin).await;
+    let path = referenced_path(offer["credential_offer_uri"].as_str().unwrap());
+
+    assert_eq!(get_wallet(&wallet, &path).await.0, StatusCode::OK);
+    assert_eq!(get_wallet(&wallet, &path).await.0, StatusCode::OK);
 }

@@ -25,7 +25,8 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 | --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface (see below) |
-| `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `build_offer_uri()`, `build_dc_api_offer()` |
+| `offer.rs` | Offer **primitives**: `CredentialOffer` and its grant structs, `generate_pre_authorized_code()`, `generate_tx_code()`, `generate_offer_id()`, `build_offer_uri()`, `build_offer_uri_by_reference()`, `build_dc_api_offer()` |
+| `offer_ref.rs` | Persistence for offers delivered **by reference** (OpenID4VCI §4.2, L432): `save_offer_by_reference` / `load_offer_by_reference` under KV namespace `offer_ref`, TTL `storage.transaction_ttl_secs`. Stores the **rendered** offer rather than rebuilding it — the opposite choice from the verifier's `/vp/request/:id`, because an offer must not change once created and rebuilding would need `offer_display` persisted on the transaction (which `transaction.rs` deliberately drops) |
 | `create_offer.rs` | Offer **orchestration**: takes a `CreateOfferRequest`, allocates a status index, persists an `IssuanceTransaction`, returns the offer + URI |
 | `token.rs` | `POST /token` logic (pre-authorized-code and authorization-code grants → access token) |
 | `challenge.rs` | The domain-separated MAC primitive shared by `nonce.rs`, `attestation.rs`, and `dpop.rs`: `NonceSecret` (moved here from `nonce.rs`), `Domain` (`CNonce` \| `AttestationChallenge` \| `DpopNonce`), `mint`/`verify`. Also the ABCA §8 challenge endpoint's own logic: `ChallengeResponse`, `issue_attestation_challenge`, and RFC 9449's `mint_dpop_nonce` |
@@ -51,6 +52,7 @@ Entry point → the endpoint that drives it (routes defined in
 | Entry point | Endpoint | Listener |
 | --- | --- | --- |
 | `create_offer(CreateOfferRequest) -> CreateOfferResponse` | `POST /admin/issuance/offers` | admin (API-key protected) |
+| `load_offer_by_reference(storage, offer_id) -> Option<CredentialOffer>` | `GET /credential-offer/:id` | wallet-facing, **unauthenticated** (the id is the capability) |
 | `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix, &EncryptedCodePolicy, access_token_ttl_secs) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
 | `issue_attestation_challenge(&NonceSecret, ttl_secs, now_unix) -> ChallengeResponse` | `POST /challenge` | wallet-facing, **unauthenticated**, registered only when `challenge_mode != Disabled` |
@@ -61,8 +63,14 @@ Entry point → the endpoint that drives it (routes defined in
 Other public surface:
 
 - **Offer:** `CredentialOffer`, `CredentialOfferGrants`, `PreAuthorizedCodeGrant`,
-  `TxCodeDefinition`, `build_offer_uri`, `build_dc_api_offer`,
-  `generate_pre_authorized_code`, `generate_tx_code`.
+  `TxCodeDefinition`, `build_offer_uri`, `build_offer_uri_by_reference`,
+  `build_dc_api_offer`, `generate_pre_authorized_code`, `generate_tx_code`,
+  `generate_offer_id`.
+- **Offer by reference:** `save_offer_by_reference`, `load_offer_by_reference`.
+  Selected by `issuer.offer_by_reference` (default `false` = inline, unchanged).
+  The offer id is a **bearer credential** — the stored document carries the
+  `pre-authorized_code` — so it is a fresh 32-byte CSPRNG value, never the
+  `transaction_id`, and never logged (§4.5).
 - **Transaction:** `IssuanceTransaction`, `IssuanceState` (`Offered` | `Issued`),
   `save_transaction`, `save_transaction_with_indices`, `load_transaction`,
   `load_transaction_by_pre_auth_code`, `load_transaction_by_access_token`.

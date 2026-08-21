@@ -50,6 +50,7 @@ pub fn generate_admin_openapi_spec() -> String {
         crate::server::nonce_handler,
         crate::server::challenge_handler,
         crate::server::credential_handler,
+        crate::server::get_credential_offer_handler,
         crate::server::get_request_object_handler,
         crate::server::post_response_handler,
         crate::server::status_list_handler,
@@ -75,6 +76,15 @@ pub fn generate_admin_openapi_spec() -> String {
         foundry_issuer::CredentialResponse,
         foundry_issuer::IssuedCredential,
         foundry_issuer::ProofsRequest,
+        // The Credential Offer served by reference at `/credential-offer/{id}`
+        // (OpenID4VCI §4.2). Also registered on `AdminApiDoc`, where it is the
+        // offer returned to the operator -- both listeners expose the same
+        // document, so both specs must carry its schema.
+        foundry_issuer::CredentialOffer,
+        foundry_issuer::CredentialOfferGrants,
+        foundry_issuer::PreAuthorizedCodeGrant,
+        foundry_issuer::AuthorizationCodeGrant,
+        foundry_issuer::TxCodeDefinition,
         foundry_verifier::VerificationResult,
         foundry_verifier::PresentedCredential,
         foundry_verifier::CheckResult,

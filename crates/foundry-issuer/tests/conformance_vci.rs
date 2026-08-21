@@ -195,6 +195,7 @@ fn test_config() -> Config {
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -274,7 +275,36 @@ async fn vci_0004_0005_offer_uri_carries_exactly_one_delivery_parameter() {
     );
     assert!(
         !resp.credential_offer_uri.contains("credential_offer_uri="),
-        "foundry never offers by reference, so `credential_offer_uri` must never appear"
+        "an inline offer must not also carry `credential_offer_uri`"
+    );
+}
+
+/// The same mutual exclusion in the other delivery mode. `issuer.offer_by_reference`
+/// switches which parameter is emitted; it must never produce both, and
+/// `credential_offer_uri=` does not contain the substring `credential_offer=`,
+/// so the second assertion is exact rather than incidental.
+#[tokio::test]
+async fn vci_0004_0005_a_by_reference_offer_also_carries_exactly_one_parameter() {
+    let mut cfg = test_config();
+    cfg.issuer.offer_by_reference = true;
+    let storage = test_storage().await;
+    let resp = create_offer(&cfg, &storage, offer_request(None), 1_700_000_000, &[])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.credential_offer_uri
+            .matches("credential_offer_uri=")
+            .count(),
+        1,
+        "a by-reference offer must carry exactly one `credential_offer_uri` parameter"
+    );
+    assert_eq!(
+        resp.credential_offer_uri
+            .matches("credential_offer=")
+            .count(),
+        0,
+        "a by-reference offer must not also inline the offer"
     );
 }
 

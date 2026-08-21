@@ -198,7 +198,10 @@ Logging is a request-path concern and is governed like one.
 - **Never logged, at any level, under any flag:** private and ephemeral JWKs,
   signer keys, the admin API key, access tokens, `c_nonce` values, ABCA
   `attestation_challenge` values, DPoP `nonce` values, the nonce secret,
-  pre-authorized codes, authorization codes, transaction codes, the raw
+  pre-authorized codes, the by-reference Credential Offer id (the `:id` of
+  `GET /credential-offer/:id` — the document it addresses carries the
+  `pre-authorized_code`, so the id is a bearer credential, not a database key),
+  authorization codes, transaction codes, the raw
   compact JWE of an encrypted Credential Request, the decrypted Credential
   Request, the plaintext Credential Response when encryption was requested,
   the wallet's `credential_response_encryption.jwk`, the Android key

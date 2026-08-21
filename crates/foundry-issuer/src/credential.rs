@@ -603,6 +603,7 @@ mod tests {
                 response_encryption: None,
                 encrypted_pre_authorized_code: Default::default(),
                 access_token_ttl_secs: 600,
+                offer_by_reference: false,
             },
             credential_types: vec![CredentialType {
                 id: "pid".to_string(),

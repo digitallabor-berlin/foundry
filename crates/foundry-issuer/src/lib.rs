@@ -14,6 +14,7 @@ pub mod keystore_proof;
 pub mod metadata;
 pub mod nonce;
 pub mod offer;
+pub mod offer_ref;
 pub mod proof;
 pub mod status_index;
 pub mod token;
@@ -44,9 +45,10 @@ pub use metadata::{
 pub use nonce::{C_NONCE_TTL_SECS, NonceResponse, issue_nonce, verify_nonce};
 pub use offer::{
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
-    TxCodeDefinition, build_dc_api_offer, build_offer_uri, generate_pre_authorized_code,
-    generate_tx_code,
+    TxCodeDefinition, build_dc_api_offer, build_offer_uri, build_offer_uri_by_reference,
+    generate_offer_id, generate_pre_authorized_code, generate_tx_code,
 };
+pub use offer_ref::{load_offer_by_reference, save_offer_by_reference};
 pub use proof::{ProofsRequest, VerifiedProof, verify_holder_proof};
 pub use status_index::allocate_status_index;
 pub use token::{EncryptedCodePolicy, TokenRequest, TokenResponse, handle_token_request};

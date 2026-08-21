@@ -165,6 +165,23 @@ pub struct IssuerConfig {
     /// conflation.
     #[serde(default = "default_access_token_ttl_secs")]
     pub access_token_ttl_secs: u64,
+    /// OpenID4VCI §Credential Offer (L375, L432): deliver the offer **by
+    /// reference** as `credential_offer_uri` instead of inlining it as
+    /// `credential_offer`.
+    ///
+    /// Absent means `false`, which reproduces foundry's by-value behaviour
+    /// byte for byte. The flag exists because an inlined offer is the whole
+    /// offer object percent-encoded into a deep link, and L452 notes that a
+    /// QR-code rendering "would usually contain the Credential Offer by
+    /// reference due to the size limitations of the QR codes" — a
+    /// `com.emvco.dpc.card` offer carrying display metadata is several times
+    /// the size of a plain one and produces a QR too dense to scan reliably.
+    ///
+    /// It is opt-in rather than the default because by-reference delivery
+    /// requires the wallet to fetch the offer over HTTPS (L434); a wallet that
+    /// does not implement the parameter cannot fall back on its own.
+    #[serde(default)]
+    pub offer_by_reference: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -840,6 +857,23 @@ verifier:
         );
         let cfg = parse(&yaml);
         assert_eq!(cfg.credential_types[0].resolved_validity_seconds(), 43_200);
+    }
+
+    /// The backward-compatibility guarantee for by-reference offers: a config
+    /// written before the flag existed must keep the by-value delivery mode it
+    /// has always had. Defaulting the other way would change the offer link
+    /// every deployment hands to wallets, silently.
+    #[test]
+    fn config_without_offer_by_reference_defaults_to_by_value() {
+        let cfg = parse(MINIMAL);
+        assert!(!cfg.issuer.offer_by_reference);
+    }
+
+    #[test]
+    fn offer_by_reference_is_settable() {
+        let yaml = MINIMAL.replacen("issuer:\n", "issuer:\n  offer_by_reference: true\n", 1);
+        let cfg = parse(&yaml);
+        assert!(cfg.issuer.offer_by_reference);
     }
 
     /// An omitted `required` key must deserialize, so existing config files

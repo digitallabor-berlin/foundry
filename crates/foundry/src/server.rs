@@ -11,8 +11,8 @@ use foundry_core::config::Config;
 use foundry_core::storage::{SqliteStorage, Storage};
 use foundry_issuer::{
     AuthorizationServerMetadata, ChallengeResponse, CreateOfferRequest, CreateOfferResponse,
-    CredentialIssuerMetadata, CredentialRequest, IssuanceState, NonceResponse, TokenRequest,
-    TokenResponse,
+    CredentialIssuerMetadata, CredentialOffer, CredentialRequest, IssuanceState, NonceResponse,
+    TokenRequest, TokenResponse,
 };
 use foundry_verifier::{
     CreateVerificationRequest, CreateVerificationResponse, VerificationResult,
@@ -120,6 +120,11 @@ pub fn wallet_router(state: AppState) -> Router {
         .route("/authorize", get(authorize_handler))
         .route("/nonce", post(nonce_handler))
         .route("/credential", post(credential_handler))
+        // Registered unconditionally, unlike `/challenge` below: this route has
+        // no metadata twin whose presence it must agree with, and serving it
+        // always means turning `issuer.offer_by_reference` off does not strand
+        // offers already in a wallet's hands.
+        .route("/credential-offer/:id", get(get_credential_offer_handler))
         .route("/vp/request/:id", get(get_request_object_handler))
         .route("/vp/response/:id", post(post_response_handler))
         .route("/statuslists/:id", get(status_list_handler));
@@ -1305,6 +1310,43 @@ pub(crate) async fn post_admin_dc_api_response_handler(
     Json(body): Json<AdminDcApiResponseBody>,
 ) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
     submit_vp_response(&state, &id, &body.response, "admin").await
+}
+
+/// Retrieve a Credential Offer Object sent by reference.
+///
+/// OpenID4VCI §4.2 (L432-L452): the wallet GETs the `credential_offer_uri` from
+/// the deep link and parses the response to recreate the offer parameters
+/// (L434).
+///
+/// The response body is the offer verbatim, `pre-authorized_code` included, so
+/// `id` is a bearer credential: it is **never logged** (root AGENTS.md §4.5),
+/// and the access log records only the route template, never the concrete path
+/// (see `http_log`). This is also why the id is a fresh 32-byte secret rather
+/// than the transaction id — see `foundry_issuer::generate_offer_id`.
+///
+/// An unknown or expired id is a plain 404 with no log record, matching
+/// `get_request_object_handler`: it is not a typed error, and logging it would
+/// write the id an attacker probed into the log.
+#[utoipa::path(
+    get,
+    path = "/credential-offer/{id}",
+    responses(
+        (status = 200, description = "Credential Offer Object", content_type = "application/json", body = CredentialOffer),
+        (status = 404, description = "No such Credential Offer")
+    )
+)]
+async fn get_credential_offer_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<CredentialOffer>, StatusCode> {
+    let offer = foundry_issuer::load_offer_by_reference(state.storage.as_ref(), &id)
+        .await
+        .map_err(|e| internal_error("load_offer_by_reference", e.kind(), e))?;
+    match offer {
+        // `Json` sets `content-type: application/json`, which L445 requires.
+        Some(offer) => Ok(Json(offer)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
 }
 
 #[utoipa::path(

@@ -6,9 +6,10 @@ use crate::display_metadata::{DisplayStage, validate_display};
 use crate::error::IssuanceError;
 use crate::offer::{
     AuthorizationCodeGrant, CredentialOffer, CredentialOfferGrants, PreAuthorizedCodeGrant,
-    TxCodeDefinition, build_dc_api_offer, build_offer_uri, generate_pre_authorized_code,
-    generate_tx_code,
+    TxCodeDefinition, build_dc_api_offer, build_offer_uri, build_offer_uri_by_reference,
+    generate_offer_id, generate_pre_authorized_code, generate_tx_code,
 };
+use crate::offer_ref::save_offer_by_reference;
 use crate::status_index::allocate_status_index;
 use crate::transaction::{IssuanceState, IssuanceTransaction, save_transaction_with_indices};
 use foundry_core::config::Config;
@@ -267,7 +268,35 @@ pub async fn create_offer(
         grants,
         display: offer_display,
     };
-    let credential_offer_uri = build_offer_uri(&offer)?;
+    // OpenID4VCI §4.2 (L432-L452): deliver the offer by reference when
+    // configured, inline otherwise. L374-L375 make the two parameters mutually
+    // exclusive, which is why this is an either/or and not an addition.
+    //
+    // The offer row is written ONLY on the by-reference branch: with the toggle
+    // off nothing addresses it, so persisting it would store a
+    // `pre-authorized_code` at a second location for no reader.
+    let credential_offer_uri = if cfg.issuer.offer_by_reference {
+        let offer_id = generate_offer_id();
+        save_offer_by_reference(
+            storage,
+            &offer_id,
+            &offer,
+            cfg.storage.transaction_ttl_secs,
+            now_unix,
+        )
+        .await?;
+        build_offer_uri_by_reference(&format!(
+            "{}/credential-offer/{offer_id}",
+            cfg.server
+                .wallet_facing
+                .public_base_url
+                .trim_end_matches('/')
+        ))
+    } else {
+        build_offer_uri(&offer)?
+    };
+    // Deliberately unaffected by the toggle: the DC API hands the offer to the
+    // wallet in-process, so it has neither a QR rendering nor a size limit.
     let dc_api_offer = build_dc_api_offer(cfg, &offer, request_decryption_keys)?;
 
     Ok(CreateOfferResponse {
@@ -339,6 +368,7 @@ mod tests {
                 response_encryption: None,
                 encrypted_pre_authorized_code: Default::default(),
                 access_token_ttl_secs: 600,
+                offer_by_reference: false,
             },
             credential_types: vec![CredentialType {
                 id: "pid".to_string(),
@@ -1120,5 +1150,208 @@ mod tests {
             !value.as_object().unwrap().contains_key("display"),
             "got: {value}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // By-reference offer delivery (OpenID4VCI §4.2, L432) --
+    // `issuer.offer_by_reference`.
+    // -----------------------------------------------------------------------
+
+    fn by_reference_config() -> Config {
+        let mut cfg = test_config();
+        cfg.issuer.offer_by_reference = true;
+        cfg
+    }
+
+    /// Recover the URL the wallet would GET from the deep link, undoing
+    /// `build_offer_uri_by_reference`'s percent-encoding.
+    fn referenced_url(offer_uri: &str) -> String {
+        let encoded = offer_uri
+            .strip_prefix("openid-credential-offer://?credential_offer_uri=")
+            .expect("a by-reference link carries exactly this prefix");
+        percent_encoding::percent_decode_str(encoded)
+            .decode_utf8()
+            .expect("the encoded URL is valid UTF-8")
+            .to_string()
+    }
+
+    fn offer_id_from(offer_uri: &str) -> String {
+        referenced_url(offer_uri)
+            .rsplit('/')
+            .next()
+            .expect("the URL ends in the offer id")
+            .to_string()
+    }
+
+    fn plain_request() -> CreateOfferRequest {
+        let mut claims = serde_json::Map::new();
+        claims.insert("birthdate".to_string(), serde_json::json!("1990-01-01"));
+        CreateOfferRequest {
+            credential_type_id: "pid".to_string(),
+            claims,
+            tx_code_required: false,
+            redirect_uri: None,
+            offer_display: None,
+            credential_response_display: None,
+        }
+    }
+
+    /// The no-regression assertion for every deployment that has not opted in:
+    /// the link must still inline the offer, and no offer row may be written.
+    #[tokio::test]
+    async fn with_the_toggle_off_the_offer_is_still_delivered_inline() {
+        let cfg = test_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.credential_offer_uri
+                .matches("credential_offer=")
+                .count(),
+            1
+        );
+        assert!(!resp.credential_offer_uri.contains("credential_offer_uri="));
+    }
+
+    /// OpenID4VCI L374-L375: the two delivery parameters are mutually exclusive.
+    #[tokio::test]
+    async fn with_the_toggle_on_the_offer_is_delivered_by_reference_only() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.credential_offer_uri
+                .matches("credential_offer_uri=")
+                .count(),
+            1
+        );
+        assert_eq!(
+            resp.credential_offer_uri
+                .matches("credential_offer=")
+                .count(),
+            0
+        );
+    }
+
+    /// The referenced URL must address this deployment's wallet-facing listener
+    /// under the route `crates/foundry/src/server.rs` actually serves.
+    #[tokio::test]
+    async fn the_referenced_url_is_the_wallet_facing_credential_offer_route() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        let url = referenced_url(&resp.credential_offer_uri);
+        assert!(
+            url.starts_with("https://issuer.example.com/credential-offer/"),
+            "got: {url}"
+        );
+    }
+
+    /// The offer served by reference must be byte-identical to the one returned
+    /// to the admin caller -- a wallet and the operator must not see two
+    /// different offers.
+    #[tokio::test]
+    async fn the_referenced_offer_is_persisted_and_matches_the_response() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        let stored = crate::offer_ref::load_offer_by_reference(
+            &storage,
+            &offer_id_from(&resp.credential_offer_uri),
+        )
+        .await
+        .unwrap()
+        .expect("the referenced offer must be fetchable");
+
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap(),
+            serde_json::to_value(&resp.credential_offer).unwrap()
+        );
+    }
+
+    /// The security-critical assertion. `GET /admin/issuance/offers/{id}` is
+    /// keyed by `transaction_id` and deliberately withholds
+    /// `pre_authorized_code`; the by-reference resource hands the code out in
+    /// full. Addressing both by the same id would make knowing a transaction id
+    /// enough to redeem the offer.
+    #[tokio::test]
+    async fn the_offer_id_is_not_the_transaction_id() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_ne!(
+            offer_id_from(&resp.credential_offer_uri),
+            resp.transaction_id
+        );
+    }
+
+    /// Two offers must never share a reference URL (L436: a unique URI per
+    /// Credential Offer).
+    #[tokio::test]
+    async fn two_offers_get_distinct_reference_urls() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let a = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+        let b = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_ne!(a.credential_offer_uri, b.credential_offer_uri);
+    }
+
+    /// The DPC display metadata is the reason this mode exists, so it must reach
+    /// the wallet through the referenced document.
+    #[tokio::test]
+    async fn a_by_reference_dpc_offer_serves_its_display_metadata() {
+        let mut cfg = test_config_with_dpc();
+        cfg.issuer.offer_by_reference = true;
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, dpc_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        let stored = crate::offer_ref::load_offer_by_reference(
+            &storage,
+            &offer_id_from(&resp.credential_offer_uri),
+        )
+        .await
+        .unwrap()
+        .expect("the referenced offer must be fetchable");
+
+        let display = stored.display.expect("the offer-stage display array");
+        assert_eq!(display[0]["card"]["type"]["code"], "CREDIT");
+    }
+
+    /// The DC API is handed the offer in-process, so it has no QR and no size
+    /// limit. The toggle must not touch it.
+    #[tokio::test]
+    async fn the_dc_api_offer_still_inlines_the_offer_under_the_toggle() {
+        let cfg = by_reference_config();
+        let storage = test_storage().await;
+        let resp = create_offer(&cfg, &storage, plain_request(), 1_700_000_000, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.dc_api_offer["credential_configuration_ids"],
+            serde_json::json!(["pid"])
+        );
+        assert!(resp.dc_api_offer["credential_issuer_metadata"].is_object());
     }
 }

@@ -125,6 +125,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -828,6 +829,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![],
         verifier: VerifierConfig {
@@ -978,6 +980,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1466,6 +1469,7 @@ async fn setup_pop_test_app_with_modes(
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),

@@ -16,6 +16,31 @@ pub fn generate_pre_authorized_code() -> String {
     B64URL.encode(bytes)
 }
 
+/// The opaque identifier addressing one Credential Offer served by reference
+/// (OpenID4VCI §4.2, L432).
+///
+/// **This is a bearer credential, not a database key.** The resource it
+/// addresses hands out the offer object verbatim, `pre-authorized_code`
+/// included, so anyone who learns the id can redeem the offer. Two consequences
+/// bind every caller:
+///
+/// 1. It is generated fresh here rather than reusing `transaction_id`.
+///    `GET /admin/issuance/offers/{id}` is keyed by `transaction_id`, and
+///    `AdminIssuanceStatus` deliberately withholds `pre_authorized_code` so an
+///    admin-key holder cannot redeem a wallet's offer. Addressing the
+///    wallet-facing offer resource by `transaction_id` would hand that
+///    capability straight back.
+/// 2. It must never be logged, at any level, under any flag — root AGENTS.md
+///    §4.5, same rule as the `pre-authorized_code` it protects.
+///
+/// Fresh per offer also satisfies L436's "unique URI for each Credential
+/// Offer". Same 32-byte CSPRNG idiom as [`generate_pre_authorized_code`].
+pub fn generate_offer_id() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::ThreadRng::default().fill_bytes(&mut bytes);
+    B64URL.encode(bytes)
+}
+
 /// A numeric `tx_code` of `length` digits (HAIP default input_mode: numeric).
 pub fn generate_tx_code(length: usize) -> String {
     let mut rng = rand::rngs::ThreadRng::default();
@@ -94,6 +119,31 @@ pub fn build_offer_uri(offer: &CredentialOffer) -> Result<String, IssuanceError>
     Ok(format!(
         "openid-credential-offer://?credential_offer={encoded}"
     ))
+}
+
+/// Build a `credential_offer_uri` deep link that carries the offer **by
+/// reference** — `openid-credential-offer://?credential_offer_uri=...` —
+/// pointing at `offer_url`, which a wallet fetches with an HTTP GET
+/// (OpenID4VCI §4.2, L434).
+///
+/// Sibling of [`build_offer_uri`], and mutually exclusive with it: L374-L375
+/// make `credential_offer` and `credential_offer_uri` forbidden in the same
+/// link. `create_offer` picks exactly one based on `issuer.offer_by_reference`.
+///
+/// This exists for QR codes. L452: a QR rendering "would usually contain the
+/// Credential Offer by reference due to the size limitations of the QR codes".
+/// An inlined offer grows with its contents — a `com.emvco.dpc.card` offer
+/// carrying display metadata is several times the size of a plain one — while
+/// a reference is a fixed ~150 characters regardless.
+///
+/// `offer_url` embeds the offer id, which is a bearer credential: never log the
+/// return value (root AGENTS.md §4.5).
+pub fn build_offer_uri_by_reference(offer_url: &str) -> String {
+    // Same encoding set as `build_offer_uri`, and the same set the spec's own
+    // L453 example uses (it encodes `.` as %2E). The URL's `:` and `/` MUST be
+    // encoded: left literal they would read as structure in the outer link.
+    let encoded = utf8_percent_encode(offer_url, NON_ALPHANUMERIC).to_string();
+    format!("openid-credential-offer://?credential_offer_uri={encoded}")
 }
 
 /// Render `offer` as the `data` member of a W3C Digital Credentials API
@@ -227,6 +277,54 @@ mod tests {
         // The raw JSON must not appear verbatim (braces/quotes are percent-encoded).
         assert!(!uri.contains('{'));
         assert!(!uri.contains('"'));
+    }
+
+    #[test]
+    fn offer_ids_are_random_and_nonempty() {
+        let a = generate_offer_id();
+        let b = generate_offer_id();
+        assert_ne!(a, b);
+        assert!(!a.is_empty());
+    }
+
+    /// The offer id addresses a resource that hands out the
+    /// `pre-authorized_code`, so it is a bearer credential in its own right and
+    /// must carry the same entropy as the code it protects.
+    #[test]
+    fn offer_ids_carry_256_bits_of_entropy() {
+        let id = generate_offer_id();
+        assert_eq!(
+            B64URL
+                .decode(&id)
+                .expect("offer id is URL-safe base64")
+                .len(),
+            32
+        );
+    }
+
+    #[test]
+    fn build_offer_uri_by_reference_uses_the_correct_scheme_and_parameter() {
+        let uri = build_offer_uri_by_reference("https://issuer.example.com/credential-offer/abc");
+        assert!(uri.starts_with("openid-credential-offer://?credential_offer_uri="));
+    }
+
+    /// OpenID4VCI L374-L375: the two delivery parameters are mutually
+    /// exclusive. `credential_offer_uri=` does not contain the substring
+    /// `credential_offer=`, so this check is exact rather than incidental.
+    #[test]
+    fn build_offer_uri_by_reference_never_also_inlines_the_offer() {
+        let uri = build_offer_uri_by_reference("https://issuer.example.com/credential-offer/abc");
+        assert_eq!(uri.matches("credential_offer_uri=").count(), 1);
+        assert_eq!(uri.matches("credential_offer=").count(), 0);
+    }
+
+    #[test]
+    fn build_offer_uri_by_reference_percent_encodes_the_url() {
+        let uri = build_offer_uri_by_reference("https://issuer.example.com/credential-offer/abc");
+        // The URL's own separators must not survive as structure in the outer
+        // URI, or the wallet parses the offer link's query string wrong.
+        assert!(!uri.contains("https://issuer"));
+        assert!(uri.contains("https%3A%2F%2F"));
     }
 
     #[test]

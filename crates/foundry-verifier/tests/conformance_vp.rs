@@ -76,6 +76,7 @@ fn sample_config(key_path: &str, x5c_path: Option<&str>) -> Config {
             response_encryption: None,
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
+            offer_by_reference: false,
         },
         credential_types: vec![],
         verifier: VerifierConfig {
