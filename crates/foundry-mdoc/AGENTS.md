@@ -54,6 +54,8 @@ Depends exclusively on `foundry-core` (crypto signers, PKI, trust stores, error 
   - `MdocVerificationResult` — `claims` (nested map by namespace), `device_key_jwk`, `issuer_x5c`, `doc_type`.
 - **Types**:
   - `MobileSecurityObject`, `DeviceKeyInfo`, `ValidityInfo`, `IssuerSignedItem` (all CBOR-serializable).
+  - `Bstr` — a `Vec<u8>` newtype that serializes as a CBOR byte string. Required
+    wherever ISO/IEC 18013-5 says `bstr`; see Gotchas for why `Vec<u8>` is wrong.
   - `session_transcript_value(params) → ciborium::Value` and
     `build_session_transcript(params) → Vec<u8>` — the same structure in both
     forms. The byte form is pinned against OpenID4VP's published vectors; the
@@ -123,6 +125,21 @@ the whole workspace — `cargo nextest run --workspace --no-fail-fast
   authenticates the payload bytes first. A test that tampers with the MSO must
   therefore **re-sign**, or it will fail on the signature and never reach the
   structural check it means to exercise.
+- **`random` and every `Digest` are `bstr`, and a plain `Vec<u8>` field cannot
+  say so.** serde's blanket `Vec<T>` impl serializes through `serialize_seq`, so
+  `ciborium` emits major type **4** — an array of integers — where ISO/IEC
+  18013-5 requires major type **2**. Both `IssuerSignedItem.random` and
+  `MobileSecurityObject::value_digests`' values are therefore the `Bstr` newtype
+  (`types.rs`), which calls `serialize_bytes`. Every mdoc foundry issued before
+  2026-08-21 carries the array form on the wire.
+  **This is the same trap as `ValidityInfo` below, and it hid for the same
+  reason:** `ciborium`'s deserializer accepts *either* shape into a byte
+  container, so foundry read the conformant form from real wallets while writing
+  the non-conformant one and agreed with itself throughout — a round-trip test
+  passes against both and proves nothing. Assert the **major type of an untyped
+  `ciborium::Value`**, never a round trip. `Bstr` is deliberately strict on write
+  and tolerant on read: it never emits the array form, but still accepts it, so
+  already-signed legacy documents remain verifiable.
 - **`ValidityInfo` members are `tdate` (CBOR tag 0)** and are typed
   `ciborium::tag::Required<String, 0>`, which requires the tag when reading and
   always emits it when writing. A plain `String` field is a trap here: `ciborium`

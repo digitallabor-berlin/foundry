@@ -67,6 +67,24 @@ extend a derived fact by analogy to a case the two implementations do not cover.
 - `ValidityInfo` members `signed`, `validFrom` and `validUntil` are each `tdate` —
   CBOR **tag 0** over an RFC 3339 text string. All three appear in the capture.
 - `deviceKeyInfo.deviceKey` is a **COSE_Key map** (RFC 9052), not a byte string.
+- `IssuerSignedItem.random` is a **CBOR byte string** — `bstr`, major type 2 —
+  not an array of integers. The capture encodes it as `5820 …`: a 32-byte byte
+  string. Recorded because the distinction is invisible to a round trip:
+  `ciborium` decodes *either* a byte string or an array of integers into a byte
+  container, so foundry emitted the array form (major type 4) for every element
+  salt it ever issued while reading this conformant form correctly, and agreed
+  with itself throughout. Asserted against the capture by
+  `real_presentation::the_real_element_digest_matches_the_full_tag24_encoding`.
+  **What the capture does not establish is the minimum length.** It shows 32
+  bytes; foundry generates 16. ISO/IEC 18013-5's own lower bound on this member
+  is *not* recorded in this file — obtain the document before relying on it.
+- Each `Digest` in `MobileSecurityObject.valueDigests` is likewise a **`bstr`**,
+  not an array of integers. Same defect, same evidence: the capture's six digests
+  are each a 32-byte byte string under `digestAlgorithm: "SHA-256"`. Asserted by
+  `real_presentation::the_real_value_digests_are_cbor_byte_strings`, which reads
+  the MSO as an untyped `ciborium::Value` — parsing into the typed
+  `MobileSecurityObject` cannot distinguish the two shapes and would prove
+  nothing.
 - `valueDigests` commits to every element the credential contains, disclosed or
   not; the capture commits to six and discloses one.
 

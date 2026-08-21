@@ -174,17 +174,75 @@ fn the_real_element_digest_matches_the_full_tag24_encoding() {
     assert_eq!(parsed.element_identifier, "age_over_18");
     assert_eq!(parsed.element_value, ciborium::Value::Bool(true));
 
+    // Ground truth for the `bstr` typing of `random`, against bytes foundry did
+    // not produce: a real wallet encodes it as a CBOR byte string (major type 2).
+    // foundry emitted an array of integers here until this was pinned — and the
+    // defect survived precisely because `ciborium` reads both shapes, so no
+    // round-trip assertion could catch it.
+    let raw_item: ciborium::Value = ciborium::from_reader(inner).expect("item as Value");
+    let raw_random = raw_item
+        .as_map()
+        .expect("item is a map")
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("random"))
+        .map(|(_, v)| v)
+        .expect("random member");
+    assert!(
+        matches!(raw_random, ciborium::Value::Bytes(_)),
+        "a conformant wallet encodes random as a bstr, got {raw_random:?}"
+    );
+
     let expected = &real_mso().value_digests[AV_NAMESPACE][&parsed.digest_id];
     assert_eq!(
-        Sha256::digest(&tagged).to_vec(),
-        *expected,
+        Sha256::digest(&tagged).as_slice(),
+        expected.as_slice(),
         "valueDigests commits to the FULL tag-24 encoding"
     );
     assert_ne!(
-        Sha256::digest(inner).to_vec(),
-        *expected,
+        Sha256::digest(inner).as_slice(),
+        expected.as_slice(),
         "hashing the inner CBOR is what foundry used to do; it must not match"
     );
+}
+
+/// Ground truth for the `bstr` typing of `valueDigests`' `Digest`, the sibling of
+/// the `random` assertion above.
+///
+/// Read as an untyped `ciborium::Value` deliberately: `MobileSecurityObject`'s
+/// typed field goes through `Bstr`, which accepts a byte string *or* an array on
+/// read, so parsing the capture into the typed struct cannot distinguish the two
+/// and would prove nothing about what the wallet actually sent.
+#[test]
+fn the_real_value_digests_are_cbor_byte_strings() {
+    let issuer_signed = lookup(&document(), "issuerSigned").clone();
+    let payload = issuer_auth_payload(&issuer_signed);
+    let wrapper: ciborium::Value = ciborium::from_reader(payload.as_slice()).expect("payload CBOR");
+    let mso: ciborium::Value =
+        ciborium::from_reader(tag24_unwrap(&wrapper).expect("tag-24 unwraps")).expect("MSO CBOR");
+
+    let digests = lookup(lookup(&mso, "valueDigests"), AV_NAMESPACE)
+        .as_map()
+        .expect("DigestIDs is a map")
+        .clone();
+    assert!(
+        !digests.is_empty(),
+        "the capture must commit to some digests"
+    );
+
+    for (digest_id, digest) in &digests {
+        let bytes = match digest {
+            ciborium::Value::Bytes(b) => b,
+            other => panic!(
+                "a conformant wallet encodes each Digest as a bstr; digestID {digest_id:?} \
+                 is {other:?}"
+            ),
+        };
+        assert_eq!(
+            bytes.len(),
+            32,
+            "digestID {digest_id:?} must be a SHA-256 digest"
+        );
+    }
 }
 
 /// Re-encoding a decoded `ciborium::Value` must reproduce the wallet's exact

@@ -406,7 +406,7 @@ pub fn verify_issuer_signed(
             let item: IssuerSignedItem = ciborium::from_reader(inner)
                 .map_err(|e| FormatError::Deserialization(format!("IssuerSignedItem: {e}")))?;
             if let Some(expected) = mso_digests.get(&item.digest_id)
-                && expected == &computed
+                && expected.as_slice() == computed
             {
                 ns_elements.insert(
                     item.element_identifier,
@@ -806,7 +806,7 @@ mod tests {
         // assertions below can distinguish them.
         let probe = IssuerSignedItem {
             digest_id: 4,
-            random: vec![0xAB; 16],
+            random: crate::types::Bstr(vec![0xAB; 16]),
             element_identifier: "age_over_18".to_string(),
             element_value: ciborium::Value::Bool(true),
         };
@@ -828,17 +828,72 @@ mod tests {
         let wire_tagged = crate::types::tag24_encode(wire_inner).unwrap();
         let wire_item: IssuerSignedItem = ciborium::from_reader(wire_inner).unwrap();
 
-        let committed = &mso.value_digests["org.iso.18013.5.1"][&wire_item.digest_id];
+        let committed = mso.value_digests["org.iso.18013.5.1"][&wire_item.digest_id].as_slice();
         assert_eq!(
             committed,
-            &Sha256::digest(&wire_tagged).to_vec(),
+            Sha256::digest(&wire_tagged).as_slice(),
             "the builder must digest the full tag-24 encoding"
         );
         assert_ne!(
             committed,
-            &Sha256::digest(wire_inner).to_vec(),
+            Sha256::digest(wire_inner).as_slice(),
             "the builder must not digest the inner CBOR"
         );
+    }
+
+    /// ISO/IEC 18013-5 types `IssuerSignedItem.random` and `valueDigests`'
+    /// `Digest` as `bstr`. serde's blanket `Vec<u8>` impl serializes through
+    /// `serialize_seq`, which `ciborium` faithfully encodes as major type 4 — an
+    /// ARRAY of integers — so a plain `Vec<u8>` field silently emits the wrong
+    /// wire type.
+    ///
+    /// This asserts the major type as decoded into an untyped `Value`, never a
+    /// round trip: `ciborium`'s deserializer accepts EITHER a byte string or an
+    /// array into a byte container, so a round-trip test passes against both and
+    /// proves nothing. That one-way tolerance is exactly what hid this defect —
+    /// foundry read the conformant shape while writing the non-conformant one,
+    /// and agreed with itself throughout.
+    #[test]
+    fn random_and_digests_are_cbor_byte_strings_not_arrays() {
+        fn member<'a>(v: &'a ciborium::Value, key: &str) -> &'a ciborium::Value {
+            v.as_map()
+                .unwrap_or_else(|| panic!("expected a map when looking up {key}"))
+                .iter()
+                .find(|(k, _)| k.as_text() == Some(key))
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("missing member {key}"))
+        }
+
+        let f = valid_fixture();
+        let (_, namespaces) = decode_mso_and_namespaces(&f.response);
+
+        let items = namespaces[0].1.as_array().unwrap();
+        let wire_inner = crate::types::tag24_unwrap(&items[0]).unwrap();
+        let item: ciborium::Value = ciborium::from_reader(wire_inner).unwrap();
+        let random = member(&item, "random");
+        assert!(
+            matches!(random, ciborium::Value::Bytes(_)),
+            "IssuerSignedItem.random must be a CBOR byte string (major type 2), got {random:?}"
+        );
+        assert!(
+            random.as_bytes().unwrap().len() >= 16,
+            "random must carry at least 16 bytes of entropy"
+        );
+
+        // The same defect, and the same fix, applies to `Digest`. Read the MSO as
+        // an untyped `Value` for the same reason as above.
+        let payload = issuer_auth_payload(&f.response);
+        let tagged: ciborium::Value = ciborium::from_reader(&payload[..]).unwrap();
+        let mso_inner = crate::types::tag24_unwrap(&tagged).unwrap();
+        let mso_raw: ciborium::Value = ciborium::from_reader(mso_inner).unwrap();
+        let (_, digests) = &member(&mso_raw, "valueDigests").as_map().unwrap()[0];
+        for (digest_id, digest) in digests.as_map().unwrap() {
+            assert!(
+                matches!(digest, ciborium::Value::Bytes(_)),
+                "valueDigests Digest for digestID {digest_id:?} must be a CBOR byte \
+                 string (major type 2), got {digest:?}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,102 @@
-use serde::{Deserialize, Serialize};
+use serde::de::{self, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt;
+
+/// A CBOR byte string (`bstr`, major type 2).
+///
+/// ISO/IEC 18013-5 types both `IssuerSignedItem.random` and `valueDigests`'
+/// `Digest` as `bstr`. A plain `Vec<u8>` field cannot express that: serde's
+/// blanket `Vec<T>` impl serializes through `serialize_seq`, and `ciborium`
+/// faithfully encodes that as major type 4 — an ARRAY of integers. Only
+/// `serialize_bytes` produces a byte string, which is what this wrapper calls.
+///
+/// Deliberately **strict on write, tolerant on read.** `ciborium`'s
+/// deserializer accepts either shape into a byte container, and that one-way
+/// tolerance is precisely what let foundry emit arrays undetected while reading
+/// conformant byte strings from real wallets — it agreed with itself throughout.
+/// Writing is therefore pinned to `bstr` and covered by
+/// `verifier::tests::random_and_digests_are_cbor_byte_strings_not_arrays`, while
+/// reading still accepts the array form so that mdocs foundry already issued —
+/// and any other implementation carrying this same defect — remain verifiable.
+///
+/// This is the same class of trap [`ValidityInfo`] closes with
+/// [`ciborium::tag::Required`]: a permissive typed deserializer concealing a
+/// non-conformant serializer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Bstr(pub Vec<u8>);
+
+impl Bstr {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Vec<u8>> for Bstr {
+    fn from(bytes: Vec<u8>) -> Self {
+        Bstr(bytes)
+    }
+}
+
+impl AsRef<[u8]> for Bstr {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Serialize for Bstr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Bstr {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BstrVisitor;
+
+        impl<'de> Visitor<'de> for BstrVisitor {
+            type Value = Bstr;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a CBOR byte string, or an array of byte-valued integers")
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Bstr, E> {
+                Ok(Bstr(v.to_vec()))
+            }
+
+            fn visit_byte_buf<E: de::Error>(self, v: Vec<u8>) -> Result<Bstr, E> {
+                Ok(Bstr(v))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Bstr, A::Error> {
+                let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    out.push(byte);
+                }
+                Ok(Bstr(out))
+            }
+        }
+
+        // `deserialize_any`, not `deserialize_byte_buf`: CBOR is self-describing,
+        // so this dispatches on what is actually encoded — which is what makes the
+        // legacy array form readable at all.
+        deserializer.deserialize_any(BstrVisitor)
+    }
+}
 
 /// MobileSecurityObject (ISO/IEC 18013-5 §9.1.2.4).
 ///
@@ -15,8 +111,10 @@ pub struct MobileSecurityObject {
     pub digest_algorithm: String,
     #[serde(rename = "docType")]
     pub doc_type: String,
+    /// `DigestIDs` per namespace. Each `Digest` is a `bstr`; see [`Bstr`] for why
+    /// a plain `Vec<u8>` would silently emit a CBOR array instead.
     #[serde(rename = "valueDigests")]
-    pub value_digests: BTreeMap<String, BTreeMap<u64, Vec<u8>>>,
+    pub value_digests: BTreeMap<String, BTreeMap<u64, Bstr>>,
     #[serde(rename = "deviceKeyInfo")]
     pub device_key_info: DeviceKeyInfo,
     #[serde(rename = "validityInfo")]
@@ -61,7 +159,9 @@ pub struct ValidityInfo {
 pub struct IssuerSignedItem {
     #[serde(rename = "digestID")]
     pub digest_id: u64,
-    pub random: Vec<u8>,
+    /// At least 16 bytes of entropy, carried as a `bstr`; see [`Bstr`] for why a
+    /// plain `Vec<u8>` would silently emit a CBOR array instead.
+    pub random: Bstr,
     #[serde(rename = "elementIdentifier")]
     pub element_identifier: String,
     #[serde(rename = "elementValue")]
@@ -315,6 +415,62 @@ pub(crate) fn empty_device_namespaces() -> ciborium::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The write half of [`Bstr`]'s contract: a byte string, major type 2.
+    ///
+    /// `0x50` is major type 2 with a 16-byte payload. The array form this
+    /// replaced begins `0x90` (major type 4, 16 elements) and then spends a
+    /// second byte on every value above 23 — so the wrong encoding was both
+    /// non-conformant and larger.
+    #[test]
+    fn bstr_serializes_as_a_cbor_byte_string() {
+        let mut out = Vec::new();
+        ciborium::into_writer(&Bstr(vec![0xFF; 16]), &mut out).expect("encode");
+        assert_eq!(
+            out[0], 0x50,
+            "expected bstr(16) head byte, got {:#04x}",
+            out[0]
+        );
+        assert_eq!(
+            out.len(),
+            17,
+            "a 16-byte bstr is 1 head byte plus 16 payload"
+        );
+    }
+
+    /// The read half: the legacy array form still decodes.
+    ///
+    /// Every mdoc foundry issued before `random` and `Digest` became [`Bstr`]
+    /// carries those members as CBOR arrays of integers. Those documents are
+    /// already signed and cannot be re-encoded, so refusing the array form on
+    /// read would retroactively invalidate them. The tolerance is deliberate and
+    /// one-directional — [`Bstr`] never *writes* this shape.
+    #[test]
+    fn bstr_still_deserializes_the_legacy_array_form() {
+        let bytes: Vec<u8> = (0u8..16).collect();
+        let legacy = ciborium::Value::Array(
+            bytes
+                .iter()
+                .map(|b| ciborium::Value::Integer((*b).into()))
+                .collect(),
+        );
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&legacy, &mut encoded).expect("encode");
+        assert_eq!(encoded[0], 0x90, "fixture must be the array form");
+
+        let decoded: Bstr = ciborium::from_reader(&encoded[..]).expect("legacy array must decode");
+        assert_eq!(decoded.as_slice(), bytes.as_slice());
+    }
+
+    /// Round-tripping the conformant form is lossless.
+    #[test]
+    fn bstr_round_trips_a_byte_string() {
+        let original = Bstr(vec![0xAB, 0x00, 0xFF, 0x17, 0x18]);
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&original, &mut encoded).expect("encode");
+        let decoded: Bstr = ciborium::from_reader(&encoded[..]).expect("decode");
+        assert_eq!(decoded, original);
+    }
 
     /// The `jwkThumbprint` byte string shared by both published
     /// `…HandoverInfo` vectors — the RFC 7638 thumbprint of the example JWK at

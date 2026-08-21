@@ -1,5 +1,5 @@
 use crate::error::FormatError;
-use crate::types::{DeviceKeyInfo, IssuerSignedItem, MobileSecurityObject, ValidityInfo};
+use crate::types::{Bstr, DeviceKeyInfo, IssuerSignedItem, MobileSecurityObject, ValidityInfo};
 use base64::{
     Engine as _, engine::general_purpose::STANDARD as B64STD,
     engine::general_purpose::URL_SAFE_NO_PAD as B64URL,
@@ -19,10 +19,15 @@ pub struct MdocClaims {
     pub valid_until: i64,
 }
 
-fn generate_random_salt() -> Vec<u8> {
+/// 16 bytes of entropy for an `IssuerSignedItem`'s `random` salt.
+///
+/// ISO/IEC 18013-5 requires at least 16 bytes and types the member as a `bstr`,
+/// hence [`Bstr`] rather than `Vec<u8>` — see that type for why the distinction
+/// is load-bearing.
+fn generate_random_salt() -> Bstr {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    bytes.to_vec()
+    Bstr(bytes.to_vec())
 }
 
 fn format_epoch_seconds(epoch: i64) -> Result<String, FormatError> {
@@ -103,12 +108,12 @@ pub fn build_mdoc(
     x5c: Option<Vec<String>>,
 ) -> Result<Vec<u8>, FormatError> {
     let mut issuer_signed_namespaces: BTreeMap<String, ciborium::Value> = BTreeMap::new();
-    let mut value_digests: BTreeMap<String, BTreeMap<u64, Vec<u8>>> = BTreeMap::new();
+    let mut value_digests: BTreeMap<String, BTreeMap<u64, Bstr>> = BTreeMap::new();
     let mut digest_id_counter = 0u64;
 
     for (ns, elements) in claims.namespaces {
         let mut ns_items: Vec<ciborium::Value> = Vec::new();
-        let mut digests_map: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
+        let mut digests_map: BTreeMap<u64, Bstr> = BTreeMap::new();
 
         for (elem_id, elem_val) in elements {
             digest_id_counter += 1;
@@ -131,7 +136,7 @@ pub fn build_mdoc(
 
             let mut hasher = Sha256::new();
             hasher.update(&tagged_bytes);
-            digests_map.insert(digest_id_counter, hasher.finalize().to_vec());
+            digests_map.insert(digest_id_counter, Bstr(hasher.finalize().to_vec()));
 
             ns_items.push(ciborium::Value::Tag(
                 24,
