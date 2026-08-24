@@ -39,8 +39,9 @@ pub use encrypted_pre_auth::{
 pub use error::IssuanceError;
 pub use metadata::{
     AuthorizationServerMetadata, CredentialConfigurationSupported, CredentialIssuerMetadata,
-    CredentialRequestEncryption, CredentialResponseEncryption, CredentialSigningAlg,
-    ProofTypeSupported, build_authorization_server_metadata, build_issuer_metadata,
+    CredentialMetadata, CredentialRequestEncryption, CredentialResponseEncryption,
+    CredentialSigningAlg, ProofTypeSupported, build_authorization_server_metadata,
+    build_issuer_metadata,
 };
 pub use nonce::{C_NONCE_TTL_SECS, NonceResponse, issue_nonce, verify_nonce};
 pub use offer::{

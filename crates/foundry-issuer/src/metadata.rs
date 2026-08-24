@@ -107,9 +107,31 @@ pub struct CredentialConfigurationSupported {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub credential_signing_alg_values_supported: Vec<CredentialSigningAlg>,
     pub proof_types_supported: BTreeMap<String, ProofTypeSupported>,
+    /// L1400: OPTIONAL, so a credential type with neither display nor claims
+    /// emits no key at all rather than `"credential_metadata": {}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_metadata: Option<CredentialMetadata>,
+}
+
+/// OpenID4VCI L1400 — `credential_metadata`, the nested object carrying a
+/// Credential Configuration's display and claims metadata.
+///
+/// Until 2026-08-24 foundry emitted `display` and `claims` as flat siblings of
+/// `format`/`scope` — the pre-1.0 draft shape. A 1.0 wallet finds no
+/// `credential_metadata`, and L1423 ("The Wallet MUST ignore any unrecognized
+/// parameters") then obliges it to discard the flat copies, so the credential
+/// arrives renderable but unrendered. For an `mso_mdoc` credential this is
+/// total rather than partial: L1400 calls itself the fallback behind
+/// format-specific mechanisms, but mdoc has none, so this object is the only
+/// display channel that exists.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CredentialMetadata {
+    /// L1401: OPTIONAL, and "a non-empty array" when present — hence
+    /// `skip_serializing_if` rather than an emitted `[]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<Object>)]
     pub display: Vec<serde_json::Value>,
+    /// L1412: OPTIONAL, and "a non-empty array" when present.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<Object>)]
     pub claims: Vec<serde_json::Value>,
@@ -205,15 +227,39 @@ pub fn build_issuer_metadata(
         } else {
             Vec::new()
         };
+        // OpenID4VCI L2321-L2338 — a claims description object for Issuer
+        // Metadata defines exactly `path`, `mandatory` and `display`. Built as
+        // a map rather than with `json!` because `skip_serializing_if` does not
+        // apply inside the macro: the old code emitted `"display": []` for
+        // every claim without configured display, contradicting L2332's "a
+        // non-empty array of objects".
+        //
+        // `selectively_disclosable` was never an OpenID4VCI parameter. It is a
+        // foundry config field name, and conveys nothing a wallet can use: for
+        // SD-JWT VC the wallet learns disclosability from the credential's own
+        // disclosures, and for mdoc every IssuerSignedItem is inherently
+        // selectively disclosable.
         let claims: Vec<serde_json::Value> = ct
             .claims
             .iter()
             .map(|c| {
-                serde_json::json!({
-                    "path": c.path,
-                    "selectively_disclosable": c.selectively_disclosable,
-                    "display": c.display,
-                })
+                let mut claim = serde_json::Map::new();
+                // L2323: REQUIRED.
+                claim.insert("path".to_string(), serde_json::json!(c.path));
+                // L2326/L2327: `mandatory` means "the Credential Issuer will
+                // always include this claim in the issued Credential" -- which
+                // is exactly `ClaimDef::is_required()`, the same predicate
+                // `create_offer` uses to decide whether a value must be
+                // supplied when an offer is created. Emitted unconditionally:
+                // L2331 makes absence default to `false`, but the value is
+                // always determinate here, so publishing it states the
+                // issuer's intent instead of leaving it to a default.
+                claim.insert("mandatory".to_string(), serde_json::json!(c.is_required()));
+                // L2332: "A non-empty array of objects" -- omitted when empty.
+                if !c.display.is_empty() {
+                    claim.insert("display".to_string(), serde_json::json!(c.display));
+                }
+                serde_json::Value::Object(claim)
             })
             .collect();
         configs.insert(
@@ -301,8 +347,16 @@ pub fn build_issuer_metadata(
                     }
                     types
                 },
-                display: ct.display.clone(),
-                claims,
+                // L1400 is OPTIONAL: emit nothing when there is nothing to
+                // say, rather than an empty object.
+                credential_metadata: if ct.display.is_empty() && claims.is_empty() {
+                    None
+                } else {
+                    Some(CredentialMetadata {
+                        display: ct.display.clone(),
+                        claims,
+                    })
+                },
             },
         );
     }
@@ -945,10 +999,11 @@ mod tests {
     }
 
     /// `display` is an opaque passthrough into
-    /// `credential_configurations_supported[].display`, so every configured
-    /// locale entry must arrive intact, in order, with its members preserved.
-    /// A wallet reads this array to render the credential, so silently dropping
-    /// or reordering entries would be invisible here but visible on a device.
+    /// `credential_configurations_supported[].credential_metadata.display`
+    /// (OpenID4VCI L1401), so every configured locale entry must arrive intact,
+    /// in order, with its members preserved. A wallet reads this array to
+    /// render the credential, so silently dropping or reordering entries would
+    /// be invisible here but visible on a device.
     #[test]
     fn credential_configuration_display_carries_every_configured_locale() {
         let mut cfg = test_config();
@@ -959,13 +1014,134 @@ mod tests {
         ];
         let meta = build_issuer_metadata(&cfg, &[]);
         let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        let display = &pid
+            .credential_metadata
+            .as_ref()
+            .expect("display is configured, so credential_metadata is present")
+            .display;
 
-        let locales: Vec<&str> = pid
-            .display
+        let locales: Vec<&str> = display
             .iter()
             .filter_map(|d| d.get("locale").and_then(|l| l.as_str()))
             .collect();
         assert_eq!(locales, vec!["en-US", "de-DE", "fr-FR"]);
-        assert_eq!(pid.display[1]["name"], "Zahlungskarte");
+        assert_eq!(display[1]["name"], "Zahlungskarte");
+    }
+
+    /// OpenID4VCI L1400-L1412: `display` and `claims` are members of a nested
+    /// `credential_metadata` object, not flat siblings of `format`/`scope`.
+    /// Until 2026-08-24 foundry emitted the flat, pre-1.0 draft shape, and
+    /// L1423 ("The Wallet MUST ignore any unrecognized parameters") then
+    /// obliged every conformant wallet to discard it.
+    #[test]
+    fn credential_metadata_nests_display_and_claims() {
+        let cfg = test_config();
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let value = serde_json::to_value(&meta).expect("metadata serialises");
+        let pid = &value["credential_configurations_supported"]["pid"];
+
+        assert_eq!(
+            pid["credential_metadata"]["display"][0]["name"],
+            "Person ID"
+        );
+        assert_eq!(
+            pid["credential_metadata"]["claims"][0]["path"],
+            serde_json::json!(["given_name"])
+        );
+
+        // The load-bearing half. A wallet is obliged to ignore the flat
+        // members, so their presence is invisible to any positive assertion --
+        // which is exactly how the original defect survived.
+        assert!(
+            pid.get("display").is_none(),
+            "flat `display` is the pre-1.0 draft shape and must not be emitted"
+        );
+        assert!(
+            pid.get("claims").is_none(),
+            "flat `claims` is the pre-1.0 draft shape and must not be emitted"
+        );
+    }
+
+    /// L1400 is OPTIONAL. A credential type with neither display nor claims
+    /// must emit no `credential_metadata` key at all -- an empty object is not
+    /// "information relevant to the usage and display of issued Credentials",
+    /// and emitting one would trade this defect for a smaller one.
+    #[test]
+    fn credential_metadata_is_absent_when_neither_display_nor_claims_configured() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].display = vec![];
+        cfg.credential_types[0].claims = vec![];
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let value = serde_json::to_value(&meta).expect("metadata serialises");
+        let pid = &value["credential_configurations_supported"]["pid"];
+
+        assert!(
+            pid.get("credential_metadata").is_none(),
+            "expected no credential_metadata key, got {:?}",
+            pid.get("credential_metadata")
+        );
+    }
+
+    /// L2321-L2338 defines a claims description object for Issuer Metadata as
+    /// exactly `path`, `mandatory` and `display`. `selectively_disclosable` is
+    /// a foundry config field name, never an OpenID4VCI parameter, and conveys
+    /// nothing a wallet can use at either format.
+    #[test]
+    fn claims_description_emits_mandatory_and_not_selectively_disclosable() {
+        let mut cfg = test_config();
+        cfg.credential_types[0].claims = vec![
+            ClaimDef {
+                path: vec!["age_over_18".to_string()],
+                required: Some(true),
+                selectively_disclosable: false,
+                display: vec![],
+            },
+            ClaimDef {
+                path: vec!["age_over_16".to_string()],
+                required: Some(false),
+                selectively_disclosable: false,
+                display: vec![],
+            },
+        ];
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        let claims = &pid
+            .credential_metadata
+            .as_ref()
+            .expect("claims are configured, so credential_metadata is present")
+            .claims;
+
+        // L2326/L2327: `mandatory` mirrors ClaimDef::is_required().
+        assert_eq!(claims[0]["mandatory"], serde_json::json!(true));
+        assert_eq!(claims[1]["mandatory"], serde_json::json!(false));
+
+        for claim in claims {
+            assert!(
+                claim.get("selectively_disclosable").is_none(),
+                "selectively_disclosable is not an OpenID4VCI claims-description \
+                 parameter"
+            );
+        }
+    }
+
+    /// L2332: claims description `display` is "a non-empty array of objects"
+    /// when present. The old `json!` macro had no `skip_serializing_if`, so a
+    /// claim with no configured display emitted `"display": []`.
+    #[test]
+    fn claims_description_omits_display_when_none_configured() {
+        let cfg = test_config();
+        let meta = build_issuer_metadata(&cfg, &[]);
+        let pid = meta.credential_configurations_supported.get("pid").unwrap();
+        let claims = &pid
+            .credential_metadata
+            .as_ref()
+            .expect("claims are configured, so credential_metadata is present")
+            .claims;
+
+        assert!(
+            claims[0].get("display").is_none(),
+            "expected no display member, got {:?}",
+            claims[0].get("display")
+        );
     }
 }

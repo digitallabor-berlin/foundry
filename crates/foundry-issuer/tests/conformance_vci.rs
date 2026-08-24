@@ -2451,13 +2451,21 @@ fn vci_0155_credential_configuration_claims_reveal_disclosed_paths() {
     let cfg = test_config();
     let meta = build_issuer_metadata(&cfg, &[]);
     let pid = meta.credential_configurations_supported.get("pid").unwrap();
+    // L1412: the claims description array is a member of `credential_metadata`,
+    // not a flat sibling of `format`/`scope`.
+    let claims = &pid
+        .credential_metadata
+        .as_ref()
+        .expect("pid configures claims, so credential_metadata is present")
+        .claims;
 
-    assert_eq!(pid.claims.len(), 1);
-    assert_eq!(pid.claims[0]["path"], serde_json::json!(["given_name"]));
-    assert_eq!(
-        pid.claims[0]["selectively_disclosable"],
-        serde_json::json!(true)
-    );
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0]["path"], serde_json::json!(["given_name"]));
+    // L2326 is the specification's own vehicle for telling the Authorization
+    // Server whether a claim is always disclosed -- which is what this clause
+    // asks for. `test_config`'s claim is selectively disclosable with no
+    // explicit `required`, so `ClaimDef::is_required()` resolves to `false`.
+    assert_eq!(claims[0]["mandatory"], serde_json::json!(false));
 }
 
 // ---------------------------------------------------------------------------
