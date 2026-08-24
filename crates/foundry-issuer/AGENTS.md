@@ -442,3 +442,17 @@ cargo nextest run -p foundry --test wallet_issuance               # issuance flo
   specifically so a value minted for one purpose can never verify as another,
   and reusing a variant silently defeats that guarantee. See `challenge.rs`'s
   own cross-domain-rejection tests for the property this protects.
+- **A Credential Configuration's `display` and `claims` live under
+  `credential_metadata`, not flat.** OpenID4VCI L1400-L1412 nests both inside an
+  OPTIONAL `credential_metadata` object. foundry emitted them flat until
+  2026-08-24 — the pre-1.0 draft shape — and because L1423 obliges a wallet to
+  ignore unrecognized parameters, conformant wallets silently discarded them and
+  credentials rendered unnamed. There is no compatibility echo: the flat members
+  were removed, not duplicated. Note `CredentialIssuerMetadata.display` (L1384)
+  is a *different*, issuer-level field and is still flat and still hardcoded
+  empty; so are the EMVCo DPC `display` members on `CredentialOffer` and
+  `CredentialResponse`. Design:
+  `docs/superpowers/specs/2026-08-24-credential-metadata-nesting-design.md`.
+- **A claims description object has exactly `path`, `mandatory` and `display`**
+  (L2321-L2338). `selectively_disclosable` is a config field name and must never
+  reach the wire. `mandatory` comes from `ClaimDef::is_required()`.
