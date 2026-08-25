@@ -125,6 +125,14 @@ pub fn wallet_router(state: AppState) -> Router {
         // always means turning `issuer.offer_by_reference` off does not strand
         // offers already in a wallet's hands.
         .route("/credential-offer/:id", get(get_credential_offer_handler))
+        // PaSO Proof Metadata §2. Registered unconditionally: the handler 404s
+        // for any configuration that is not a PaSO Credential type, so the
+        // route's presence can never contradict what Issuer Metadata
+        // advertises.
+        .route(
+            "/credential-metadata/:credential_configuration_id",
+            get(credential_metadata_handler),
+        )
         .route("/vp/request/:id", get(get_request_object_handler))
         .route("/vp/response/:id", post(post_response_handler))
         .route("/statuslists/:id", get(status_list_handler));
@@ -337,6 +345,62 @@ fn log_typed_error(
         tracing::error!(surface, error.kind = kind, error.detail = %detail, http.status = code, "request failed");
     } else {
         tracing::warn!(surface, error.kind = kind, error.detail = %detail, http.status = code, "request rejected");
+    }
+}
+
+/// Which representation of the credential metadata a request asked for
+/// (PaSO Proof Metadata §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataRepresentation {
+    /// The bare `credential_metadata` object (§2, `Accept: application/json`).
+    Json,
+    /// The signed `credential-metadata+jwt` (§2 and §4, `Accept: application/jwt`).
+    Jwt,
+}
+
+/// PaSO Proof Metadata §2 content negotiation.
+///
+/// Returns `None` when `Accept` names only media types this route cannot
+/// produce; the caller turns that into 406. Returns `Json` when the header is
+/// absent or "does not express a preference" (§2's phrase, read here as absent,
+/// empty, or a wildcard).
+///
+/// **Deliberately not full RFC 9110 q-value negotiation.** `application/jwt`
+/// anywhere in the list wins. The two representations carry identical
+/// information, and only the signed one is usable for the PaSO flow — §3: a
+/// Wallet "SHALL NOT use unsigned credential metadata from the Credential
+/// Issuer Metadata endpoint for PaSO Credentials". A client listing both is
+/// therefore better served the signed form whatever weights it attached.
+/// Scanning for one token also makes the result order-independent and
+/// deterministic.
+pub(crate) fn negotiate_metadata_representation(
+    accept: Option<&str>,
+) -> Option<MetadataRepresentation> {
+    let Some(raw) = accept else {
+        return Some(MetadataRepresentation::Json);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Some(MetadataRepresentation::Json);
+    }
+
+    let mut json_acceptable = false;
+    for part in raw.split(',') {
+        // Strip parameters (`;q=0.8`, `;charset=...`). `next()` on a split
+        // always yields at least one element; `unwrap_or` keeps this free of
+        // `unwrap` per root AGENTS.md §4.1.
+        let media = part.split(';').next().unwrap_or("").trim();
+        match media {
+            "application/jwt" => return Some(MetadataRepresentation::Jwt),
+            "application/json" | "application/*" | "*/*" => json_acceptable = true,
+            _ => {}
+        }
+    }
+
+    if json_acceptable {
+        Some(MetadataRepresentation::Json)
+    } else {
+        None
     }
 }
 
@@ -1349,6 +1413,88 @@ async fn get_credential_offer_handler(
     }
 }
 
+/// Serve a PaSO Credential configuration's credential metadata.
+///
+/// PaSO Proof Metadata §2: content-negotiated between the bare
+/// `credential_metadata` object (`Accept: application/json`, the default) and
+/// the signed `credential-metadata+jwt` of §4 (`Accept: application/jwt`).
+#[utoipa::path(
+    get,
+    path = "/credential-metadata/{credential_configuration_id}",
+    params(
+        ("credential_configuration_id" = String, Path,
+         description = "Credential Configuration id declaring transaction_data_types")
+    ),
+    responses(
+        (status = 200, description = "Signed credential metadata JWT (Accept: application/jwt)",
+         content_type = "application/jwt", body = String),
+        (status = 404, description = "Unknown configuration, or not a PaSO Credential type"),
+        (status = 406, description = "Accept names no representation this route produces")
+    )
+)]
+pub(crate) async fn credential_metadata_handler(
+    State(state): State<AppState>,
+    Path(credential_configuration_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, StatusCode> {
+    use axum::response::IntoResponse;
+
+    // PaSO Proof Metadata §2 scopes this endpoint to PaSO Credential
+    // configurations, and §3 makes `transaction_data_types` REQUIRED in what it
+    // serves. A configuration without them has nothing conformant to return, so
+    // it is treated exactly like an unknown id -- and 404 leaks nothing beyond
+    // what Issuer Metadata already publishes.
+    let Some(ct) = state
+        .config
+        .credential_types
+        .iter()
+        .find(|c| c.id == credential_configuration_id)
+        .filter(|c| foundry_issuer::is_paso_credential_type(c))
+    else {
+        log_typed_error(
+            "wallet",
+            "unknown_credential_configuration",
+            "no PaSO credential configuration with that id",
+            StatusCode::NOT_FOUND,
+        );
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok());
+    let Some(representation) = negotiate_metadata_representation(accept) else {
+        log_typed_error(
+            "wallet",
+            "not_acceptable",
+            "Accept names neither application/jwt nor application/json",
+            StatusCode::NOT_ACCEPTABLE,
+        );
+        return Err(StatusCode::NOT_ACCEPTABLE);
+    };
+
+    match representation {
+        // §2: the plain JSON form is the bare `credential_metadata` object --
+        // explicitly NOT the JWT payload structure of §4.
+        MetadataRepresentation::Json => {
+            let doc = foundry_issuer::build_credential_metadata_document(ct)
+                .map_err(|e| internal_error("build_credential_metadata_document", e.kind(), e))?;
+            Ok(Json(doc).into_response())
+        }
+        // §4: minted fresh on every request, so "rotate before exp" holds by
+        // construction -- there is no cache to go stale.
+        MetadataRepresentation::Jwt => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let jwt = foundry_issuer::build_credential_metadata_jwt(&state.config, ct, now)
+                .map_err(|e| internal_error("build_credential_metadata_jwt", e.kind(), e))?;
+            Ok(([(axum::http::header::CONTENT_TYPE, "application/jwt")], jwt).into_response())
+        }
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/vp/request/{id}",
@@ -1851,6 +1997,61 @@ mod tests {
             detail.len()
         );
         assert!(detail.contains("truncated"));
+    }
+
+    /// PaSO Proof Metadata §2: "If the Accept header is absent or does not
+    /// express a preference, the Attestation Provider SHALL default to
+    /// application/json."
+    #[test]
+    fn absent_or_unopinionated_accept_defaults_to_json() {
+        for header in [None, Some(""), Some("*/*"), Some("application/*")] {
+            assert!(
+                matches!(
+                    negotiate_metadata_representation(header),
+                    Some(MetadataRepresentation::Json)
+                ),
+                "expected JSON for Accept: {header:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_jwt_selects_the_signed_representation() {
+        for header in [
+            "application/jwt",
+            "application/jwt; q=1.0",
+            "application/json, application/jwt",
+            " application/jwt ",
+        ] {
+            assert!(
+                matches!(
+                    negotiate_metadata_representation(Some(header)),
+                    Some(MetadataRepresentation::Jwt)
+                ),
+                "expected JWT for Accept: {header}"
+            );
+        }
+    }
+
+    #[test]
+    fn application_json_selects_the_plain_representation() {
+        assert!(matches!(
+            negotiate_metadata_representation(Some("application/json")),
+            Some(MetadataRepresentation::Json)
+        ));
+    }
+
+    /// An Accept naming only media types this route cannot produce is a 406,
+    /// not a silent fallback — a fallback would hand a wallet bytes it just
+    /// told us it cannot parse.
+    #[test]
+    fn an_unsatisfiable_accept_is_none() {
+        for header in ["text/html", "application/cbor, image/png"] {
+            assert!(
+                negotiate_metadata_representation(Some(header)).is_none(),
+                "expected unsatisfiable for Accept: {header}"
+            );
+        }
     }
 
     /// `internal_error` exists so that a handler collapsing to a bare StatusCode

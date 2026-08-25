@@ -51,6 +51,7 @@ pub fn generate_admin_openapi_spec() -> String {
         crate::server::challenge_handler,
         crate::server::credential_handler,
         crate::server::get_credential_offer_handler,
+        crate::server::credential_metadata_handler,
         crate::server::get_request_object_handler,
         crate::server::post_response_handler,
         crate::server::status_list_handler,
