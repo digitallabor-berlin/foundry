@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -127,6 +127,11 @@ pub struct TrustAnchor {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssuerConfig {
     pub credential_issuer: String,
+    /// PaSO Proof Metadata §4 / §5.2 — lifetimes of the metadata JWTs. Absent
+    /// uses the defaults; the block is inert for a deployment with no PaSO
+    /// credential types.
+    #[serde(default)]
+    pub paso_metadata: PasoMetadataConfig,
     #[serde(default)]
     pub wallet_attestation: AttestationMode,
     #[serde(default)]
@@ -491,6 +496,70 @@ pub struct StatusListConfig {
     pub public_base_url: Option<String>,
 }
 
+/// PaSO Proof Metadata §3 — one entry of the `transaction_data_types` object:
+/// the machine-readable description of a transaction data payload a PaSO
+/// Credential supports, and how a Wallet renders it for consent.
+///
+/// Typed exactly as deep as foundry validates (`claims`, `ui_labels`) and
+/// passthrough below that, the same posture as `CredentialType::display`.
+/// `extra` preserves unrecognised members because §3 permits additional
+/// parameters and obliges the Wallet to ignore the ones it does not know —
+/// dropping them here would silently narrow what an issuer can publish.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TransactionDataTypeMetadata {
+    /// §3: REQUIRED. Claim metadata objects, validated by
+    /// [`crate::config::validate_paso_transaction_data_type_metadata`].
+    pub claims: Vec<serde_json::Value>,
+    /// §3.2: localised strings for consent UI elements.
+    ///
+    /// §3 marks this "REQUIRED when the credential is issued to a Wallet that
+    /// does not have a dedicated UI for the transaction data type" — a
+    /// condition the publisher cannot evaluate, since it serves static
+    /// metadata at a URI and never learns the fetching Wallet's capabilities.
+    /// foundry therefore treats it as always OPTIONAL and never enforces the
+    /// conditional. Recorded as ambiguity #1 in
+    /// `docs/superpowers/specs/2026-08-25-paso-signed-credential-metadata-design.md` §10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_labels: Option<serde_json::Value>,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+/// PaSO Proof Metadata §4 / §5.2 — the `exp` foundry sets on the two metadata
+/// JWT kinds.
+///
+/// Both JWTs are minted per request, so §4's "rotate signed credential
+/// metadata JWTs before their `exp` time" holds by construction; these values
+/// only bound how long a Wallet or Relying Party may cache what it received.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasoMetadataConfig {
+    /// Lifetime of a signed credential metadata JWT (§4).
+    #[serde(default = "default_paso_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Lifetime of an ad-hoc transaction data metadata JWT (§5.2). Shorter by
+    /// default: §5.2 asks for "a validity period that bounds how long Relying
+    /// Parties can cache and reuse the JWT".
+    #[serde(default = "default_paso_adhoc_ttl_secs")]
+    pub adhoc_ttl_secs: u64,
+}
+
+fn default_paso_ttl_secs() -> u64 {
+    86_400
+}
+
+fn default_paso_adhoc_ttl_secs() -> u64 {
+    300
+}
+
+impl Default for PasoMetadataConfig {
+    fn default() -> Self {
+        Self {
+            ttl_secs: default_paso_ttl_secs(),
+            adhoc_ttl_secs: default_paso_adhoc_ttl_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CredentialType {
     pub id: String,
@@ -523,6 +592,16 @@ pub struct CredentialType {
     /// credentials set this explicitly.
     #[serde(default)]
     pub validity_seconds: Option<u64>,
+    /// PaSO Proof Metadata §3 — the transaction data types this credential
+    /// supports, keyed by the `urn:paso:sca:<domain>:<suffix>:<version>`
+    /// identifier of PaSO Core §5.2.
+    ///
+    /// **Presence is what makes a credential type a PaSO Credential type.** It
+    /// turns on the `credential_metadata_uri` in Issuer Metadata and the
+    /// `GET /credential-metadata/:id` route for this configuration. Absent
+    /// leaves every byte of existing wire output unchanged.
+    #[serde(default)]
+    pub transaction_data_types: Option<BTreeMap<String, TransactionDataTypeMetadata>>,
 }
 
 impl CredentialType {

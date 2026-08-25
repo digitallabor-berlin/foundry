@@ -62,6 +62,7 @@ fn test_config(status_list_enabled: bool) -> Config {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -78,6 +79,7 @@ fn test_config(status_list_enabled: bool) -> Config {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

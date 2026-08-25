@@ -3,6 +3,7 @@ mod model;
 mod validate;
 
 pub use model::*;
+pub use validate::validate_paso_transaction_data_type_metadata;
 
 use crate::crypto::jwe::DecryptionKey;
 use crate::error::ConfigError;

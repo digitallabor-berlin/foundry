@@ -369,6 +369,7 @@ mod tests {
                 encrypted_pre_authorized_code: Default::default(),
                 access_token_ttl_secs: 600,
                 offer_by_reference: false,
+                paso_metadata: Default::default(),
             },
             credential_types: vec![CredentialType {
                 id: "pid".to_string(),
@@ -393,6 +394,7 @@ mod tests {
                     },
                 ],
                 validity_seconds: None,
+                transaction_data_types: None,
             }],
             verifier: VerifierConfig {
                 signing_key: "verifier_signing".to_string(),
@@ -436,6 +438,7 @@ mod tests {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         });
         cfg
     }
@@ -902,6 +905,7 @@ mod tests {
                 },
             ],
             validity_seconds: None,
+            transaction_data_types: None,
         });
         cfg
     }

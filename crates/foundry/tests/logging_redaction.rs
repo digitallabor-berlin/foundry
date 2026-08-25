@@ -158,6 +158,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -174,6 +175,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "issuer_key".to_string(),
@@ -1432,6 +1434,7 @@ async fn setup_with_required_attestation() -> (
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1448,6 +1451,7 @@ async fn setup_with_required_attestation() -> (
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "issuer_key".to_string(),
@@ -1957,6 +1961,7 @@ async fn display_metadata_never_reaches_the_log() {
             },
         ],
         validity_seconds: None,
+        transaction_data_types: None,
     });
     let state = AppState::new(base.storage.clone(), Arc::new(cfg));
 

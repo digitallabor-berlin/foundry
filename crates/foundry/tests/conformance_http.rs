@@ -126,6 +126,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -142,6 +143,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -830,6 +832,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![],
         verifier: VerifierConfig {
@@ -981,6 +984,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -997,6 +1001,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -1470,6 +1475,7 @@ async fn setup_pop_test_app_with_modes(
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -1486,6 +1492,7 @@ async fn setup_pop_test_app_with_modes(
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),

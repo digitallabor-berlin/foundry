@@ -61,6 +61,7 @@ fn test_config(console_enabled: bool) -> Config {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: Vec::new(),
         verifier: VerifierConfig {

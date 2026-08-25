@@ -88,6 +88,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![
             CredentialType {
@@ -105,6 +106,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                     display: vec![],
                 }],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
             CredentialType {
                 id: "eu.europa.ec.av.1".to_string(),
@@ -132,6 +134,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                     },
                 ],
                 validity_seconds: Some(7_776_000),
+                transaction_data_types: None,
             },
         ],
         verifier: VerifierConfig {
@@ -1097,6 +1100,7 @@ async fn setup_test_app_with_dpc() -> (AppState, tempfile::TempDir) {
             },
         ],
         validity_seconds: None,
+        transaction_data_types: None,
     });
     (AppState::new(base.storage.clone(), Arc::new(cfg)), dir)
 }

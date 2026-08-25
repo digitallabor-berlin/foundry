@@ -100,6 +100,57 @@ impl Config {
                     )));
                 }
             }
+
+            // PaSO Proof Metadata §3 — validate every declared transaction data
+            // type at startup, so an operator's typo is a boot failure rather
+            // than a wallet-facing one.
+            if let Some(types) = &ct.transaction_data_types {
+                if types.is_empty() {
+                    return Err(ConfigError::Validation(format!(
+                        "credential_type '{}': 'transaction_data_types' must not be empty; omit \
+                         the key entirely for a non-PaSO credential type",
+                        ct.id
+                    )));
+                }
+                for (type_id, meta) in types {
+                    validate_paso_transaction_data_type_metadata(type_id, meta).map_err(|e| {
+                        ConfigError::Validation(format!("credential_type '{}': {e}", ct.id))
+                    })?;
+                }
+            }
+        }
+
+        // PaSO Proof Metadata §4 — the signed credential metadata JWT carries
+        // the Attestation Provider's certificate chain in its `x5c` JOSE
+        // header, and §7 step 6 binds that chain to the credential's own. A
+        // deployment with PaSO credential types but no chain on the credential
+        // signing key cannot mint a conformant JWT at all, so this is fatal at
+        // startup rather than a 500 at request time.
+        //
+        // foundry implements the `x5c` branch only; §4's `kid`/key-set
+        // alternative is a documented unimplemented optional path.
+        if self
+            .credential_types
+            .iter()
+            .any(|ct| ct.transaction_data_types.is_some())
+        {
+            match self.credential_signing_key() {
+                None => {
+                    return Err(ConfigError::Validation(
+                        "a PaSO credential type is configured (transaction_data_types) but no \
+                         credential signing key resolves; PaSO Proof Metadata §4 requires one"
+                            .to_string(),
+                    ));
+                }
+                Some((name, entry)) if entry.x5c.is_none() => {
+                    return Err(ConfigError::Validation(format!(
+                        "a PaSO credential type is configured (transaction_data_types) but the \
+                         credential signing key '{name}' has no 'x5c' certificate chain; PaSO \
+                         Proof Metadata §4 requires one in the metadata JWT header"
+                    )));
+                }
+                Some(_) => {}
+            }
         }
 
         // HAIP OpenID4VCI L209: the scope value MUST map to a *specific* Credential
@@ -277,6 +328,192 @@ impl Config {
 }
 
 /// An `enc` value may be advertised only if it can actually be honoured.
+/// PaSO Core §5.2 — `urn:paso:sca:<domain>:<suffix>:<version>`.
+///
+/// `<version>` "SHALL be a positive integer without leading zeros and SHALL be
+/// the final segment of the identifier".
+fn validate_paso_type_identifier(id: &str) -> Result<(), String> {
+    let Some(rest) = id.strip_prefix("urn:paso:sca:") else {
+        return Err(format!(
+            "transaction data type '{id}' must start with 'urn:paso:sca:' (PaSO Core §5.2)"
+        ));
+    };
+    let segments: Vec<&str> = rest.split(':').collect();
+    // <domain>, at least one <suffix> segment, <version>.
+    if segments.len() < 3 {
+        return Err(format!(
+            "transaction data type '{id}' must have the form \
+             urn:paso:sca:<domain>:<suffix>:<version> (PaSO Core §5.2)"
+        ));
+    }
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(format!(
+            "transaction data type '{id}' contains an empty segment (PaSO Core §5.2)"
+        ));
+    }
+    let version = segments[segments.len() - 1];
+    if !version.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "transaction data type '{id}': version segment '{version}' must be an integer \
+             (PaSO Core §5.2)"
+        ));
+    }
+    if version.starts_with('0') {
+        return Err(format!(
+            "transaction data type '{id}': version segment '{version}' must be a positive \
+             integer without leading zeros (PaSO Core §5.2)"
+        ));
+    }
+    Ok(())
+}
+
+/// PaSO Proof Metadata §3, §3.1, §3.2 — structural validation of one
+/// `transaction_data_types` entry.
+///
+/// Public because two channels publish this shape and both must be held to the
+/// same rules: `Config::validate()` at startup, and the admin ad-hoc mint
+/// endpoint, which accepts an inline metadata override. A channel that
+/// accepted shapes the other rejects would make validation advisory.
+pub fn validate_paso_transaction_data_type_metadata(
+    type_id: &str,
+    meta: &crate::config::TransactionDataTypeMetadata,
+) -> Result<(), String> {
+    validate_paso_type_identifier(type_id)?;
+
+    // §3: `claims` is REQUIRED, and §3.1 requires metadata "for each claim of
+    // the transaction data payload" — an empty array describes nothing.
+    if meta.claims.is_empty() {
+        return Err(format!(
+            "transaction data type '{type_id}': 'claims' must not be empty \
+             (PaSO Proof Metadata §3)"
+        ));
+    }
+
+    for (i, claim) in meta.claims.iter().enumerate() {
+        let Some(obj) = claim.as_object() else {
+            return Err(format!(
+                "transaction data type '{type_id}': claims[{i}] must be an object"
+            ));
+        };
+
+        // §3.1: `path` resolves against the transaction_data `payload` object;
+        // OpenID4VCI's claims description object makes it REQUIRED.
+        let Some(path) = obj.get("path").and_then(|v| v.as_array()) else {
+            return Err(format!(
+                "transaction data type '{type_id}': claims[{i}] requires a 'path' array \
+                 (PaSO Proof Metadata §3.1)"
+            ));
+        };
+        if path.is_empty() {
+            return Err(format!(
+                "transaction data type '{type_id}': claims[{i}] 'path' must not be empty"
+            ));
+        }
+        if !path.iter().all(|p| p.is_string()) {
+            return Err(format!(
+                "transaction data type '{type_id}': claims[{i}] 'path' must contain only strings"
+            ));
+        }
+
+        let display = obj.get("display").and_then(|v| v.as_array());
+
+        // §3.1: "The `value_type` parameter MUST NOT be used on claims without
+        // a `display` array."
+        if obj.contains_key("value_type") && display.is_none() {
+            return Err(format!(
+                "transaction data type '{type_id}': claims[{i}] sets 'value_type' but has no \
+                 'display' array (PaSO Proof Metadata §3.1)"
+            ));
+        }
+
+        if let Some(entries) = display {
+            if entries.is_empty() {
+                return Err(format!(
+                    "transaction data type '{type_id}': claims[{i}] 'display' must not be empty"
+                ));
+            }
+            let needs_locale = entries.len() > 1;
+            for (j, entry) in entries.iter().enumerate() {
+                let Some(eo) = entry.as_object() else {
+                    return Err(format!(
+                        "transaction data type '{type_id}': claims[{i}].display[{j}] must be an \
+                         object"
+                    ));
+                };
+                if !eo.get("name").map(|n| n.is_string()).unwrap_or(false) {
+                    return Err(format!(
+                        "transaction data type '{type_id}': claims[{i}].display[{j}] requires a \
+                         string 'name'"
+                    ));
+                }
+                // Two entries with no locale cannot be told apart by the
+                // Wallet's RFC 4647 Lookup (PaSO Core §7.2).
+                if needs_locale && !eo.contains_key("locale") {
+                    return Err(format!(
+                        "transaction data type '{type_id}': claims[{i}].display[{j}] requires a \
+                         'locale' when the claim has more than one display entry"
+                    ));
+                }
+            }
+        }
+    }
+
+    // §3.2: each value is an array of {locale?, value, value_type?}.
+    if let Some(ui) = &meta.ui_labels {
+        let Some(obj) = ui.as_object() else {
+            return Err(format!(
+                "transaction data type '{type_id}': 'ui_labels' must be an object \
+                 (PaSO Proof Metadata §3.2)"
+            ));
+        };
+        for (key, val) in obj {
+            let Some(arr) = val.as_array() else {
+                return Err(format!(
+                    "transaction data type '{type_id}': ui_labels['{key}'] must be an array \
+                     (PaSO Proof Metadata §3.2)"
+                ));
+            };
+            if arr.is_empty() {
+                return Err(format!(
+                    "transaction data type '{type_id}': ui_labels['{key}'] must not be empty"
+                ));
+            }
+            for (j, entry) in arr.iter().enumerate() {
+                let Some(eo) = entry.as_object() else {
+                    return Err(format!(
+                        "transaction data type '{type_id}': ui_labels['{key}'][{j}] must be an \
+                         object"
+                    ));
+                };
+                if !eo.get("value").map(|v| v.is_string()).unwrap_or(false) {
+                    return Err(format!(
+                        "transaction data type '{type_id}': ui_labels['{key}'][{j}] requires a \
+                         string 'value' (PaSO Proof Metadata §3.2)"
+                    ));
+                }
+                if let Some(l) = eo.get("locale")
+                    && !l.is_string()
+                {
+                    return Err(format!(
+                        "transaction data type '{type_id}': ui_labels['{key}'][{j}] 'locale' must \
+                         be a string"
+                    ));
+                }
+                if let Some(v) = eo.get("value_type")
+                    && !v.is_string()
+                {
+                    return Err(format!(
+                        "transaction data type '{type_id}': ui_labels['{key}'][{j}] 'value_type' \
+                         must be a string"
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn check_enc_values(block: &str, values: &[String]) -> Result<(), ConfigError> {
     if values.is_empty() {
         return Err(ConfigError::Validation(format!(
@@ -404,6 +641,7 @@ fn validate_trust_anchor_list(
 
 #[cfg(test)]
 mod tests {
+    use super::validate_paso_transaction_data_type_metadata;
     use crate::config::model::{
         AdminConfig, AttestationMode, ClaimDef, Config, CredentialType, DpopConfig, IssuerConfig,
         LoggingConfig, Mode, ServerConfig, StatusListConfig, StorageConfig, TrustAnchor,
@@ -461,6 +699,7 @@ mod tests {
                 encrypted_pre_authorized_code: Default::default(),
                 access_token_ttl_secs: 600,
                 offer_by_reference: false,
+                paso_metadata: Default::default(),
             },
             credential_types: Vec::new(),
             verifier: VerifierConfig {
@@ -561,6 +800,243 @@ mod tests {
         config_passing_keyref_check().validate().unwrap();
     }
 
+    // ---- PaSO Proof Metadata §3 / PaSO Core §5.2 -------------------------
+
+    fn tdt(value: serde_json::Value) -> crate::config::TransactionDataTypeMetadata {
+        serde_json::from_value(value).expect("transaction data type fixture must deserialize")
+    }
+
+    fn valid_tdt() -> crate::config::TransactionDataTypeMetadata {
+        tdt(serde_json::json!({
+            "claims": [
+                { "path": ["transaction_id"], "mandatory": true },
+                {
+                    "path": ["amount"],
+                    "mandatory": true,
+                    "value_type": "iso_currency_amount",
+                    "display": [
+                        { "locale": "en", "name": "Amount" },
+                        { "locale": "de", "name": "Betrag" }
+                    ]
+                }
+            ],
+            "ui_labels": {
+                "affirmative_action_label": [
+                    { "locale": "en", "value": "Confirm Payment" }
+                ]
+            }
+        }))
+    }
+
+    /// A config that passes `validate()` and carries exactly one credential
+    /// type, so a test can make that type a PaSO type. `config_passing_keyref_check`
+    /// has an empty `credential_types`, so mutating "the first" there is a no-op.
+    fn config_with_one_credential_type() -> Config {
+        let mut cfg = config_passing_keyref_check();
+        cfg.credential_types.push(CredentialType {
+            id: "BankPaymentCard".to_string(),
+            format: "dc+sd-jwt".to_string(),
+            vct: Some("https://bank.example/sca/card".to_string()),
+            doctype: None,
+            scope: None,
+            cryptographic_holder_binding: true,
+            display: Vec::new(),
+            claims: Vec::new(),
+            validity_seconds: None,
+            transaction_data_types: None,
+        });
+        cfg
+    }
+
+    #[test]
+    fn a_well_formed_transaction_data_type_validates() {
+        assert!(
+            validate_paso_transaction_data_type_metadata(
+                "urn:paso:sca:global:payment:1",
+                &valid_tdt()
+            )
+            .is_ok()
+        );
+    }
+
+    /// PaSO Core §5.2: the identifier must start with `urn:paso:sca:`.
+    #[test]
+    fn a_type_identifier_without_the_paso_prefix_is_rejected() {
+        let err =
+            validate_paso_transaction_data_type_metadata("urn:example:payment:1", &valid_tdt())
+                .expect_err("must reject");
+        assert!(err.contains("urn:paso:sca:"), "{err}");
+    }
+
+    /// PaSO Core §5.2: the version segment is a positive integer without
+    /// leading zeros, and is the final segment.
+    #[test]
+    fn the_version_segment_must_be_a_positive_integer_without_leading_zeros() {
+        let meta = valid_tdt();
+
+        for bad in [
+            "urn:paso:sca:global:payment:v1",
+            "urn:paso:sca:global:payment:01",
+            "urn:paso:sca:global:payment:0",
+            "urn:paso:sca:global:payment",
+            "urn:paso:sca:global::1",
+        ] {
+            assert!(
+                validate_paso_transaction_data_type_metadata(bad, &meta).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+
+        for good in [
+            "urn:paso:sca:global:payment:1",
+            "urn:paso:sca:com.example:pay:transaction:2",
+            "urn:paso:sca:global:payment:10",
+        ] {
+            assert!(
+                validate_paso_transaction_data_type_metadata(good, &meta).is_ok(),
+                "expected '{good}' to be accepted"
+            );
+        }
+    }
+
+    /// PaSO Proof Metadata §3.1: "The `value_type` parameter MUST NOT be used
+    /// on claims without a `display` array."
+    #[test]
+    fn value_type_without_display_is_rejected() {
+        let meta = tdt(serde_json::json!({
+            "claims": [{ "path": ["amount"], "value_type": "iso_currency_amount" }]
+        }));
+        let err =
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .expect_err("must reject");
+        assert!(err.contains("value_type"), "{err}");
+    }
+
+    /// PaSO Proof Metadata §3: `claims` is REQUIRED and describes every claim
+    /// of the payload — an empty array describes nothing.
+    #[test]
+    fn an_empty_claims_array_is_rejected() {
+        let meta = tdt(serde_json::json!({ "claims": [] }));
+        assert!(
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_claim_without_a_non_empty_string_path_is_rejected() {
+        for bad in [
+            serde_json::json!({ "claims": [{ "mandatory": true }] }),
+            serde_json::json!({ "claims": [{ "path": [] }] }),
+            serde_json::json!({ "claims": [{ "path": ["ok", 7] }] }),
+        ] {
+            let meta = tdt(bad);
+            assert!(
+                validate_paso_transaction_data_type_metadata(
+                    "urn:paso:sca:global:payment:1",
+                    &meta
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// Two display entries with no `locale` cannot be told apart by the
+    /// Wallet's RFC 4647 Lookup (PaSO Core §7.2).
+    #[test]
+    fn multiple_display_entries_without_locale_are_rejected() {
+        let meta = tdt(serde_json::json!({
+            "claims": [{
+                "path": ["amount"],
+                "display": [{ "name": "Amount" }, { "name": "Betrag" }]
+            }]
+        }));
+        assert!(
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .is_err()
+        );
+    }
+
+    /// A single display entry needs no locale — §3.2 lets an entry without one
+    /// serve as the default.
+    #[test]
+    fn a_single_display_entry_without_locale_is_accepted() {
+        let meta = tdt(serde_json::json!({
+            "claims": [{ "path": ["amount"], "display": [{ "name": "Amount" }] }]
+        }));
+        assert!(
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .is_ok()
+        );
+    }
+
+    /// PaSO Proof Metadata §3.2: each `ui_labels` entry carries a string `value`.
+    #[test]
+    fn ui_labels_entries_require_a_string_value() {
+        let meta = tdt(serde_json::json!({
+            "claims": [{ "path": ["a"] }],
+            "ui_labels": { "affirmative_action_label": [{ "locale": "en" }] }
+        }));
+        let err =
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .expect_err("must reject");
+        assert!(err.contains("value"), "{err}");
+    }
+
+    /// §3 permits additional parameters and obliges the Wallet to ignore
+    /// unrecognised ones, so foundry must accept and preserve them.
+    #[test]
+    fn unrecognised_members_are_preserved_not_rejected() {
+        let meta = tdt(serde_json::json!({
+            "claims": [{ "path": ["a"] }],
+            "risk_signal_profile": "urn:paso:risk:global:default:1"
+        }));
+        assert!(
+            validate_paso_transaction_data_type_metadata("urn:paso:sca:global:payment:1", &meta)
+                .is_ok()
+        );
+        assert!(meta.extra.contains_key("risk_signal_profile"));
+    }
+
+    /// PaSO Proof Metadata §4: the metadata JWT carries the issuer's chain in
+    /// its `x5c` header, so a PaSO deployment without one cannot mint a
+    /// conformant artifact. Fail at boot, not at request time.
+    #[test]
+    fn a_paso_credential_type_requires_an_x5c_on_the_credential_signing_key() {
+        let mut cfg = config_with_one_credential_type();
+        let mut map = BTreeMap::new();
+        map.insert("urn:paso:sca:global:payment:1".to_string(), valid_tdt());
+        cfg.credential_types[0].transaction_data_types = Some(map);
+        for entry in cfg.keys.values_mut() {
+            entry.x5c = None;
+        }
+
+        let err = cfg.validate().expect_err("must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("x5c"), "{msg}");
+        assert!(msg.contains("PaSO"), "{msg}");
+    }
+
+    /// A credential type with no `transaction_data_types` is not a PaSO type
+    /// and imposes no new requirement — existing deployments are unaffected.
+    #[test]
+    fn a_non_paso_config_does_not_require_an_x5c() {
+        let mut cfg = config_with_one_credential_type();
+        for entry in cfg.keys.values_mut() {
+            entry.x5c = None;
+        }
+        assert!(cfg.validate().is_ok());
+    }
+
+    /// An empty `transaction_data_types` map declares a PaSO type that
+    /// describes nothing. Omitting the key is how a non-PaSO type is spelled.
+    #[test]
+    fn an_empty_transaction_data_types_map_is_rejected() {
+        let mut cfg = config_with_one_credential_type();
+        cfg.credential_types[0].transaction_data_types = Some(BTreeMap::new());
+        assert!(cfg.validate().is_err());
+    }
+
     #[test]
     fn non_loopback_http_credential_issuer_is_rejected() {
         let mut cfg = config_passing_keyref_check();
@@ -637,6 +1113,7 @@ mod tests {
                 display: vec![],
                 claims: vec![],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
             CredentialType {
                 id: "other".to_string(),
@@ -649,6 +1126,7 @@ mod tests {
                 display: vec![],
                 claims: vec![],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
         ];
         let err = cfg.validate().unwrap_err();
@@ -681,6 +1159,7 @@ mod tests {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }];
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
@@ -719,6 +1198,7 @@ mod tests {
                 },
             ],
             validity_seconds: None,
+            transaction_data_types: None,
         }];
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("issuing_country"), "{err}");
@@ -738,6 +1218,7 @@ mod tests {
                 display: vec![],
                 claims: vec![],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
             CredentialType {
                 id: "mdl".to_string(),
@@ -749,6 +1230,7 @@ mod tests {
                 display: vec![],
                 claims: vec![],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
         ];
         cfg.validate().unwrap();
@@ -767,6 +1249,7 @@ mod tests {
             display: vec![],
             claims: vec![],
             validity_seconds: None,
+            transaction_data_types: None,
         }];
         let err = cfg.validate().unwrap_err();
         assert!(format!("{err}").contains("scope"), "{err}");
@@ -784,6 +1267,7 @@ mod tests {
             display: vec![],
             claims: vec![],
             validity_seconds: None,
+            transaction_data_types: None,
         };
         assert_eq!(ct.resolved_scope(), "pid");
         let with_scope = CredentialType {
@@ -1081,6 +1565,7 @@ mod tests {
             display: vec![],
             claims,
             validity_seconds,
+            transaction_data_types: None,
         }
     }
 

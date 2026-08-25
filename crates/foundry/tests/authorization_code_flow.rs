@@ -89,6 +89,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![
             CredentialType {
@@ -106,6 +107,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                     display: vec![],
                 }],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
             // A second Credential Type, distinct from "pid", so
             // authorize_rejects_a_scope_naming_a_different_credential_type has a
@@ -120,6 +122,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
                 display: vec![],
                 claims: vec![],
                 validity_seconds: None,
+                transaction_data_types: None,
             },
         ],
         verifier: VerifierConfig {

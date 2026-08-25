@@ -61,6 +61,7 @@ fn test_config() -> Config {
             encrypted_pre_authorized_code: Default::default(),
             access_token_ttl_secs: 600,
             offer_by_reference: false,
+            paso_metadata: Default::default(),
         },
         credential_types: vec![CredentialType {
             id: "pid".to_string(),
@@ -77,6 +78,7 @@ fn test_config() -> Config {
                 display: vec![],
             }],
             validity_seconds: None,
+            transaction_data_types: None,
         }],
         verifier: VerifierConfig {
             signing_key: "verifier_signing".to_string(),
@@ -143,6 +145,7 @@ async fn issuer_metadata_uses_each_formats_own_algorithm_registry() {
             display: vec![],
         }],
         validity_seconds: None,
+        transaction_data_types: None,
     });
 
     let dir = tempfile::tempdir().unwrap();
