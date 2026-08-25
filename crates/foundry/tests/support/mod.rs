@@ -349,6 +349,184 @@ pub async fn setup_with_android_keystore(anchor_cert_pem: &str) -> (AppState, te
     (state, dir)
 }
 
+/// The non-PaSO credential type `paso_test_env` leaves in place, so the
+/// "configured but not a PaSO type" 404 path is testable.
+pub const NON_PASO_TYPE_ID: &str = "pid";
+
+/// A booted environment for the PaSO credential metadata tests.
+///
+/// Holds the `TempDir` so the generated signing key and certificate chain
+/// outlive every request made through it.
+pub struct PasoTestEnv {
+    pub state: AppState,
+    _dir: tempfile::TempDir,
+}
+
+impl PasoTestEnv {
+    /// The `issuer.credential_issuer` value, which PaSO Proof Metadata §8 binds
+    /// the `credential_metadata_uri` claim to.
+    pub fn credential_issuer(&self) -> &str {
+        &self.state.config.issuer.credential_issuer
+    }
+
+    /// An unauthenticated wallet-facing GET, optionally carrying an `Accept`
+    /// header. `None` exercises §2's "absent Accept defaults to
+    /// application/json".
+    pub async fn wallet_get_with_accept(
+        &self,
+        path: &str,
+        accept: Option<&str>,
+    ) -> axum::http::Response<Body> {
+        let app = wallet_router(self.state.clone());
+        let mut builder = Request::builder().method("GET").uri(path);
+        if let Some(a) = accept {
+            builder = builder.header(header::ACCEPT, a);
+        }
+        let req = builder.body(Body::empty()).expect("build request");
+        app.oneshot(req).await.expect("wallet response")
+    }
+
+    /// An admin POST carrying the API key.
+    pub async fn admin_post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> axum::http::Response<Body> {
+        self.admin_post_inner(path, body, true).await
+    }
+
+    /// An admin POST with no `Authorization` header, to prove the route is
+    /// behind the API-key middleware.
+    pub async fn admin_post_without_key(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> axum::http::Response<Body> {
+        self.admin_post_inner(path, body, false).await
+    }
+
+    async fn admin_post_inner(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        with_key: bool,
+    ) -> axum::http::Response<Body> {
+        let app = admin_router(
+            self.state.clone(),
+            AdminApiKey(Some("test-admin-key".to_string())),
+        );
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if with_key {
+            builder = builder.header(header::AUTHORIZATION, "Bearer test-admin-key");
+        }
+        let req = builder
+            .body(Body::from(body.to_string()))
+            .expect("build request");
+        app.oneshot(req).await.expect("admin response")
+    }
+}
+
+/// As `setup_without_encryption`, plus a PaSO credential type
+/// (`BankPaymentCard`) and a credential signing key with a **real `x5c` chain
+/// on disk** — `Config::validate()` refuses to boot a PaSO deployment without
+/// one (PaSO Proof Metadata §4 puts the chain in the JWT header).
+///
+/// The `pid` type from `setup_without_encryption` is left in place as
+/// [`NON_PASO_TYPE_ID`], so a configured-but-not-PaSO id can be shown to 404
+/// exactly like an unknown one.
+pub async fn paso_test_env() -> PasoTestEnv {
+    let (state, dir) = setup_without_encryption().await;
+    let mut cfg = (*state.config).clone();
+
+    // A real chain, not a fixture: the leaf's public key must actually verify
+    // the JWTs this environment mints, which is what the §7 wallet-side
+    // verification test checks.
+    let ca = foundry_core::pki::new_ca("Foundry Test Issuer Root", 3650).expect("ca");
+    let leaf = foundry_core::pki::issue_leaf(
+        &ca.cert_pem,
+        &ca.key_pem,
+        "issuer.example.com",
+        &["issuer.example.com".to_string()],
+        365,
+    )
+    .expect("leaf");
+
+    let key_path = dir.path().join("paso-issuer.pem");
+    let chain_path = dir.path().join("paso-issuer-chain.pem");
+    std::fs::write(&key_path, leaf.key_pem.as_bytes()).expect("write key");
+    std::fs::write(&chain_path, leaf.cert_pem.as_bytes()).expect("write chain");
+
+    cfg.keys.insert(
+        "paso_issuer_key".to_string(),
+        foundry_core::config::KeyEntry {
+            private_key: key_path.to_str().expect("utf-8 path").to_string(),
+            x5c: Some(chain_path.to_str().expect("utf-8 path").to_string()),
+            alg: "ES256".to_string(),
+        },
+    );
+    // `credential_signing_key()` resolves `issuer.status_list.signing_key`
+    // first, so naming it here is what makes the x5c-bearing key sign the
+    // metadata JWTs.
+    cfg.issuer.status_list.signing_key = Some("paso_issuer_key".to_string());
+
+    // `setup_without_encryption` names `verifier.signing_key` without defining
+    // it -- harmless there because that fixture never calls `validate()`. This
+    // one does (deliberately: booting is the point), so the key must exist.
+    cfg.keys.insert(
+        cfg.verifier.signing_key.clone(),
+        foundry_core::config::KeyEntry {
+            private_key: key_path.to_str().expect("utf-8 path").to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        },
+    );
+
+    let transaction_data_types = serde_json::from_value(serde_json::json!({
+        "urn:paso:sca:global:payment:1": {
+            "claims": [
+                { "path": ["transaction_id"], "mandatory": true },
+                {
+                    "path": ["amount"],
+                    "mandatory": true,
+                    "value_type": "iso_currency_amount",
+                    "display": [
+                        { "locale": "en", "name": "Amount" },
+                        { "locale": "de", "name": "Betrag" }
+                    ]
+                }
+            ],
+            "ui_labels": {
+                "affirmative_action_label": [
+                    { "locale": "en", "value": "Confirm Payment" }
+                ]
+            }
+        }
+    }))
+    .expect("transaction_data_types fixture");
+
+    cfg.credential_types.push(CredentialType {
+        id: "BankPaymentCard".to_string(),
+        format: "dc+sd-jwt".to_string(),
+        vct: Some("https://bank.example/sca/card".to_string()),
+        doctype: None,
+        scope: None,
+        cryptographic_holder_binding: true,
+        display: vec![],
+        claims: vec![],
+        validity_seconds: None,
+        transaction_data_types: Some(transaction_data_types),
+    });
+
+    cfg.validate()
+        .expect("the PaSO test config must be one foundry would actually boot");
+
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg));
+    PasoTestEnv { state, _dir: dir }
+}
+
 /// As `setup_without_encryption`, plus a generated request-decryption key and
 /// both encryption blocks enabled with `encryption_required: false`.
 pub async fn setup_with_encryption() -> (AppState, tempfile::TempDir) {

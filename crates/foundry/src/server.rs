@@ -100,6 +100,14 @@ pub fn admin_router(state: AppState, api_key: AdminApiKey) -> Router {
             "/admin/verification/requests/:id/dc-api-response",
             post(post_admin_dc_api_response_handler),
         )
+        // PaSO Proof Metadata §5.1 leaves "the mechanism by which the Relying
+        // Party obtains [the ad-hoc JWT] from the Attestation Provider" out of
+        // scope. This is foundry's answer to that gap, and it is therefore an
+        // operator API on the admin listener, not a wallet-facing route.
+        .route(
+            "/admin/paso/ad-hoc-metadata",
+            post(create_adhoc_metadata_handler),
+        )
         .route_layer(middleware::from_fn_with_state(api_key, require_api_key))
         .with_state(state);
 
@@ -424,7 +432,16 @@ fn admin_error_response(
 ) -> (StatusCode, Json<serde_json::Value>) {
     use foundry_issuer::IssuanceError::*;
     let status = match e {
-        UnknownCredentialType(_) | ClaimValidation(_) => StatusCode::BAD_REQUEST,
+        // `InvalidRequest` is here, not in the 500 arm, because on the admin
+        // surface it is always malformed *operator input* — an unconfigured
+        // PaSO transaction data type with no override, or a structurally
+        // invalid override (PaSO Proof Metadata §3.1/§3.2). Answering operator
+        // input with a 500 would misclassify it per root AGENTS.md §4.3. No
+        // pre-existing admin path produces this variant, so nothing that used
+        // to be a 500 silently becomes a 400.
+        UnknownCredentialType(_) | ClaimValidation(_) | InvalidRequest(_) => {
+            StatusCode::BAD_REQUEST
+        }
         StatusListExhausted(_) => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -1374,6 +1391,99 @@ pub(crate) async fn post_admin_dc_api_response_handler(
     Json(body): Json<AdminDcApiResponseBody>,
 ) -> Result<Json<VerificationResult>, (StatusCode, Json<serde_json::Value>)> {
     submit_vp_response(&state, &id, &body.response, "admin").await
+}
+
+/// PaSO Proof Metadata §5 — request to mint an ad-hoc transaction data metadata
+/// JWT for a Relying Party to embed in a `transaction_data` entry (§5.1).
+#[derive(Debug, Clone, serde::Deserialize, utoipa::ToSchema)]
+pub(crate) struct AdHocMetadataRequest {
+    /// The Credential Configuration id the metadata applies to. Supplies the
+    /// JWT's `sub` and `format` (§5.2).
+    pub credential_type_id: String,
+    /// §5.2: SHALL equal the `type` of the enclosing `transaction_data` entry.
+    pub transaction_data_type: String,
+    /// OPTIONAL transaction-specific metadata replacing the configured entry
+    /// for this one artifact (§5.4). Absent uses the configured entry; present,
+    /// it is validated against exactly the config-time rules of §3.1/§3.2.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub metadata: Option<serde_json::Value>,
+    /// OPTIONAL override of `issuer.paso_metadata.adhoc_ttl_secs`.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+/// The minted ad-hoc metadata JWT and its expiry.
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AdHocMetadataResponse {
+    /// Compact `adhoc-transaction-metadata+jwt` (§5.2).
+    pub jwt: String,
+    /// The JWT's `exp`, echoed so an operator need not decode the artifact to
+    /// know how long a Relying Party may cache it (§5.2).
+    pub exp: i64,
+}
+
+/// Mint an ad-hoc transaction data metadata JWT (PaSO Proof Metadata §5.2).
+#[utoipa::path(
+    post,
+    path = "/admin/paso/ad-hoc-metadata",
+    request_body = AdHocMetadataRequest,
+    responses(
+        (status = 200, body = AdHocMetadataResponse),
+        (status = 400, description = "Unknown credential type, unconfigured transaction data type with no override, or a structurally invalid override")
+    )
+)]
+pub(crate) async fn create_adhoc_metadata_handler(
+    State(state): State<AppState>,
+    Json(req): Json<AdHocMetadataRequest>,
+) -> Result<Json<AdHocMetadataResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let Some(ct) = state
+        .config
+        .credential_types
+        .iter()
+        .find(|c| c.id == req.credential_type_id)
+    else {
+        // Typed error so the single log record is emitted by the mapper, per
+        // root AGENTS.md §4.5 -- not logged here.
+        return Err(admin_error_response(
+            &foundry_issuer::IssuanceError::UnknownCredentialType(req.credential_type_id.clone()),
+        ));
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // PaSO Proof Metadata §5. `override_supplied` records PRESENCE only: an
+    // override can carry transaction-specific label text (payee names, amount
+    // formats), so its contents are not log material -- the same rule
+    // `create_offer` applies to EMVCo display metadata (root AGENTS.md §4.5).
+    tracing::info!(
+        credential_type_id = %req.credential_type_id,
+        transaction_data_type = %req.transaction_data_type,
+        override_supplied = req.metadata.is_some(),
+        "minting PaSO ad-hoc transaction data metadata"
+    );
+
+    let jwt = foundry_issuer::build_adhoc_metadata_jwt(
+        &state.config,
+        ct,
+        &req.transaction_data_type,
+        req.metadata,
+        now,
+        req.ttl_secs,
+    )
+    .map_err(|e| admin_error_response(&e))?;
+
+    let ttl = req
+        .ttl_secs
+        .unwrap_or(state.config.issuer.paso_metadata.adhoc_ttl_secs) as i64;
+
+    Ok(Json(AdHocMetadataResponse {
+        jwt,
+        exp: now + ttl,
+    }))
 }
 
 /// Retrieve a Credential Offer Object sent by reference.

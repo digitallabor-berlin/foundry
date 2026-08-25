@@ -11,6 +11,7 @@ use utoipa::OpenApi;
         crate::server::create_verification_handler,
         crate::server::get_verification_handler,
         crate::server::post_admin_dc_api_response_handler,
+        crate::server::create_adhoc_metadata_handler,
     ),
     components(schemas(
         foundry_issuer::CreateOfferRequest,
@@ -30,6 +31,8 @@ use utoipa::OpenApi;
         foundry_verifier::PresentedCredential,
         foundry_verifier::CheckResult,
         crate::server::AdminDcApiResponseBody,
+        crate::server::AdHocMetadataRequest,
+        crate::server::AdHocMetadataResponse,
     ))
 )]
 pub struct AdminApiDoc;
