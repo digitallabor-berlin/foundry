@@ -172,24 +172,57 @@ New module `foundry_core::crypto::jws`:
 
 ```rust
 pub fn sign_compact(
-    header_extras: &serde_json::Map<String, serde_json::Value>, // typ, x5c, kid, ...
+    header: &serde_json::Map<String, serde_json::Value>, // complete: typ, alg?, x5c, kid, ...
     payload: &serde_json::Value,
     signer: &dyn Signer,
 ) -> Result<String, CryptoError>
 ```
 
-Owns: `alg` derived from `signer.algorithm()` (callers cannot set a
-mismatched `alg`), b64url encoding of header and payload, signing-input
-assembly, signature encoding. Callers own everything else via
-`header_extras`.
+### 3.1 `preserve_order` is ON — member order is load-bearing
+
+`Cargo.lock` lists `indexmap` as a `serde_json` dependency, and
+`serde_json`'s manifest declares `preserve_order = ["indexmap", "std"]`.
+Nothing in this workspace enables it directly; it arrives through feature
+unification (utoipa and the axum stack). Consequence: `serde_json::Map` is an
+`IndexMap`, so **JOSE header member order is insertion order**, and the three
+existing call sites do not agree:
+
+| Site | Current header insertion order |
+| --- | --- |
+| `foundry-sd-jwt-vc/src/builder.rs` | `alg`, `typ`, `x5c` |
+| `foundry-core/src/status_list/mod.rs` | `alg`, `typ`, `x5c` |
+| `foundry-verifier/src/request.rs` | `typ`, `alg`, `x5c` |
+
+A helper that inserted `alg` at a fixed position would therefore change the
+verifier's signed request object bytes. Semantically that is harmless (JOSE
+is JSON; PaSO's `request_integrity` is computed wallet-side over the bytes as
+received), but it would make "pure extraction" false.
+
+### 3.2 Contract
+
+The caller passes the **complete** header map, placing `alg` where it wants
+it. `sign_compact`:
+
+- if `alg` is present, **validates** it equals `signer.algorithm().as_str()`
+  and returns `CryptoError::UnsupportedAlgorithm` on mismatch;
+- if `alg` is absent, inserts it (at the front) so a new caller cannot forget
+  it;
+- b64url-encodes header and payload, assembles the signing input, signs, and
+  encodes the signature.
+
+This keeps every existing site byte-identical **and** strengthens the safety
+property: it now also catches a caller that hardcodes `"ES256"` while holding
+an ES384 signer — a real divergence class given
+`SignatureAlgorithm::cose_value`'s existing role as the single owner of the
+JOSE/COSE correspondence.
 
 The three existing hand-rolled compact-JWS sites migrate onto it:
 
-| Site | Header it passes |
+| Site | Header it passes (order preserved verbatim) |
 | --- | --- |
-| `foundry-sd-jwt-vc/src/builder.rs` (`build_sd_jwt_vc`) | `typ: dc+sd-jwt`, optional `x5c`; its private `b64url_json` is deleted |
-| `foundry-core/src/status_list/mod.rs` | its existing `typ`; its private `b64url_json` is deleted |
-| `foundry-verifier/src/request.rs` (`build_signed_request_object`) | `typ: oauth-authz-req+jwt`, `x5c`; payload and x5c resolution untouched |
+| `foundry-sd-jwt-vc/src/builder.rs` (`build_sd_jwt_vc`) | `alg`, `typ: dc+sd-jwt`, optional `x5c`; its private `b64url_json` is deleted |
+| `foundry-core/src/status_list/mod.rs` | `alg`, `typ: statuslist+jwt`, optional `x5c`; its private `b64url_json` is deleted |
+| `foundry-verifier/src/request.rs` (`build_signed_request_object`) | `typ: oauth-authz-req+jwt`, `alg`, `x5c`; payload and x5c resolution untouched |
 
 **Pure extraction**: each migration must produce byte-identical output for a
 fixed key and payload. Pinned by the existing tests plus one new equivalence
@@ -220,8 +253,11 @@ pub fn build_adhoc_metadata_jwt(
 - Payload: `{ iss, sub, format, iat, exp: iat + ttl_secs,
   credential_metadata_uri, credential_metadata }`.
 - `iss` = `issuer.credential_issuer`; `sub` = `vct` (SD-JWT VC) or `doctype`
-  (mdoc) per `format`; `credential_metadata_uri` = the exact URL the route
-  serves (load-bearing per §8's URI-binding check).
+  (mdoc) per `format`; `credential_metadata_uri` =
+  `{base}/credential-metadata/{id}` with `base =
+  cfg.issuer.credential_issuer.trim_end_matches('/')` — byte-identical to the
+  value advertised in issuer metadata, and load-bearing per §8's URI-binding
+  check.
 - `credential_metadata` = the same object `build_issuer_metadata` nests today
   (`display`, `claims`) **plus** `transaction_data_types` from config. One
   construction function is shared with the JSON-response path so the signed
@@ -281,8 +317,12 @@ non-PaSO id here is a client error, and 404 leaks nothing beyond what issuer
 metadata already publishes.
 
 `credential_metadata_uri` is advertised in `credential_configurations_supported`
-entries **for PaSO types only**, built from
-`server.wallet_facing.public_base_url` — and threaded into
+entries **for PaSO types only**, built as
+`{cfg.issuer.credential_issuer trimmed of trailing '/'}/credential-metadata/{id}`
+— the same base `build_issuer_metadata` already uses for `credential_endpoint`
+and `nonce_endpoint`. (Not `server.wallet_facing.public_base_url`: using a
+different base than every sibling endpoint would be a defect.) It is also
+threaded into
 `build_dc_api_offer`'s embedded metadata too (DC API wallets never fetch the
 well-known document; see the issuer AGENTS.md gotcha that shipped broken
 once for encryption JWKs).
@@ -320,9 +360,13 @@ root AGENTS.md §4.5's never-log list. Rules that apply:
 
 ## 7 Testing
 
-- **Unit, `foundry-core` (`crypto::jws`):** header assembly, `alg`
-  derivation, b64url correctness; byte-equivalence of each migrated call
-  site against its pre-extraction output for a fixed key.
+- **Unit, `foundry-core` (`crypto::jws`):** header assembly with caller order
+  preserved; `alg` inserted when absent; `alg` **mismatch rejected** when
+  present and wrong; b64url correctness; byte-equivalence of each migrated
+  call site against its pre-extraction output for a fixed key. Plus a guard
+  test asserting `serde_json::Map` preserves insertion order, so that a future
+  dependency change flipping `preserve_order` off fails loudly here rather
+  than silently reordering signed headers.
 - **Unit, `foundry-core` (config):** validation matrix — bad URN grammar
   (wrong prefix, non-integer version, leading zeros), `value_type` without
   `display`, empty `claims`, missing `x5c` on the signing key with a PaSO
@@ -404,7 +448,8 @@ implementation. Resolved rounds are kept for the record.
 | --- | --- | --- |
 | Config-driven metadata, admin override for ad-hoc only | All-admin/storage-driven; config-only | Config stays the single reviewable source of truth for the durable artifact; the ad-hoc channel's entire purpose (§5.4) is transaction-specific metadata, which config cannot express |
 | Stateless per-request signing | Pre-signed cache + rotation task | Foundry's established posture (`challenge.rs`); rotation-before-`exp` holds by construction; caching adds a real failure mode (serving a stale expired artifact) for a property nothing needs |
-| Shared `sign_compact` extraction | Fourth local hand-roll | This work adds JWS sites 4 and 5; three copies already exist with unprincipled divergence; `alg`-from-signer in one place kills a real bug class |
+| Shared `sign_compact` extraction | Fourth local hand-roll | This work adds JWS sites 4 and 5; three copies already exist with unprincipled divergence; one owner for `alg` consistency kills a real bug class |
+| Caller supplies the complete header; helper validates `alg` | Helper inserts `alg` at a fixed position | `preserve_order` is ON, so member order is insertion order and the three sites disagree (§3.1); a fixed position would change the verifier's request-object bytes. Validation is also a stronger check than insertion |
 | Credential signing key for metadata JWTs | Dedicated metadata key (§5.5 allows) | Identical leaf ⇒ §7 step 6 binding by construction; a second key is config surface with no current consumer |
 | All locales served always | `Accept-Language`-filtered variants | Satisfies §2's SHALL trivially; avoids per-locale signing variants and a negotiation matrix |
 | 404 for non-PaSO configuration ids | 200 with metadata sans `transaction_data_types` | The URI is only advertised for PaSO types; §3 makes `transaction_data_types` REQUIRED in metadata served from this URI, so a 200 without it would be non-conformant |
