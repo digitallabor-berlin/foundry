@@ -40,6 +40,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `metadata.rs` | Builds `CredentialIssuerMetadata` and `AuthorizationServerMetadata` from `Config`; `build_issuer_metadata` also takes the loaded request-decryption keys and populates `credential_request_encryption`/`credential_response_encryption` (both `Option`, omitted entirely when their config block is absent) |
 | `keystore_proof.rs` | Google Wallet `android_keystore_attestation` proof type: chain validation, `attestationChallenge` ↔ `c_nonce` binding, security-level policy, holder-key derivation |
 | `encrypted_pre_auth.rs` | Google Wallet's `encrypted_pre-authorized_code` extension (vendor profile, not a specification): opens the JWE-then-JWS envelope, validates its claims, and defends replay via `claim_envelope_jti` under KV namespace `encrypted_pre_auth_code_jti`. Entry point `resolve_encrypted_pre_authorized_code` — envelope in, plain code out |
+| `paso_metadata.rs` | PaSO Proof Metadata: `build_credential_metadata_document` (§2's bare object), `build_credential_metadata_jwt` (§4's `credential-metadata+jwt`), `build_adhoc_metadata_jwt` (§5.2's `adhoc-transaction-metadata+jwt`), `credential_metadata_uri` (§2), `is_paso_credential_type`. Both JWTs are minted **per request and never stored**, which satisfies §4's "rotate before `exp`" by construction. Signs via `foundry_core::crypto::jws::sign_compact` with the credential signing key, so the metadata chain **is** the credential chain (§7 step 6) |
 | `status_index.rs` | CSPRNG + check-and-set allocation of a status-list index |
 | `jose.rs` | **Crate-internal** (`pub(crate)`). `es256_verifier_from_inline_jwk` — the single way this crate builds a JWS verifier for a key that arrived *inline* with the message (a `jwk` header, a `cnf.jwk`). See Gotchas: josekit turns a `kid` on such a JWK into a demand for a `kid` on the JWS header |
 | `error.rs` | The `IssuanceError` enum (no HTTP mapping here — that lives in `crates/foundry`) |
@@ -55,6 +56,9 @@ Entry point → the endpoint that drives it (routes defined in
 | `load_offer_by_reference(storage, offer_id) -> Option<CredentialOffer>` | `GET /credential-offer/:id` | wallet-facing, **unauthenticated** (the id is the capability) |
 | `handle_token_request(storage, &TokenRequest, &AttestationMode, attestation_header, pop_header, &DpopConfig, &DpopPresentation, &NonceSecret, issuer_identifier, now_unix, &EncryptedCodePolicy, access_token_ttl_secs) -> TokenResponse` | `POST /token` | wallet-facing |
 | `issue_nonce(&NonceSecret, now) -> NonceResponse` | `POST /nonce` | wallet-facing, **unauthenticated** |
+| `build_credential_metadata_document(&CredentialType) -> Value` / `build_credential_metadata_jwt(&Config, &CredentialType, now_unix) -> String` | `GET /credential-metadata/:credential_configuration_id` | wallet-facing, **unauthenticated**; which one runs is decided by `Accept` (PaSO Proof Metadata §2) |
+| `build_adhoc_metadata_jwt(&Config, &CredentialType, transaction_data_type, override_metadata, now_unix, ttl_secs) -> String` | `POST /admin/paso/ad-hoc-metadata` | admin (API-key protected) |
+| `credential_metadata_uri(&Config, credential_type_id) -> String` | advertised in Issuer Metadata; **the single owner of that string** | — |
 | `issue_attestation_challenge(&NonceSecret, ttl_secs, now_unix) -> ChallengeResponse` | `POST /challenge` | wallet-facing, **unauthenticated**, registered only when `challenge_mode != Disabled` |
 | `handle_credential_request(&Config, storage, access_token, &CredentialRequest, &NonceSecret, &DpopPresentation, now_unix, request_was_encrypted: bool) -> CredentialResponse` | `POST /credential` | wallet-facing |
 | `build_issuer_metadata(&Config, request_decryption_keys: &[foundry_core::crypto::jwe::DecryptionKey]) -> CredentialIssuerMetadata` | `GET /.well-known/openid-credential-issuer` | wallet-facing |
@@ -153,6 +157,25 @@ cargo nextest run -p foundry --test wallet_issuance               # issuance flo
 
 ## Gotchas
 
+- **A PaSO ad-hoc metadata override may name a transaction data type this
+  issuer has not configured — that is deliberate, not a hole.** PaSO Proof
+  Metadata §5.4 makes a type covered by a valid ad-hoc JWT "considered supported
+  ... even if it is absent from the signed credential metadata", which is the
+  whole point of the ad-hoc channel (§1.1). The override is still held to
+  *exactly* the config-time structural rules via
+  `foundry_core::config::validate_paso_transaction_data_type_metadata`, identifier
+  grammar included; what is relaxed is membership, not validity. Without an
+  override, an unconfigured type is rejected — there is nothing to describe.
+- **`credential_metadata_uri` is derived from `issuer.credential_issuer`, not
+  `server.wallet_facing.public_base_url`.** PaSO Proof Metadata §8 binds the
+  claim to the URI the Wallet fetched from, and every sibling issuer endpoint
+  (`credential_endpoint`, `nonce_endpoint`) uses that base. Deriving it from the
+  other field would make §8's check fail wherever the two differ.
+- **The `kid`/key-set signing branch of §4/§5.2/§7 is deliberately
+  unimplemented.** foundry's issuer keys are `x5c`-published, so it takes the
+  `x5c` branch only, and `Config::validate()` refuses to boot a PaSO deployment
+  whose credential signing key has no chain — a request-time 500 traded for a
+  startup failure.
 - **`credential_signing_alg_values_supported` lives in TWO algorithm registries,
   and which one applies is decided by the Credential Format — never globally.**
   OpenID4VCI L1393: "Algorithm identifier types and values used are determined by

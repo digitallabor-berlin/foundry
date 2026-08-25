@@ -374,6 +374,38 @@ credential_types:
           - { locale: en-US, name: "Card Identifier" }
           - { locale: de-DE, name: "Karten-ID" }
           - { locale: fr-FR, name: "Identifiant de carte" }
+    # PaSO Proof Metadata 3 -- declaring `transaction_data_types` is what makes
+    # this a PaSO Credential type. Its presence alone turns on the
+    # `credential_metadata_uri` in Issuer Metadata and the wallet-facing
+    # `GET /credential-metadata/com.emvco.dpc.card`, which content-negotiates
+    # between plain JSON and a signed `credential-metadata+jwt` (2, 4).
+    # Remove this block and every byte of existing wire output is unchanged.
+    #
+    # The identifier grammar is PaSO Core 5.2:
+    # `urn:paso:sca:<domain>:<suffix>:<version>`, the version a positive integer
+    # without leading zeros and always the final segment. Config::validate()
+    # enforces it, so a typo here is a startup failure rather than a
+    # wallet-facing one.
+    transaction_data_types:
+      "urn:paso:sca:global:payment:1":
+        claims:
+          - path: [transaction_id]
+            mandatory: true
+          - path: [amount]
+            mandatory: true
+            value_type: iso_currency_amount
+            display:
+              - { locale: en, name: Amount }
+              - { locale: de, name: Betrag }
+          - path: [payee, name]
+            mandatory: true
+            display:
+              - { locale: en, name: Payee }
+              - { locale: de, name: Empfaenger }
+        ui_labels:
+          affirmative_action_label:
+            - { locale: en, value: Confirm Payment }
+            - { locale: de, value: Zahlung bestaetigen }
   # EUDI Proof of Age attestation, and the only mso_mdoc type this issuer mints.
   # Governed by docs/specs/eu-age-verification-annex-a-av-profile.md -- EU Age
   # Verification Solution Technical Specification, Annex A (normative).

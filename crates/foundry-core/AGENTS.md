@@ -28,10 +28,11 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
 | `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
 | `config/mdoc.rs` | What foundry knows about specific mdoc doctypes, keyed on the doctype string: `namespace_for_doctype` (ISO mDL is the exception — doctype `org.iso.18013.5.1.mDL`, namespace `org.iso.18013.5.1`; every EUDI attestation uses its doctype verbatim) and `validate_av_claims`, which enforces EU Age Verification Annex A §4.1.2's closed attribute set for `AV_DOCTYPE`. Also exports `AV_DOCTYPE` / `MDL_DOCTYPE`. Lives here because both `config/validate.rs` and `foundry-issuer` need it and core is the only crate below both |
-| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`) |
-| `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material) |
+| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`), and PaSO's `TransactionDataTypeMetadata` / `PasoMetadataConfig` plus `CredentialType::transaction_data_types` — whose **presence alone** makes a credential type a PaSO Credential type |
+| `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material). Also the `pub` `validate_paso_transaction_data_type_metadata` (PaSO Core §5.2's identifier grammar plus PaSO Proof Metadata §3/§3.1/§3.2's structure), exported because two channels publish that shape — startup validation and `foundry-issuer`'s ad-hoc mint override — and a channel accepting what the other rejects would make validation advisory. A PaSO deployment whose credential signing key has no `x5c` is rejected at startup (§4 puts the chain in the JWT header) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
 | `crypto/signer.rs` | `FileSigner` — PEM-file-backed `Signer` implementation |
+| `crypto/jws.rs` | `sign_compact(header, payload, signer)` — compact JWS construction; the single owner of JOSE header assembly, signing-input encoding, and of `alg`-versus-signing-key agreement. Replaced three hand-rolled copies (`foundry-sd-jwt-vc/builder.rs`, `status_list/mod.rs`, `foundry-verifier/request.rs`) and hosts the two PaSO metadata JWT builders. The caller supplies the **complete** header including `alg`'s position; `sign_compact` *validates* a supplied `alg` against the signer rather than inserting one, and inserts it first only when the caller omitted it — see Gotchas |
 | `crypto/jwe.rs` | `encrypt_compact(payload, recipient_public_jwk, alg, enc)` — ECDH-ES JWE compact serialization over `josekit`, the encrypt counterpart to `foundry-verifier`'s decrypt path. `encrypt_compact_with_kid(payload, recipient_public_jwk, alg, enc, kid)` is the `kid`-echoing sibling `foundry-issuer` uses for the Credential Response, kept separate so `encrypt_compact`'s OpenID4VP wire shape never gains an accidental `kid`. `DecryptionKey` (`from_pem`/`from_pem_file`, `kid()`, `published_jwk()`) and `decrypt_compact(jwe, keys, allowed_enc)` are the Credential Request decrypt path: pre-decryption checks require `alg == ECDH-ES`, `enc` in the caller's allow-list, and a `kid` matching a loaded key. Rejects any `alg` other than `ECDH-ES` rather than emitting a header that misdescribes the ciphertext |
 | `error.rs` | All error enums plus the `CoreError` umbrella and `CoreResult<T>` alias |
 | `obs.rs` | Observability support shared by both engines and the binary: the process-global sensitive-payload flag (`set_sensitive` / `sensitive_enabled`) and the redaction helpers `truncate` and `thumbprint` (RFC 7638). **Contains no log statements** |
@@ -115,6 +116,16 @@ cargo nextest run -p foundry-core                                 # narrow, whil
 ```
 
 ## Gotchas
+
+- **`serde_json` is built with `preserve_order`, so JOSE header member order is
+  insertion order** — and therefore observable in signed bytes. This is why
+  `crypto/jws.rs`'s `sign_compact` validates `alg` *where the caller placed it*
+  rather than inserting it: the three pre-existing call sites disagree on order
+  (`alg, typ, x5c` for `foundry-sd-jwt-vc` and the status list; `typ, alg, x5c`
+  for the verifier's Request Object), and imposing one would change bytes that
+  wallets already verify. A unit test in that module asserts the feature is on,
+  so a dependency change that silently disabled it fails loudly instead of
+  reordering signed headers.
 
 - **`CredentialType` and `ClaimDef` use the `Option` + resolver pattern.**
   `resolved_scope()`, `resolved_validity_seconds()` (default `31_536_000`) and
