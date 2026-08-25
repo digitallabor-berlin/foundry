@@ -111,6 +111,16 @@ pub struct CredentialConfigurationSupported {
     /// emits no key at all rather than `"credential_metadata": {}`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential_metadata: Option<CredentialMetadata>,
+    /// PaSO Proof Metadata §2 — the URL serving this configuration's credential
+    /// metadata, as plain JSON or as a signed `credential-metadata+jwt`.
+    ///
+    /// Emitted **only** for PaSO Credential configurations (those declaring
+    /// `transaction_data_types`). §2 scopes the requirement to them, and the
+    /// route 404s for anything else — advertising it more widely would publish
+    /// a link to a 404. `skip_serializing_if` rather than an emitted `null`, so
+    /// every non-PaSO deployment's wire output stays byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_metadata_uri: Option<String>,
 }
 
 /// OpenID4VCI L1400 — `credential_metadata`, the nested object carrying a
@@ -365,6 +375,16 @@ pub fn build_issuer_metadata(
                         display: ct.display.clone(),
                         claims,
                     })
+                },
+                // PaSO Proof Metadata §2. `paso_metadata::credential_metadata_uri`
+                // is the single owner of this string, so the value advertised
+                // here and the `credential_metadata_uri` claim inside the signed
+                // JWT are equal by construction — which is exactly what §8's
+                // URI-binding check requires of us.
+                credential_metadata_uri: if crate::paso_metadata::is_paso_credential_type(ct) {
+                    Some(crate::paso_metadata::credential_metadata_uri(cfg, &ct.id))
+                } else {
+                    None
                 },
             },
         );
@@ -1156,5 +1176,62 @@ pub(crate) mod tests {
             "expected no display member, got {:?}",
             claims[0].get("display")
         );
+    }
+
+    /// PaSO Proof Metadata §2: a PaSO Credential configuration SHALL carry a
+    /// `credential_metadata_uri`, built from the same base as every sibling
+    /// endpoint so §8's URI-binding check can succeed.
+    #[test]
+    fn a_paso_credential_configuration_advertises_its_metadata_uri() {
+        let mut cfg = test_config();
+        let types = serde_json::from_value(serde_json::json!({
+            "urn:paso:sca:global:payment:1": {
+                "claims": [{ "path": ["amount"], "display": [{ "name": "Amount" }] }]
+            }
+        }))
+        .expect("fixture");
+        if let Some(ct) = cfg.credential_types.first_mut() {
+            ct.transaction_data_types = Some(types);
+        }
+        let first_id = cfg
+            .credential_types
+            .first()
+            .map(|c| c.id.clone())
+            .expect("at least one credential type");
+
+        let md = build_issuer_metadata(&cfg, &[]);
+        let entry = md
+            .credential_configurations_supported
+            .get(&first_id)
+            .expect("configuration present");
+
+        assert_eq!(
+            entry.credential_metadata_uri,
+            Some(format!(
+                "https://issuer.example.com/credential-metadata/{first_id}"
+            ))
+        );
+    }
+
+    /// A non-PaSO configuration must not advertise the URI: the route 404s for
+    /// it, and §3 makes `transaction_data_types` REQUIRED in what it serves.
+    /// Asserted on the serialised keys, because a `null` would pass a weaker
+    /// `Option` check while still changing the wire output.
+    #[test]
+    fn a_non_paso_credential_configuration_omits_the_metadata_uri_key() {
+        let cfg = test_config();
+        let md = build_issuer_metadata(&cfg, &[]);
+        let json = serde_json::to_value(&md).expect("serialize");
+
+        let configs = json["credential_configurations_supported"]
+            .as_object()
+            .expect("configurations object");
+        assert!(!configs.is_empty(), "fixture must have configurations");
+        for (id, entry) in configs {
+            assert!(
+                entry.get("credential_metadata_uri").is_none(),
+                "non-PaSO configuration '{id}' must not emit credential_metadata_uri"
+            );
+        }
     }
 }
