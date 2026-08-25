@@ -15,6 +15,7 @@ pub mod metadata;
 pub mod nonce;
 pub mod offer;
 pub mod offer_ref;
+pub mod paso_metadata;
 pub mod proof;
 pub mod status_index;
 pub mod token;
@@ -50,6 +51,11 @@ pub use offer::{
     generate_offer_id, generate_pre_authorized_code, generate_tx_code,
 };
 pub use offer_ref::{load_offer_by_reference, save_offer_by_reference};
+pub use paso_metadata::{
+    ADHOC_METADATA_TYP, CREDENTIAL_METADATA_TYP, build_adhoc_metadata_jwt,
+    build_credential_metadata_document, build_credential_metadata_jwt, credential_metadata_uri,
+    is_paso_credential_type,
+};
 pub use proof::{ProofsRequest, VerifiedProof, verify_holder_proof};
 pub use status_index::allocate_status_index;
 pub use token::{EncryptedCodePolicy, TokenRequest, TokenResponse, handle_token_request};

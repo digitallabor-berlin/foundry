@@ -2,7 +2,7 @@
 //! Metadata, defined directly against the specification rather than derived
 //! from a generic protocol library's types.
 
-use foundry_core::config::{Config, Mode};
+use foundry_core::config::{Config, CredentialType, Mode};
 use foundry_core::crypto::SignatureAlgorithm;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -208,6 +208,49 @@ pub struct AuthorizationServerMetadata {
     pub challenge_endpoint: Option<String>,
 }
 
+/// OpenID4VCI L2321-L2338 — the claims description objects for one Credential
+/// Configuration.
+///
+/// Extracted so the PaSO `credential_metadata` document (PaSO Proof Metadata
+/// §3), served from a different endpoint, cannot describe the same credential
+/// type differently from Issuer Metadata.
+///
+/// A claims description object for Issuer Metadata defines exactly `path`,
+/// `mandatory` and `display`. Built as a map rather than with `json!` because
+/// `skip_serializing_if` does not apply inside the macro: the old code emitted
+/// `"display": []` for every claim without configured display, contradicting
+/// L2332's "a non-empty array of objects".
+///
+/// `selectively_disclosable` was never an OpenID4VCI parameter. It is a
+/// foundry config field name, and conveys nothing a wallet can use: for
+/// SD-JWT VC the wallet learns disclosability from the credential's own
+/// disclosures, and for mdoc every IssuerSignedItem is inherently
+/// selectively disclosable.
+pub(crate) fn claims_description_objects(ct: &CredentialType) -> Vec<serde_json::Value> {
+    ct.claims
+        .iter()
+        .map(|c| {
+            let mut claim = serde_json::Map::new();
+            // L2323: REQUIRED.
+            claim.insert("path".to_string(), serde_json::json!(c.path));
+            // L2326/L2327: `mandatory` means "the Credential Issuer will
+            // always include this claim in the issued Credential" -- which
+            // is exactly `ClaimDef::is_required()`, the same predicate
+            // `create_offer` uses to decide whether a value must be
+            // supplied when an offer is created. Emitted unconditionally:
+            // L2331 makes absence default to `false`, but the value is
+            // always determinate here, so publishing it states the
+            // issuer's intent instead of leaving it to a default.
+            claim.insert("mandatory".to_string(), serde_json::json!(c.is_required()));
+            // L2332: "A non-empty array of objects" -- omitted when empty.
+            if !c.display.is_empty() {
+                claim.insert("display".to_string(), serde_json::json!(c.display));
+            }
+            serde_json::Value::Object(claim)
+        })
+        .collect()
+}
+
 /// Build the Credential Issuer Metadata document, fully derived from
 /// `cfg.credential_types` and `cfg.issuer` — nothing hard-coded per credential type.
 ///
@@ -227,41 +270,7 @@ pub fn build_issuer_metadata(
         } else {
             Vec::new()
         };
-        // OpenID4VCI L2321-L2338 — a claims description object for Issuer
-        // Metadata defines exactly `path`, `mandatory` and `display`. Built as
-        // a map rather than with `json!` because `skip_serializing_if` does not
-        // apply inside the macro: the old code emitted `"display": []` for
-        // every claim without configured display, contradicting L2332's "a
-        // non-empty array of objects".
-        //
-        // `selectively_disclosable` was never an OpenID4VCI parameter. It is a
-        // foundry config field name, and conveys nothing a wallet can use: for
-        // SD-JWT VC the wallet learns disclosability from the credential's own
-        // disclosures, and for mdoc every IssuerSignedItem is inherently
-        // selectively disclosable.
-        let claims: Vec<serde_json::Value> = ct
-            .claims
-            .iter()
-            .map(|c| {
-                let mut claim = serde_json::Map::new();
-                // L2323: REQUIRED.
-                claim.insert("path".to_string(), serde_json::json!(c.path));
-                // L2326/L2327: `mandatory` means "the Credential Issuer will
-                // always include this claim in the issued Credential" -- which
-                // is exactly `ClaimDef::is_required()`, the same predicate
-                // `create_offer` uses to decide whether a value must be
-                // supplied when an offer is created. Emitted unconditionally:
-                // L2331 makes absence default to `false`, but the value is
-                // always determinate here, so publishing it states the
-                // issuer's intent instead of leaving it to a default.
-                claim.insert("mandatory".to_string(), serde_json::json!(c.is_required()));
-                // L2332: "A non-empty array of objects" -- omitted when empty.
-                if !c.display.is_empty() {
-                    claim.insert("display".to_string(), serde_json::json!(c.display));
-                }
-                serde_json::Value::Object(claim)
-            })
-            .collect();
+        let claims = claims_description_objects(ct);
         configs.insert(
             ct.id.clone(),
             CredentialConfigurationSupported {
@@ -424,7 +433,7 @@ pub fn build_authorization_server_metadata(cfg: &Config) -> AuthorizationServerM
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use foundry_core::config::{
         AdminConfig, AttestationMode, ClaimDef, CredentialType, DpopConfig, IssuerConfig, KeyEntry,
@@ -433,7 +442,7 @@ mod tests {
     };
     use std::collections::BTreeMap as StdBTreeMap;
 
-    fn test_config() -> Config {
+    pub(crate) fn test_config() -> Config {
         Config {
             server: ServerConfig {
                 wallet_facing: WalletFacingConfig {
