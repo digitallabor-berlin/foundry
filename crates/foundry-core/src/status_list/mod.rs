@@ -196,11 +196,6 @@ pub struct StatusListTokenClaims {
     pub ttl: Option<i64>,
 }
 
-fn b64url_json(value: &Value) -> Result<String, FormatError> {
-    let bytes = serde_json::to_vec(value).map_err(|e| FormatError::Serialization(e.to_string()))?;
-    Ok(B64URL.encode(bytes))
-}
-
 /// Build and sign a Status List Token (compact JWS, `typ: statuslist+jwt`)
 /// per draft-ietf-oauth-status-list-14 §5.1.
 pub fn build_status_list_token(
@@ -233,13 +228,10 @@ pub fn build_status_list_token(
     }
     payload.insert("status_list".into(), status_list.to_json());
 
-    let header_b64 = b64url_json(&Value::Object(header))?;
-    let payload_b64 = b64url_json(&Value::Object(payload))?;
-    let signing_input = format!("{header_b64}.{payload_b64}");
-    let signature = signer
-        .sign(signing_input.as_bytes())
-        .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
-    Ok(format!("{signing_input}.{}", B64URL.encode(signature)))
+    // Header order is `alg, typ, x5c`; see `crate::crypto::jws` for why the
+    // position of each member is load-bearing.
+    crate::crypto::jws::sign_compact(&header, &Value::Object(payload), signer)
+        .map_err(|e| FormatError::SignatureVerification(e.to_string()))
 }
 
 /// Sign a Status List Token (`statuslist+jwt`) for an already-loaded `status_list`,
@@ -774,6 +766,32 @@ mod tests {
         let payload: Value = serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
         assert_eq!(payload["sub"], "https://example.com/statuslists/1");
         assert_eq!(payload["status_list"]["bits"], 2);
+    }
+
+    /// Pins the exact JOSE header `build_status_list_token` emits. The
+    /// migration onto `crypto::jws::sign_compact` must not change these bytes:
+    /// `serde_json` preserves insertion order, so a reordered header is a
+    /// different signed message.
+    #[test]
+    fn status_list_token_header_is_alg_then_typ() {
+        use crate::crypto::{FileSigner, SignatureAlgorithm};
+        use crate::pki::generate_ec_key;
+
+        let km = generate_ec_key(SignatureAlgorithm::Es256).expect("generate key");
+        let signer = FileSigner::from_pem(km.private_pem.as_bytes(), SignatureAlgorithm::Es256)
+            .expect("build signer");
+        let list = StatusList::build(&[0, 1, 2, 0], 2, None).expect("build list");
+        let claims = StatusListTokenClaims {
+            sub: "https://issuer.example/statuslists/TestType".to_string(),
+            iat: 1_700_000_000,
+            exp: None,
+            ttl: None,
+        };
+
+        let jws = build_status_list_token(claims, &list, &signer, None).expect("build");
+        let part = jws.split('.').next().expect("header segment");
+        let raw = String::from_utf8(B64URL.decode(part).expect("b64url")).expect("utf8");
+        assert_eq!(raw, r#"{"alg":"ES256","typ":"statuslist+jwt"}"#);
     }
 
     fn test_pki() -> (Vec<u8>, Vec<u8>, Vec<u8>) {

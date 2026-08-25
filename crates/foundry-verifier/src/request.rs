@@ -5,7 +5,7 @@ use crate::transaction::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
 use foundry_core::config::Config;
-use foundry_core::crypto::{FileSigner, SignatureAlgorithm, Signer};
+use foundry_core::crypto::{FileSigner, SignatureAlgorithm};
 use foundry_core::storage::Storage;
 use foundry_core::url::dns_host_only;
 use josekit::jwk::KeyPair;
@@ -599,21 +599,10 @@ pub fn build_signed_request_object(
     if let Some(chain) = x5c {
         header_map.insert("x5c".to_string(), serde_json::json!(chain));
     }
-    let header_val = serde_json::Value::Object(header_map);
-
-    let header_bytes = serde_json::to_vec(&header_val)
-        .map_err(|e| VerificationError::Serialization(e.to_string()))?;
-    let payload_bytes = serde_json::to_vec(&payload_val)
-        .map_err(|e| VerificationError::Serialization(e.to_string()))?;
-
-    let header_b64 = B64URL.encode(&header_bytes);
-    let payload_b64 = B64URL.encode(&payload_bytes);
-    let signing_input = format!("{header_b64}.{payload_b64}");
-
-    let sig_bytes = signer.sign(signing_input.as_bytes())?;
-    let sig_b64 = B64URL.encode(&sig_bytes);
-
-    let jws = format!("{signing_input}.{sig_b64}");
+    // Header order is `typ, alg, x5c` -- deliberately NOT the `alg, typ, x5c`
+    // of the SD-JWT VC and status-list builders. `serde_json` preserves
+    // insertion order, so the difference is real in the signed bytes; keep it.
+    let jws = foundry_core::crypto::jws::sign_compact(&header_map, &payload_val, &signer)?;
 
     // Always-on and payload-free: records that a Request Object really was
     // served for this transaction, and under which algorithm. `tx_id` is
@@ -632,6 +621,9 @@ pub fn build_signed_request_object(
     // `verify.rs`: a wallet-side rejection cannot be reproduced offline
     // without the exact bytes that were sent.
     if foundry_core::obs::sensitive_enabled() {
+        // Built here rather than before signing: `sign_compact` borrows the
+        // header map, and this diagnostic is the map's only other reader.
+        let header_val = serde_json::Value::Object(header_map);
         tracing::trace!(
             request_object_jws = %jws,
             request_object_header = %header_val,
@@ -1096,6 +1088,46 @@ mod tests {
         assert_eq!(
             verified_payload.claim("state").and_then(|v| v.as_str()),
             Some(tx.id.as_str())
+        );
+    }
+
+    /// Pins the exact JOSE header `build_signed_request_object` emits. Note the
+    /// order is `typ, alg, x5c` -- NOT the `alg, typ, x5c` of the status-list
+    /// and SD-JWT VC builders. `serde_json` preserves insertion order, so the
+    /// difference is real in the signed bytes and the migration onto
+    /// `crypto::jws::sign_compact` must preserve it.
+    #[tokio::test]
+    async fn signed_request_object_header_is_typ_then_alg_then_x5c() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let config = sample_config(key_file.to_str().unwrap());
+        let storage = test_storage().await;
+
+        let req = CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "request_uri".to_string(),
+            transaction_data: None,
+        };
+        let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+            .await
+            .unwrap();
+        let tx = load_verification_transaction(&storage, &res.verification_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let jws = build_signed_request_object(&config, &tx).unwrap();
+        let part = jws.split('.').next().unwrap();
+        let raw = String::from_utf8(B64URL.decode(part).unwrap()).unwrap();
+        assert!(
+            raw.starts_with(r#"{"typ":"oauth-authz-req+jwt","alg":"ES256","x5c":["#),
+            "header order changed: {raw}"
         );
     }
 

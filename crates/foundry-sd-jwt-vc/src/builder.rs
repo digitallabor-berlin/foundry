@@ -80,9 +80,15 @@ pub fn build_sd_jwt_vc(
         payload.insert("_sd_alg".into(), Value::String("sha-256".into()));
     }
 
-    let alg = signer.algorithm().as_str();
+    // Header order is `alg, typ, x5c` and must stay that way: `serde_json` is
+    // built with `preserve_order`, so a reordered header is a different signed
+    // message. `crypto::jws::sign_compact` validates that `alg` matches the
+    // signing key rather than imposing a position.
     let mut header = Map::new();
-    header.insert("alg".into(), Value::String(alg.to_string()));
+    header.insert(
+        "alg".into(),
+        Value::String(signer.algorithm().as_str().to_string()),
+    );
     // TODO(interop): draft-17 SD-JWT VC media type.
     header.insert("typ".into(), Value::String("dc+sd-jwt".into()));
     if let Some(chain) = x5c {
@@ -92,15 +98,10 @@ pub fn build_sd_jwt_vc(
         );
     }
 
-    let header_b64 = b64url_json(&Value::Object(header))?;
-    let payload_b64 = b64url_json(&Value::Object(payload))?;
-    let signing_input = format!("{header_b64}.{payload_b64}");
-    let signature = signer
-        .sign(signing_input.as_bytes())
+    let jws = foundry_core::crypto::jws::sign_compact(&header, &Value::Object(payload), signer)
         .map_err(|e| FormatError::SignatureVerification(e.to_string()))?;
-    let signature_b64 = B64URL.encode(signature);
 
-    let mut output = format!("{signing_input}.{signature_b64}");
+    let mut output = jws;
     for d in disclosures {
         output.push('~');
         output.push_str(&d);
