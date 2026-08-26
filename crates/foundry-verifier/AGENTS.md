@@ -155,6 +155,29 @@ cargo nextest run -p foundry --test wallet_verification           # verification
   `passed: false`; only an IO/network failure returns
   `Err(VerificationError::StatusUnavailable)`. Do not "tighten" the missing-claim
   case without checking the callers.
+- **`transaction_data` scoping is decided BEFORE the format is.**
+  `applicable_transaction_data` filters the request's entries by whether their
+  `credential_ids` names the answered credential query, and only then does
+  `verify_one_credential` branch on KB-JWT (SD-JWT VC) versus DeviceSigned
+  (mdoc). OpenID4VP L320's `credential_ids` is a property of the *request*, not
+  of the format answering it. Do not move the filter back inside
+  `check_transaction_data_binding`: when it lived there, only the SD-JWT VC path
+  applied it, so every mdoc credential failed `transaction_data_binding`
+  whenever some *other* credential in the same request carried transaction data
+  (fixed 2026-08-26; pinned by
+  `transaction_data_scoped_to_another_credential_does_not_fail_an_mdoc`).
+- **mdoc `transaction_data` binding is unimplemented, deliberately.** An entry
+  actually scoped to an `mso_mdoc` credential query records `passed: false` with
+  detail `mdoc transaction_data binding is not implemented`. This is fail-closed
+  behaviour and a permitted unimplemented option under root AGENTS.md §4.4, not
+  a conformance gap: OpenID4VP L2751 places its only MUST on the Wallet, defers
+  the mdoc mechanism to the document type's own specification, and defines no
+  generic namespace — so implementing it means adopting a vendor convention
+  (CMWallet uses a `net.openid.open4vc` DeviceSigned namespace) and must be
+  documented as accommodation, not conformance. It is deliberately absent from
+  the gap register for that reason; see VP-0153's evidence row in
+  `docs/conformance/openid4vc-conformance.md`. Never make this branch pass
+  without verifying something.
 - **`check_dcql_match` never returns `Err`** — it always yields a `CheckResult`
   and is deliberately fail-closed (an unparseable `dcql_query` becomes
   `passed: false` with a reason). Do not convert it to a `Result`.

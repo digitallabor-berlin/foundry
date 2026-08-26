@@ -459,50 +459,67 @@ fn check_name_for(err: &VerificationError) -> &'static str {
     }
 }
 
-/// OpenID4VP 1.0 Response / VP Token Validation (L1523): Verifiers MUST check that
-/// the set of Presentations satisfies all requirements of the request. When the
-/// request carried `transaction_data`, the IETF SD-JWT VC profile binds it to the
-/// presentation through the KB-JWT's `transaction_data_hashes` claim (L3144).
+/// The name every Transaction Data verdict records under, per root AGENTS.md
+/// §4.2's closed per-credential check vocabulary. Shared by the scoping stage
+/// and the binding stage so the two cannot drift apart.
+const TD_BINDING_CHECK: &str = "transaction_data_binding";
+
+/// One requested `transaction_data` entry scoped to the credential query under
+/// consideration.
+struct ApplicableEntry {
+    /// Position in the request's `transaction_data` array, so a diagnostic names
+    /// an index the operator can line up against the request they sent.
+    index: usize,
+    /// The entry **as advertised** -- the base64url string itself. L3144 hashes
+    /// this with no decoding first, so the original string is what must survive.
+    encoded: String,
+    /// This entry's `transaction_data_hashes_alg`; empty when it advertised none.
+    advertised_algs: Vec<String>,
+}
+
+/// Select the requested `transaction_data` entries scoped to one credential query.
 ///
-/// Each hash is computed over the entry **as advertised** -- the base64url string
-/// itself, with no decoding first (L3144). The algorithm must be one the request
-/// advertised, defaulting to `sha-256` when it advertised none (L3142).
+/// OpenID4VP L320 makes `credential_ids` REQUIRED and non-empty on every entry:
+/// which credentials an entry addresses is a property of the **request**, not of
+/// the presentation format that answers it. So this selection has to happen
+/// before any format-specific branch.
 ///
-/// A missing or non-matching binding is a **policy** outcome, not a structural
-/// error: it records `passed: false`, which makes `verified` false by AGENTS.md
-/// §4.2, and the response stays HTTP 200 per §4.3. Never returns `Err`.
-fn check_transaction_data_binding(
+/// It used to live inside `check_transaction_data_binding`, which only the
+/// SD-JWT VC path calls. The mdoc path therefore never applied it and reported a
+/// failure for every mdoc credential in any request that carried transaction
+/// data for some *other* credential -- see
+/// `transaction_data_scoped_to_another_credential_does_not_fail_an_mdoc`.
+///
+/// `Err` carries the ready-made failing `CheckResult` for an entry that cannot
+/// be read at all. Only `encode_transaction_data` (request.rs) produces these,
+/// so a malformed entry is a foundry defect rather than wallet input, and
+/// failing loudly beats ignoring it.
+fn applicable_transaction_data(
     requested_entries: &[String],
     answered_query_id: &str,
-    kb_payload: &Value,
-) -> CheckResult {
-    const CHECK: &str = "transaction_data_binding";
-
-    // Step 1: keep only the entries scoped to the credential query this
-    // presentation answered. An entry produced by anything other than
-    // `encode_transaction_data` (request.rs) -- i.e. malformed -- should never
-    // reach this point, so failing loudly here rather than ignoring it is
-    // deliberate.
-    let mut applicable: Vec<(usize, String, Vec<String>)> = Vec::new();
-    for (i, encoded) in requested_entries.iter().enumerate() {
+) -> Result<Vec<ApplicableEntry>, CheckResult> {
+    let mut applicable: Vec<ApplicableEntry> = Vec::new();
+    for (index, encoded) in requested_entries.iter().enumerate() {
         let decoded = match B64URL.decode(encoded) {
             Ok(bytes) => bytes,
             Err(e) => {
-                return CheckResult {
-                    check: CHECK.to_string(),
+                return Err(CheckResult {
+                    check: TD_BINDING_CHECK.to_string(),
                     passed: false,
-                    detail: Some(format!("transaction_data[{i}] is not valid base64url: {e}")),
-                };
+                    detail: Some(format!(
+                        "transaction_data[{index}] is not valid base64url: {e}"
+                    )),
+                });
             }
         };
         let entry: Value = match serde_json::from_slice(&decoded) {
             Ok(v) => v,
             Err(e) => {
-                return CheckResult {
-                    check: CHECK.to_string(),
+                return Err(CheckResult {
+                    check: TD_BINDING_CHECK.to_string(),
                     passed: false,
-                    detail: Some(format!("transaction_data[{i}] is not valid JSON: {e}")),
-                };
+                    detail: Some(format!("transaction_data[{index}] is not valid JSON: {e}")),
+                });
             }
         };
         let credential_ids: Vec<&str> = entry
@@ -523,20 +540,55 @@ fn check_transaction_data_binding(
                     .collect()
             })
             .unwrap_or_default();
-        applicable.push((i, encoded.clone(), advertised_algs));
+        applicable.push(ApplicableEntry {
+            index,
+            encoded: encoded.clone(),
+            advertised_algs,
+        });
     }
+    Ok(applicable)
+}
 
-    if applicable.is_empty() {
-        return CheckResult {
-            check: CHECK.to_string(),
-            passed: true,
-            detail: Some(
-                "no transaction_data entries scoped to the answered credential query".to_string(),
-            ),
-        };
+/// The verdict when the request carried `transaction_data` but no entry is scoped
+/// to this credential query.
+///
+/// Format-independent by construction: an entry addressed elsewhere constrains
+/// nothing here, whether this credential is an SD-JWT VC or an mdoc. A record is
+/// still emitted rather than omitted, because the request *did* carry
+/// transaction data -- root AGENTS.md §4.2 admits the check on that condition,
+/// and an operator reading the verdict should see that it was considered.
+fn no_applicable_transaction_data() -> CheckResult {
+    CheckResult {
+        check: TD_BINDING_CHECK.to_string(),
+        passed: true,
+        detail: Some(
+            "no transaction_data entries scoped to the answered credential query".to_string(),
+        ),
     }
+}
 
-    // Step 2: the presentation must carry a non-empty transaction_data_hashes.
+/// OpenID4VP 1.0 Response / VP Token Validation (L1523): Verifiers MUST check that
+/// the set of Presentations satisfies all requirements of the request. When the
+/// request carried `transaction_data`, the IETF SD-JWT VC profile binds it to the
+/// presentation through the KB-JWT's `transaction_data_hashes` claim (L3144).
+///
+/// Each hash is computed over the entry **as advertised** -- the base64url string
+/// itself, with no decoding first (L3144). The algorithm must be one the request
+/// advertised, defaulting to `sha-256` when it advertised none (L3142).
+///
+/// Takes entries already narrowed to this credential query by
+/// `applicable_transaction_data`, and must be called only with a non-empty
+/// slice: "nothing applies here" is `no_applicable_transaction_data`'s verdict,
+/// decided before the format is known.
+///
+/// A missing or non-matching binding is a **policy** outcome, not a structural
+/// error: it records `passed: false`, which makes `verified` false by AGENTS.md
+/// §4.2, and the response stays HTTP 200 per §4.3. Never returns `Err`.
+fn check_transaction_data_binding(
+    applicable: &[ApplicableEntry],
+    kb_payload: &Value,
+) -> CheckResult {
+    // The presentation must carry a non-empty transaction_data_hashes.
     let claimed_hashes: Vec<&str> = match kb_payload
         .get("transaction_data_hashes")
         .and_then(|v| v.as_array())
@@ -544,14 +596,14 @@ fn check_transaction_data_binding(
         Some(arr) if !arr.is_empty() => arr.iter().filter_map(|v| v.as_str()).collect(),
         _ => {
             return CheckResult {
-                check: CHECK.to_string(),
+                check: TD_BINDING_CHECK.to_string(),
                 passed: false,
                 detail: Some("presentation carries no transaction_data_hashes".to_string()),
             };
         }
     };
 
-    // Step 3: resolve the algorithm (L3142 default: sha-256). Only sha-256 is
+    // Resolve the algorithm (L3142 default: sha-256). Only sha-256 is
     // implemented, regardless of what the request advertised or permitted.
     let claimed_alg = kb_payload
         .get("transaction_data_hashes_alg")
@@ -559,7 +611,7 @@ fn check_transaction_data_binding(
         .unwrap_or("sha-256");
     if claimed_alg != "sha-256" {
         return CheckResult {
-            check: CHECK.to_string(),
+            check: TD_BINDING_CHECK.to_string(),
             passed: false,
             detail: Some(format!(
                 "transaction_data_hashes_alg '{claimed_alg}' is not supported; only sha-256 is \
@@ -567,10 +619,13 @@ fn check_transaction_data_binding(
             )),
         };
     }
-    for (i, _, advertised_algs) in &applicable {
-        if !advertised_algs.is_empty() && !advertised_algs.iter().any(|a| a == claimed_alg) {
+    for entry in applicable {
+        if !entry.advertised_algs.is_empty()
+            && !entry.advertised_algs.iter().any(|a| a == claimed_alg)
+        {
+            let i = entry.index;
             return CheckResult {
-                check: CHECK.to_string(),
+                check: TD_BINDING_CHECK.to_string(),
                 passed: false,
                 detail: Some(format!(
                     "transaction_data[{i}] does not advertise the algorithm the presentation used"
@@ -579,20 +634,20 @@ fn check_transaction_data_binding(
         }
     }
 
-    // Step 4: every applicable entry must be hashed (as advertised, undecoded)
-    // into the claimed set.
+    // Every applicable entry must be hashed (as advertised, undecoded) into the
+    // claimed set.
     let mut first_mismatch: Option<usize> = None;
-    for (i, encoded, _) in &applicable {
-        let hash = B64URL.encode(Sha256::digest(encoded.as_bytes()));
+    for entry in applicable {
+        let hash = B64URL.encode(Sha256::digest(entry.encoded.as_bytes()));
         if !claimed_hashes.contains(&hash.as_str()) {
-            first_mismatch = Some(*i);
+            first_mismatch = Some(entry.index);
             break;
         }
     }
 
     match first_mismatch {
         None => CheckResult {
-            check: CHECK.to_string(),
+            check: TD_BINDING_CHECK.to_string(),
             passed: true,
             detail: Some(format!(
                 "{} applicable transaction_data entry(ies) bound",
@@ -600,7 +655,7 @@ fn check_transaction_data_binding(
             )),
         },
         Some(i) => CheckResult {
-            check: CHECK.to_string(),
+            check: TD_BINDING_CHECK.to_string(),
             passed: false,
             detail: Some(format!(
                 "transaction_data[{i}] hash is not present in transaction_data_hashes"
@@ -1012,26 +1067,42 @@ async fn verify_one_credential(
     let doc_type = stage.doc_type;
 
     // Transaction Data binding (OpenID4VP L1523/L3144), only when the Verifier
-    // requested transaction_data for this transaction. Already multi-credential
-    // aware: it filters entries by whether their `credential_ids` array contains
-    // this credential's query id, so an entry scoped elsewhere imposes nothing
-    // here.
+    // requested transaction_data for this transaction.
+    //
+    // Scoping comes FIRST, before the format is consulted: L320's
+    // `credential_ids` decides which credentials an entry addresses, and that is
+    // a property of the request, not of the format that answers it. Deciding it
+    // per-format is the defect this ordering exists to prevent -- the filter
+    // lived inside the SD-JWT-only branch, so an mdoc failed whenever *another*
+    // credential carried transaction data.
     if let Some(ref entries) = ctx.tx.transaction_data {
-        match &kb_jwt_payload {
-            Some(kb_payload) => {
-                checks.push(check_transaction_data_binding(
-                    entries, query_id, kb_payload,
-                ));
+        match applicable_transaction_data(entries, query_id) {
+            // An entry foundry itself cannot re-read. Reported identically for
+            // either format, since neither one is implicated.
+            Err(check) => checks.push(check),
+            // No entry addresses this credential query, whatever its format.
+            Ok(applicable) if applicable.is_empty() => {
+                checks.push(no_applicable_transaction_data());
             }
-            // mdoc: no KB-JWT exists to carry the binding. The Verifier asked
-            // for one it cannot confirm, so this must not report success.
-            None => {
-                checks.push(CheckResult {
-                    check: "transaction_data_binding".to_string(),
-                    passed: false,
-                    detail: Some("mdoc transaction_data binding is not implemented".to_string()),
-                });
-            }
+            Ok(applicable) => match &kb_jwt_payload {
+                Some(kb_payload) => {
+                    checks.push(check_transaction_data_binding(&applicable, kb_payload));
+                }
+                // mdoc, with an entry genuinely scoped to it: no KB-JWT exists
+                // to carry the binding, and the DeviceSigned mechanism OpenID4VP
+                // L2751 defers to the document-type specification is not
+                // implemented. The Verifier asked for a binding it cannot
+                // confirm, so this must not report success.
+                None => {
+                    checks.push(CheckResult {
+                        check: TD_BINDING_CHECK.to_string(),
+                        passed: false,
+                        detail: Some(
+                            "mdoc transaction_data binding is not implemented".to_string(),
+                        ),
+                    });
+                }
+            },
         }
     }
 
@@ -2142,6 +2213,180 @@ mod tests {
         assert!(
             !res.all_checks()
                 .any(|c| c.check == "transaction_data_binding")
+        );
+    }
+
+    /// The reported defect, pinned. `transaction_data` scoped to a *different*
+    /// credential query must impose nothing on an mdoc credential.
+    ///
+    /// Observed against CMWallet with a two-credential request -- an EMVCo DPC
+    /// card (`dc+sd-jwt`, carrying the PaSO payment `transaction_data`) plus an
+    /// EU Proof of Age attestation (`mso_mdoc`, carrying none). The wallet was
+    /// right: it filters entries by `credential_ids` and so signed an empty
+    /// `transaction_data_hashes` for the mdoc. The verifier was not: the mdoc
+    /// arm of the binding check keyed off whether the *transaction* carried any
+    /// `transaction_data` at all, never whether an entry was scoped to THIS
+    /// credential, so it reported the unimplemented-scoped-mdoc failure for a
+    /// credential no entry addressed. Any mdoc in any multi-credential request
+    /// failed as soon as some other credential had transaction data.
+    ///
+    /// The filter that `check_transaction_data_binding` (step 1) applies for
+    /// SD-JWT VC is format-independent -- OpenID4VP L320's `credential_ids`
+    /// scoping is a property of the request, not of the presentation format --
+    /// so it must be applied before the KB-JWT/DeviceSigned split, not after.
+    #[tokio::test]
+    async fn transaction_data_scoped_to_another_credential_does_not_fail_an_mdoc() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        tx.dcql_query = serde_json::json!({
+            "credentials": [
+                { "id": "dpc", "format": "dc+sd-jwt" },
+                {
+                    "id": "av",
+                    "format": "mso_mdoc",
+                    "meta": { "doctype_value": "org.iso.18013.5.1.mDL" },
+                    "claims": [{ "path": ["org.iso.18013.5.1", "given_name"] }]
+                }
+            ]
+        });
+
+        // Scoped to `dpc` ONLY -- `av` is addressed by no entry.
+        let td_entry = serde_json::json!({
+            "type": "payment",
+            "credential_ids": ["dpc"],
+            "amount": 5000
+        });
+        let td_encoded = B64URL.encode(serde_json::to_vec(&td_entry).unwrap());
+        tx.transaction_data = Some(vec![td_encoded.clone()]);
+        let hash = B64URL.encode(Sha256::digest(td_encoded.as_bytes()));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // The SD-JWT VC binds the entry, exactly as CMWallet did.
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let dpc = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            Some(TransactionDataBinding {
+                hashes: &[hash],
+                alg: None,
+            }),
+        )
+        .unwrap();
+
+        // The mdoc binds none, because none is scoped to it.
+        let d_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+        let d_jwk_pub = serde_json::to_value(d_kp.to_jwk_public_key()).unwrap();
+        let d_signer =
+            FileSigner::from_pem(&d_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+        let mut elements = std::collections::BTreeMap::new();
+        elements.insert("given_name".to_string(), serde_json::json!("John"));
+        let mut namespaces: BTreeMap<String, BTreeMap<String, serde_json::Value>> = BTreeMap::new();
+        namespaces.insert("org.iso.18013.5.1".to_string(), elements);
+        let mdoc_bytes = build_mdoc(
+            MdocClaims {
+                doc_type: "org.iso.18013.5.1.mDL".to_string(),
+                namespaces,
+                device_key_jwk: d_jwk_pub,
+                signed_at: (now - 100) as i64,
+                valid_until: (now + 3600) as i64,
+            },
+            &issuer_signer,
+            Some(vec![der_b64(&leaf_cert)]),
+        )
+        .unwrap();
+        let transcript = session_transcript_value(&SessionTranscriptParams::Redirect {
+            client_id: expected_client_id(&config),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+            response_uri: format!("https://localhost:8443/vp/response/{}", tx.id),
+        })
+        .unwrap();
+        let device_response = foundry_mdoc::builder::build_device_response(
+            &mdoc_bytes,
+            "org.iso.18013.5.1.mDL",
+            &d_signer,
+            &transcript,
+        )
+        .unwrap();
+
+        let jwe = encrypt_compact(
+            &serde_json::json!({"vp_token": {
+                "dpc": [dpc],
+                "av": [B64URL.encode(&device_response)],
+            }}),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+            .await
+            .unwrap();
+
+        let av = res
+            .credentials
+            .iter()
+            .find(|c| c.query_id == "av")
+            .expect("the mdoc credential must have a verdict");
+        assert!(
+            !av.checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && !c.passed),
+            "an entry scoped to another credential query must impose nothing on the mdoc: {:?}",
+            av.checks
+        );
+
+        // The DPC's own binding still has to be checked, not skipped -- the fix
+        // must narrow the mdoc arm, not disable the check.
+        let dpc_cred = res
+            .credentials
+            .iter()
+            .find(|c| c.query_id == "dpc")
+            .expect("the SD-JWT VC credential must have a verdict");
+        assert!(
+            dpc_cred
+                .checks
+                .iter()
+                .any(|c| c.check == "transaction_data_binding" && c.passed),
+            "the scoped credential's binding must still be verified: {:?}",
+            dpc_cred.checks
+        );
+
+        assert!(
+            res.verified,
+            "the whole response must verify: checks={:?} credentials={:?}",
+            res.checks, res.credentials
         );
     }
 
