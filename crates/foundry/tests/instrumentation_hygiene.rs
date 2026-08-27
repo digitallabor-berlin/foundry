@@ -121,7 +121,8 @@ fn the_documented_field_names_are_still_in_use() {
         assert!(
             all.contains(field),
             "documented log field `{field}` is no longer emitted anywhere; if it was \
-             renamed, update README.md and the spec too — operators grep these"
+             renamed, update `docs/manual/reference/log-fields.md` and the spec \
+             too — operators grep these"
         );
     }
 }

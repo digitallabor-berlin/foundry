@@ -8,7 +8,8 @@ name: Docker build & push
 # under `docker buildx build --platform linux/amd64` on Apple Silicon, because
 # that flag does not cross-compile — it runs the *entire* amd64 toolchain,
 # including rustc/LLVM, under QEMU CPU emulation, which crashes rustc on
-# M-series Macs (see README.md #Docker for the upstream issue links). Building
+# M-series Macs (see docs/manual/deployment/docker.md for the upstream issue
+# links). Building
 # natively on an amd64 runner avoids emulation altogether, so this workflow
 # intentionally does NOT use docker/setup-qemu-action — do not add it back in
 # without re-reading that section first.

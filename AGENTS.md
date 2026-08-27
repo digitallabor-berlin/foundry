@@ -10,7 +10,7 @@ Guidelines for AI agents working in the `foundry` repository.
 Issuer and OpenID4VP Verifier** service.
 
 For building, running, configuration, CLI usage, Docker, and endpoint examples,
-see **[`README.md`](README.md)** — this file does not restate it.
+see **[the manual](docs/index.md)** — this file does not restate it.
 
 ---
 
@@ -235,12 +235,12 @@ Logging is a request-path concern and is governed like one.
   `credential_type`, `format`, `check`, `passed`, `checks`, `checks_passed`,
   plus `credentials_requested` / `credentials_answered` / `credentials_failed`
   on the verdict record. Renaming one is a breaking change for whoever is
-  watching the logs; update `README.md` too.
+  watching the logs; update `docs/manual/reference/log-fields.md` too.
 
 Enforced by `crates/foundry/tests/instrumentation_hygiene.rs` (structural) and
 `crates/foundry/tests/logging_redaction.rs` (behavioural, with a positive
 control). Operator-facing documentation lives in the "Logging & Observability"
-section of [`README.md`](README.md).
+section of [`docs/manual/operating/logging.md`](docs/manual/operating/logging.md).
 
 ---
 

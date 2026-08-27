@@ -107,7 +107,7 @@ Other public surface:
   the nonce secret, or a holder proof JWT. Log the *shape* of the exchange
   (grant type, configuration id, format, outcome) and public keys only as RFC 7638
   thumbprints. Redaction tiers: see the "Logging & Observability" section of the
-  root [README.md](../../README.md); enforced by
+  [manual](../../docs/manual/operating/logging.md); enforced by
   `crates/foundry/tests/logging_redaction.rs`.
 - **No `.unwrap()` / `.expect()` / `panic!()` / `unreachable!()`** anywhere
   outside `#[cfg(test)]` — this crate is named explicitly in the rule; always

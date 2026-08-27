@@ -75,8 +75,8 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 - **Payload-bearing log fields require BOTH `obs::sensitive_enabled()` AND a
   `debug`/`trace` level.** A level alone is not authorisation — `RUST_LOG=debug`
   is ordinary in production. Never log an ephemeral or private JWK at all.
-  Redaction tiers: see the "Logging & Observability" section of the root
-  [README.md](../../README.md).
+  Redaction tiers: see the "Logging & Observability" page of the
+  [manual](../../docs/manual/operating/logging.md).
 - **A policy failure logs at `warn`, not `error`.** A DCQL mismatch or a revoked
   credential is a correct outcome that still returns HTTP 200 with
   `verified: false` (root [AGENTS.md](../../AGENTS.md) §4.3); reserve `error` for
