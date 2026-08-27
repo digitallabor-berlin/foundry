@@ -1,0 +1,60 @@
+name: Docs build & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: mkdocs build --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+          cache: pip
+
+      - name: Install docs dependencies
+        run: pip install -r requirements-docs.txt
+
+      # --strict turns every WARNING into a build failure. The validation
+      # block in mkdocs.yml deliberately raises anchors and unrecognized_links
+      # from their `info` defaults, so fragment references and bare directory
+      # links fail here rather than rotting silently.
+      - name: Build
+        run: mkdocs build --strict
+
+      # path: site is mandatory — this action defaults to `_site`, while
+      # mkdocs.yml sets `site_dir: site`. Omitting it deploys nothing.
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

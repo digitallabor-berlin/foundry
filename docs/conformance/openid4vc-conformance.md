@@ -14,14 +14,14 @@ will fail that test.
 
 ## Specifications Under Audit
 
-The authoritative texts are the pinned copies in [`docs/specs/`](../specs/), per
-[`AGENTS.md`](../../AGENTS.md) §4.4 — not any newer draft published elsewhere.
+The authoritative texts are the pinned copies in [`docs/specs/`](https://github.com/digitallabor-berlin/foundry/tree/main/docs/specs/), per
+[`AGENTS.md`](https://github.com/digitallabor-berlin/foundry/blob/main/AGENTS.md) §4.4 — not any newer draft published elsewhere.
 
 | Short name | File | Pinned version |
 | --- | --- | --- |
-| OpenID4VCI | [`openid-4-verifiable-credential-issuance-1_0.md`](../specs/openid-4-verifiable-credential-issuance-1_0.md) | `openid-4-verifiable-credential-issuance-1_0-17` |
-| OpenID4VP | [`openid-4-verifiable-presentations-1_0.md`](../specs/openid-4-verifiable-presentations-1_0.md) | `openid-4-verifiable-presentations-1_0-30` |
-| HAIP | [`openid4vc-high-assurance-interoperability-profile-1_0.md`](../specs/openid4vc-high-assurance-interoperability-profile-1_0.md) | `openid4vc-high-assurance-interoperability-profile-1_0-06` |
+| OpenID4VCI | [`openid-4-verifiable-credential-issuance-1_0.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/specs/openid-4-verifiable-credential-issuance-1_0.md) | `openid-4-verifiable-credential-issuance-1_0-17` |
+| OpenID4VP | [`openid-4-verifiable-presentations-1_0.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/specs/openid-4-verifiable-presentations-1_0.md) | `openid-4-verifiable-presentations-1_0-30` |
+| HAIP | [`openid4vc-high-assurance-interoperability-profile-1_0.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/specs/openid4vc-high-assurance-interoperability-profile-1_0.md) | `openid4vc-high-assurance-interoperability-profile-1_0-06` |
 
 Where HAIP is stricter than OpenID4VCI or OpenID4VP, **HAIP wins**.
 
@@ -59,7 +59,7 @@ pass:
 | Area | Reason |
 | --- | --- |
 | SD-JWT VC format internals (disclosure encoding, KB-JWT structure) | Defining spec (IETF SD-JWT VC) not vendored under §4.4 |
-| mdoc format internals (CBOR structure, MSO layout) | Defining spec (ISO/IEC 18013-5) not vendored and not vendorable — paid standard. Narrowed 2026-08-19: the specific interface facts foundry relies on are now recorded, with their provenance marked proven or derived, in [`docs/specs/iso-18013-5-device-auth.md`](../specs/iso-18013-5-device-auth.md) under root `AGENTS.md` §4.4's external-reference rule. That stub does not make these clauses auditable against the standard — it records what foundry was built against and how strongly each fact is evidenced. Narrowed again 2026-08-21: the **CBOR major type** of `IssuerSignedItem.random` and of each `valueDigests` `Digest` is now pinned as a byte string (`bstr`, major type 2) rather than left to serde's default `Vec<u8>` sequence encoding — see VCI-0176, whose `conforming` verdict this defect had survived underneath |
+| mdoc format internals (CBOR structure, MSO layout) | Defining spec (ISO/IEC 18013-5) not vendored and not vendorable — paid standard. Narrowed 2026-08-19: the specific interface facts foundry relies on are now recorded, with their provenance marked proven or derived, in [`docs/specs/iso-18013-5-device-auth.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/specs/iso-18013-5-device-auth.md) under root `AGENTS.md` §4.4's external-reference rule. That stub does not make these clauses auditable against the standard — it records what foundry was built against and how strongly each fact is evidenced. Narrowed again 2026-08-21: the **CBOR major type** of `IssuerSignedItem.random` and of each `valueDigests` `Digest` is now pinned as a byte string (`bstr`, major type 2) rather than left to serde's default `Vec<u8>` sequence encoding — see VCI-0176, whose `conforming` verdict this defect had survived underneath |
 | Token Status List bitstring encoding | Defining spec not vendored |
 | Wallet-side and third-party obligations | Recorded with `Applies to = wallet` / `other` and verdict `out-of-scope` |
 | W3C Verifiable Credential format profiles (`jwt_vc_json`, `ldp_vc`, `jwt_vc_json-ld`) | foundry issues only `dc+sd-jwt` and `mso_mdoc`; excluded 2026-07-31 by scope decision |
@@ -83,7 +83,7 @@ One such extension exists, added 2026-08-13:
 
 | Member | Structures | Justification and confinement |
 |---|---|---|
-| `display` | Credential Offer, Credential Response | Carries EMVCo DPC display metadata (`com.emvco.dpc.card.meta`) per EMV® DPC Schema Framework A.5's non-normative "Protocol Alignment" proposal. **OpenID4VCI 1.0 defines no `display` member on either structure.** The governing text is an *external reference*, not a standards-track specification, so this is accommodation and never conformance (root `AGENTS.md` §4.4; stub: [`docs/specs/emvco-dpc-schema-framework.md`](../specs/emvco-dpc-schema-framework.md)). Confined two ways: both members are `Option` with `skip_serializing_if`, so any credential type without display metadata serialises byte-identically to before the field existed; and `create_offer` rejects display metadata for any credential type whose `vct` is not `com.emvco.dpc.card`, so no PID or mDL offer can acquire it. Covered by `display_metadata_is_rejected_for_a_non_dpc_credential_type`, `an_offer_without_display_serialises_without_a_display_key`, and `display_metadata_flows_from_offer_creation_through_to_the_credential_response` — none `#[ignore]`d, because none records a gap. Design: [`2026-08-13-emvco-dpc-display-metadata-design.md`](../superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md). |
+| `display` | Credential Offer, Credential Response | Carries EMVCo DPC display metadata (`com.emvco.dpc.card.meta`) per EMV® DPC Schema Framework A.5's non-normative "Protocol Alignment" proposal. **OpenID4VCI 1.0 defines no `display` member on either structure.** The governing text is an *external reference*, not a standards-track specification, so this is accommodation and never conformance (root `AGENTS.md` §4.4; stub: [`docs/specs/emvco-dpc-schema-framework.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/specs/emvco-dpc-schema-framework.md)). Confined two ways: both members are `Option` with `skip_serializing_if`, so any credential type without display metadata serialises byte-identically to before the field existed; and `create_offer` rejects display metadata for any credential type whose `vct` is not `com.emvco.dpc.card`, so no PID or mDL offer can acquire it. Covered by `display_metadata_is_rejected_for_a_non_dpc_credential_type`, `an_offer_without_display_serialises_without_a_display_key`, and `display_metadata_flows_from_offer_creation_through_to_the_credential_response` — none `#[ignore]`d, because none records a gap. Design: [`2026-08-13-emvco-dpc-display-metadata-design.md`](https://github.com/digitallabor-berlin/foundry/blob/main/docs/superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md). |
 
 **Presentation-binding clauses are attributed to the `verifier`.** A few clauses
 constrain the *content* of a presentation without naming the actor — the Key

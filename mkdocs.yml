@@ -1,0 +1,48 @@
+site_name: Foundry
+site_description: EUDI Wallet OpenID4VCI Issuer and OpenID4VP Verifier
+site_url: https://digitallabor-berlin.github.io/foundry/
+repo_url: https://github.com/digitallabor-berlin/foundry
+repo_name: digitallabor-berlin/foundry
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+exclude_docs: |
+  /superpowers/
+  /specs/
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+  nav:
+    omitted_files: warn
+    not_found: warn
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.expand
+    - toc.follow
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Reference:
+      - Conformance Report: conformance/openid4vc-conformance.md
