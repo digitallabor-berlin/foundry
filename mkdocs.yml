@@ -75,4 +75,7 @@ nav:
       - Conformance Suite: manual/development/conformance-suite.md
       - End-to-End Suite: manual/development/end-to-end.md
   - Reference:
+      - Configuration: manual/reference/configuration.md
+      - Log Fields: manual/reference/log-fields.md
+      - Specifications: manual/reference/specs.md
       - Conformance Report: conformance/openid4vc-conformance.md

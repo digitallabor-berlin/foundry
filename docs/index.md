@@ -18,7 +18,6 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 
 ---
 
-<!-- Uncommented in Task 8 once all target pages exist.
 ## Where to go next
 
 - **[Getting Started](manual/getting-started/installation.md)** — prerequisites, building, and a running server.
@@ -28,4 +27,3 @@ Foundry is structured as a Rust cargo workspace comprising several modular crate
 - **[Verification (OpenID4VP)](manual/verification/dc-api-origins.md)** — DC API origins and request diagnostics.
 - **[Development](manual/development/testing.md)** — the test gate and conformance suite.
 - **[Reference](manual/reference/configuration.md)** — configuration keys, log fields, specifications.
--->
