@@ -96,7 +96,7 @@ docs/
   manual/
     getting-started/
       installation.md                       prereqs + building  <- 21-49
-      quickstart.md                         run + validate cfg  <- 173-194
+      quickstart.md                         run + validate cfg  <- 169-194
     deployment/
       docker.md                             build + run image   <- 50-111, 143-168
       ci.md                                 automated build     <- 112-142
