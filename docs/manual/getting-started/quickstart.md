@@ -12,7 +12,7 @@ cargo run -p foundry -- quickstart
 
 The generated config ships **two** credential types: `pid` (a Person ID) and
 `com.emvco.dpc.card` (an EMVCo Digital Payment Credential). See
-Credential Types & Claim Configuration.
+[Credential Types & Claim Configuration](../issuance/credential-types.md).
 
 *Note: The quickstart command is for development/testing only.*
 

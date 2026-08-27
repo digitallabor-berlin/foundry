@@ -58,5 +58,14 @@ nav:
       - Keys & Certificates: manual/operating/keys-and-certificates.md
       - Logging: manual/operating/logging.md
       - Following a Request: manual/operating/following-a-request.md
+  - Issuance (OpenID4VCI):
+      - Credential Types & Claims: manual/issuance/credential-types.md
+      - Wallet Attestation & ABCA: manual/issuance/wallet-attestation.md
+      - Android Keystore Attestation: manual/issuance/android-keystore-attestation.md
+      - DPoP: manual/issuance/dpop.md
+      - Request & Response Encryption: manual/issuance/credential-encryption.md
+      - Encrypted Pre-Authorized Code: manual/issuance/encrypted-pre-auth-code.md
+      - By-Reference Offers: manual/issuance/by-reference-offers.md
+      - PaSO Transaction Data: manual/issuance/paso-transaction-data.md
   - Reference:
       - Conformance Report: conformance/openid4vc-conformance.md
