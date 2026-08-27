@@ -50,5 +50,13 @@ nav:
   - Deployment:
       - Docker: manual/deployment/docker.md
       - CI Build & Push: manual/deployment/ci.md
+  - Operating:
+      - HTTP Server & Endpoints: manual/operating/http-server.md
+      - OpenAPI & Swagger UI: manual/operating/openapi.md
+      - Admin API: manual/operating/admin-api.md
+      - Admin Test Console: manual/operating/test-console.md
+      - Keys & Certificates: manual/operating/keys-and-certificates.md
+      - Logging: manual/operating/logging.md
+      - Following a Request: manual/operating/following-a-request.md
   - Reference:
       - Conformance Report: conformance/openid4vc-conformance.md
