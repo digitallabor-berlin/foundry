@@ -244,7 +244,8 @@
       <label for="transport">transport</label>
       <select id="transport">
         <option value="request_uri" selected>request_uri (deep link / QR)</option>
-        <option value="dc_api">dc_api (Digital Credentials API)</option>
+        <option value="dc_api">dc_api (Digital Credentials API, unsigned)</option>
+        <option value="dc_api_signed">dc_api_signed (Digital Credentials API, signed)</option>
       </select>
     </div>
     <details class="opt-disclosure">
@@ -2992,6 +2993,11 @@ var qrcode = function() {
   // already returns the full inline, unsigned dc_api_request object, so
   // prepareDcApiRequest is a synchronous wrap, not an async fetch.
   let lastDcApiRequest = null;
+  // The exchange protocol identifier the server paired with the payload it
+  // built (OpenID4VP 1.0 L2395-L2402). Deliberately not defaulted to a literal:
+  // announcing a signed request as unsigned fails inside the wallet with no
+  // server-side trace, so the only safe source is the create response.
+  let lastDcApiProtocol = null;
   let lastVerificationId = null;
 
   function hasDigitalCredentialSupport(protocol) {
@@ -3059,7 +3065,11 @@ var qrcode = function() {
     const errorEl = document.getElementById('verification-error');
 
     dcApiBtn.addEventListener('click', async function () {
-      if (!supportsDcApi('get', 'openid4vp-v1-unsigned')) {
+      if (!lastDcApiProtocol) {
+        showError(errorEl, new Error('No Digital Credentials API request is prepared.'));
+        return;
+      }
+      if (!supportsDcApi('get', lastDcApiProtocol)) {
         showError(errorEl, new Error('This browser does not support the Digital Credentials API.'));
         return;
       }
@@ -3164,6 +3174,7 @@ var qrcode = function() {
         qrEl.innerHTML = '';
         dcApiBtn.classList.add('hidden');
         lastDcApiRequest = null;
+        lastDcApiProtocol = null;
         lastVerificationId = null;
         if (uri) {
           uriEl.textContent = uri;
@@ -3174,7 +3185,11 @@ var qrcode = function() {
           verificationOpenEl.classList.add('hidden');
           if (body.dc_api_request) {
             uriEl.textContent = '(dc_api transport: click "Trigger via Digital Credentials API" below)';
-            lastDcApiRequest = prepareDcApiRequest(body.dc_api_request, 'openid4vp-v1-unsigned');
+            // The server pairs the protocol identifier with the payload shape
+            // it built (OpenID4VP 1.0 L2395-L2402); hardcoding one here would
+            // let a signed request be announced as unsigned.
+            lastDcApiProtocol = body.protocol;
+            lastDcApiRequest = prepareDcApiRequest(body.dc_api_request, lastDcApiProtocol);
             lastVerificationId = body.verification_id;
             dcApiBtn.classList.remove('hidden');
           } else {

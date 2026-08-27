@@ -255,6 +255,20 @@ async fn console_has_digital_credentials_api_trigger_for_dc_api_transport() {
         "console `transport` select should offer dc_api"
     );
     assert!(
+        html.contains(r#"<option value="dc_api_signed">"#),
+        "console `transport` select should offer dc_api_signed"
+    );
+    assert!(
+        !html.contains("'openid4vp-v1-unsigned'"),
+        "the console must read the protocol identifier from the response \
+         (body.protocol), not hardcode one -- a signed payload sent under the \
+         unsigned identifier fails in the wallet with no server-side trace"
+    );
+    assert!(
+        html.contains("body.protocol"),
+        "console should pass the server-supplied protocol to the DC API call"
+    );
+    assert!(
         html.contains(r#"id="verification-dc-api-btn""#),
         "console page should have a button to trigger the Digital Credentials API for dc_api transport"
     );

@@ -109,6 +109,22 @@ pub struct VerificationTransaction {
     pub created_at: i64,
 }
 
+impl VerificationTransaction {
+    /// Whether this transaction was invoked over the W3C Digital Credentials
+    /// API, in either its unsigned (`dc_api`) or signed (`dc_api_signed`) form.
+    ///
+    /// The distinction matters for how the *response* is bound: OpenID4VP 1.0
+    /// L2543 makes the audience the Origin prefixed with `origin:` and L2963
+    /// makes the mdoc binding `OpenID4VPDCAPIHandover` — for **both** forms,
+    /// "even for signed requests". Every site that decides binding rules must
+    /// ask this question rather than compare `transport` to a single literal,
+    /// because a missed form silently applies the redirect binding and turns a
+    /// conformant presentation into a policy failure.
+    pub fn is_dc_api(&self) -> bool {
+        self.transport == "dc_api" || self.transport == "dc_api_signed"
+    }
+}
+
 pub async fn save_verification_transaction(
     storage: &dyn Storage,
     tx: &VerificationTransaction,

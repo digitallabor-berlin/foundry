@@ -37,6 +37,21 @@ fn default_transport() -> String {
 /// parameter. It must be emitted on every transport.
 const RESPONSE_TYPE_VP_TOKEN: &str = "vp_token";
 
+/// W3C Digital Credentials API exchange protocol identifiers (OpenID4VP 1.0
+/// L2395-L2402). The grammar is `openid4vp-v<version>-<request-type>`, where
+/// `<version>` MUST be `1` for this version of the specification and
+/// `<request-type>` is `unsigned`, `signed` or `multisigned`.
+///
+/// `multisigned` (JWS JSON Serialization) is deliberately not implemented; HAIP
+/// L288 requires a Verifier to support at least one of the three.
+const DC_API_PROTOCOL_UNSIGNED: &str = "openid4vp-v1-unsigned";
+const DC_API_PROTOCOL_SIGNED: &str = "openid4vp-v1-signed";
+
+/// The `transport` value selecting a signed DC API request.
+const TRANSPORT_DC_API_SIGNED: &str = "dc_api_signed";
+/// The `transport` value selecting an unsigned DC API request.
+const TRANSPORT_DC_API: &str = "dc_api";
+
 /// Response-encryption parameters advertised to wallets, sourced from
 /// `verifier.response_encryption`. Defaults match OpenID4VP v1.0 §8.3.
 fn response_encryption_params(config: &Config) -> (String, String) {
@@ -108,6 +123,17 @@ pub struct CreateVerificationResponse {
     pub request_uri: Option<String>,
     pub openid4vp_uri: Option<String>,
     pub dc_api_request: Option<serde_json::Value>,
+    /// The W3C Digital Credentials API exchange protocol identifier the calling
+    /// page must pair with `dc_api_request` (OpenID4VP 1.0 L2395-L2402):
+    /// `openid4vp-v1-unsigned` or `openid4vp-v1-signed`.
+    ///
+    /// `None` for the `request_uri` transport, which performs no DC API
+    /// invocation and therefore has no protocol identifier to report. foundry
+    /// emits this rather than leaving the page to derive it because the
+    /// identifier and the `data` shape are two halves of one wire contract and
+    /// foundry decides the shape -- pairing a signed payload with the unsigned
+    /// identifier is a wallet-side failure with no server-side trace.
+    pub protocol: Option<String>,
 }
 
 /// Encode `transaction_data` entries for the wire.
@@ -352,9 +378,28 @@ pub async fn create_verification_request(
     };
 
     let response_mode = match transport_str.as_str() {
-        "dc_api" => "dc_api.jwt".to_string(),
+        TRANSPORT_DC_API | TRANSPORT_DC_API_SIGNED => "dc_api.jwt".to_string(),
         _ => "direct_post.jwt".to_string(),
     };
+
+    // OpenID4VP 1.0 L2442: `expected_origins` is REQUIRED and non-empty when
+    // signed requests are used with the DC API. There is no safe default --
+    // the verifier would be signing an assertion about which Origins are
+    // legitimate, and guessing that is worse than refusing. Checked before
+    // anything is persisted so a rejected request leaves no transaction behind.
+    // Note the verify side deliberately keeps its `public_base_url` fallback:
+    // that one keeps *inbound* verification working against pre-existing
+    // config, which is a different question from what to sign.
+    if transport_str == TRANSPORT_DC_API_SIGNED
+        && config.verifier.dc_api_expected_origins.is_empty()
+    {
+        return Err(VerificationError::InvalidRequest(
+            "transport 'dc_api_signed' requires verifier.dc_api_expected_origins to be a \
+             non-empty list of Origins (OpenID4VP 1.0 L2442); configure it or use \
+             transport 'dc_api' for an unsigned request"
+                .to_string(),
+        ));
+    }
 
     // Validate and encode before persisting: a bad entry must fail the request,
     // not reach a wallet that will abort the whole presentation over it.
@@ -401,7 +446,26 @@ pub async fn create_verification_request(
         .public_base_url
         .trim_end_matches('/');
 
-    if transport_str == "dc_api" {
+    if transport_str == TRANSPORT_DC_API_SIGNED {
+        let jws = build_signed_dc_api_request_object(
+            config,
+            &tx,
+            &config.verifier.dc_api_expected_origins,
+        )?;
+
+        // L2476: the JWS is the value of the `request` claim in the `data`
+        // element of the API call, and nothing else travels alongside it --
+        // every parameter is inside the signed object.
+        return Ok(CreateVerificationResponse {
+            verification_id: id,
+            request_uri: None,
+            openid4vp_uri: None,
+            dc_api_request: Some(serde_json::json!({ "request": jws })),
+            protocol: Some(DC_API_PROTOCOL_SIGNED.to_string()),
+        });
+    }
+
+    if transport_str == TRANSPORT_DC_API {
         let mut dc_api_obj = serde_json::json!({
             "response_type": RESPONSE_TYPE_VP_TOKEN,
             "response_mode": "dc_api.jwt",
@@ -447,6 +511,7 @@ pub async fn create_verification_request(
             request_uri: None,
             openid4vp_uri: None,
             dc_api_request: Some(dc_api_obj),
+            protocol: Some(DC_API_PROTOCOL_UNSIGNED.to_string()),
         })
     } else {
         let request_uri = format!("{base_url}/vp/request/{id}");
@@ -462,6 +527,7 @@ pub async fn create_verification_request(
             request_uri: Some(request_uri),
             openid4vp_uri: Some(openid4vp_uri),
             dc_api_request: None,
+            protocol: None,
         })
     }
 }
@@ -507,11 +573,21 @@ pub(crate) fn x509_hash_client_id(leaf_pem: &[u8]) -> Result<String, Verificatio
     ))
 }
 
-/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
-#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
-pub fn build_signed_request_object(
+/// Sign a Request Object payload as a JWS Compact Serialization.
+///
+/// Shared by every signed Request Object this verifier emits, whichever
+/// transport carries it. Owning the certificate handling in one place is the
+/// point: HAIP OpenID4VP L256 makes the Client Identifier the hash of the leaf
+/// certificate, and HAIP L190/L256 forbid the trust anchor in `x5c`. A second
+/// copy of this logic could drift from the audience the verify side expects,
+/// which would surface as every presentation failing as a policy verdict rather
+/// than as a visible error.
+///
+/// `client_id` is inserted **here**, not by the caller, so no payload builder
+/// can omit it or derive it differently. Callers must not insert it themselves.
+fn sign_request_object(
     config: &Config,
-    tx: &VerificationTransaction,
+    mut payload_map: serde_json::Map<String, serde_json::Value>,
 ) -> Result<String, VerificationError> {
     let key_entry = config
         .keys
@@ -532,7 +608,6 @@ pub fn build_signed_request_object(
         .public_base_url
         .trim_end_matches('/');
     let host = dns_host_only(base_url);
-    let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
     // HAIP OpenID4VP L256: for signed requests the Verifier MUST use the Client
     // Identifier Prefix `x509_hash`, narrowing OpenID4VP Section 5.9.3. The value
@@ -555,14 +630,71 @@ pub fn build_signed_request_object(
     }
 
     let client_id = x509_hash_client_id(&pem_bytes)?;
+    payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     let x5c = Some(foundry_core::trust::build_x5c(&[pem_bytes])?);
+
+    let payload_val = serde_json::Value::Object(payload_map);
+
+    let mut header_map = serde_json::Map::new();
+    header_map.insert("typ".to_string(), serde_json::json!("oauth-authz-req+jwt"));
+    header_map.insert("alg".to_string(), serde_json::json!(alg.as_str()));
+    if let Some(chain) = x5c {
+        header_map.insert("x5c".to_string(), serde_json::json!(chain));
+    }
+    // Header order is `typ, alg, x5c` -- deliberately NOT the `alg, typ, x5c`
+    // of the SD-JWT VC and status-list builders. `serde_json` preserves
+    // insertion order, so the difference is real in the signed bytes; keep it.
+    let jws = foundry_core::crypto::jws::sign_compact(&header_map, &payload_val, &signer)?;
+
+    // Always-on and payload-free: records that a Request Object really was
+    // served for this transaction, and under which algorithm. `tx_id` is
+    // already on the caller's span, so this threads into the rest of the flow.
+    tracing::debug!(
+        alg = %alg.as_str(),
+        jws_len = jws.len(),
+        "signed request object built"
+    );
+
+    // The Request Object the wallet actually receives, verbatim. Doubly gated
+    // per root AGENTS.md sect-4.5: it commits to `tx.nonce` and carries the
+    // ephemeral PUBLIC JWK in `client_metadata`, so a `debug`/`trace` level
+    // alone is not authorisation -- RUST_LOG=trace is not consent. Same tier,
+    // and the same justification, as the SessionTranscript diagnostic in
+    // `verify.rs`: a wallet-side rejection cannot be reproduced offline
+    // without the exact bytes that were sent.
+    if foundry_core::obs::sensitive_enabled() {
+        // Built here rather than before signing: `sign_compact` borrows the
+        // header map, and this diagnostic is the map's only other reader.
+        let header_val = serde_json::Value::Object(header_map);
+        tracing::trace!(
+            request_object_jws = %jws,
+            request_object_header = %header_val,
+            request_object_payload = %payload_val,
+            "SENSITIVE: signed request object served to wallet"
+        );
+    }
+
+    Ok(jws)
+}
+
+/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
+#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
+pub fn build_signed_request_object(
+    config: &Config,
+    tx: &VerificationTransaction,
+) -> Result<String, VerificationError> {
+    let base_url = config
+        .server
+        .wallet_facing
+        .public_base_url
+        .trim_end_matches('/');
+    let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
     let mut payload_map = serde_json::Map::new();
     payload_map.insert(
         "response_type".to_string(),
         serde_json::json!(RESPONSE_TYPE_VP_TOKEN),
     );
-    payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     payload_map.insert("response_uri".to_string(), serde_json::json!(response_uri));
     payload_map.insert(
         "response_mode".to_string(),
@@ -591,48 +723,71 @@ pub fn build_signed_request_object(
     if let Some(ref td) = tx.transaction_data {
         payload_map.insert("transaction_data".to_string(), serde_json::json!(td));
     }
-    let payload_val = serde_json::Value::Object(payload_map);
 
-    let mut header_map = serde_json::Map::new();
-    header_map.insert("typ".to_string(), serde_json::json!("oauth-authz-req+jwt"));
-    header_map.insert("alg".to_string(), serde_json::json!(alg.as_str()));
-    if let Some(chain) = x5c {
-        header_map.insert("x5c".to_string(), serde_json::json!(chain));
-    }
-    // Header order is `typ, alg, x5c` -- deliberately NOT the `alg, typ, x5c`
-    // of the SD-JWT VC and status-list builders. `serde_json` preserves
-    // insertion order, so the difference is real in the signed bytes; keep it.
-    let jws = foundry_core::crypto::jws::sign_compact(&header_map, &payload_val, &signer)?;
+    // `client_id` is inserted by `sign_request_object`, which derives it from
+    // the same leaf certificate it puts in `x5c`.
+    sign_request_object(config, payload_map)
+}
 
-    // Always-on and payload-free: records that a Request Object really was
-    // served for this transaction, and under which algorithm. `tx_id` is
-    // already on the span, so this threads into the rest of the flow.
-    tracing::debug!(
-        alg = %alg.as_str(),
-        jws_len = jws.len(),
-        "signed request object built"
+/// Build the signed Request Object for the `dc_api_signed` transport
+/// (OpenID4VP 1.0 §A.2.1, L2464-L2476).
+///
+/// The payload is the redirect form's minus the two parameters the DC API does
+/// not define — `response_uri` (not listed among the DC API request parameters
+/// at L2421; the response returns through the API, not to a URI) and `state`
+/// (L2448) — plus `expected_origins` (L2442). `client_id` is inserted by
+/// `sign_request_object`, which HAIP L256 requires here just as for the
+/// redirect transport.
+///
+/// `expected_origins` is taken as an argument rather than read from `config` so
+/// that the non-empty check (L2442) happens once, at the caller, before the
+/// transaction is persisted.
+///
+/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
+#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
+fn build_signed_dc_api_request_object(
+    config: &Config,
+    tx: &VerificationTransaction,
+    expected_origins: &[String],
+) -> Result<String, VerificationError> {
+    let mut payload_map = serde_json::Map::new();
+    payload_map.insert(
+        "response_type".to_string(),
+        serde_json::json!(RESPONSE_TYPE_VP_TOKEN),
     );
-
-    // The Request Object the wallet actually receives, verbatim. Doubly gated
-    // per root AGENTS.md sect-4.5: it commits to `tx.nonce` and carries the
-    // ephemeral PUBLIC JWK in `client_metadata`, so a `debug`/`trace` level
-    // alone is not authorisation -- RUST_LOG=trace is not consent. Same tier,
-    // and the same justification, as the SessionTranscript diagnostic in
-    // `verify.rs`: a wallet-side rejection cannot be reproduced offline
-    // without the exact bytes that were sent.
-    if foundry_core::obs::sensitive_enabled() {
-        // Built here rather than before signing: `sign_compact` borrows the
-        // header map, and this diagnostic is the map's only other reader.
-        let header_val = serde_json::Value::Object(header_map);
-        tracing::trace!(
-            request_object_jws = %jws,
-            request_object_header = %header_val,
-            request_object_payload = %payload_val,
-            "SENSITIVE: signed request object served to wallet"
-        );
+    // L2438: `dc_api.jwt` when the response is encrypted, which HAIP L286
+    // makes mandatory for this profile.
+    payload_map.insert("response_mode".to_string(), serde_json::json!("dc_api.jwt"));
+    // L536: Static Discovery -- the only branch this verifier takes.
+    payload_map.insert(
+        "aud".to_string(),
+        serde_json::json!("https://self-issued.me/v2"),
+    );
+    payload_map.insert("nonce".to_string(), serde_json::json!(tx.nonce));
+    payload_map.insert("dcql_query".to_string(), tx.dcql_query.clone());
+    // L2442: REQUIRED for signed DC API requests, non-empty. The Wallet
+    // compares these against the Origin to detect request replay.
+    payload_map.insert(
+        "expected_origins".to_string(),
+        serde_json::json!(expected_origins),
+    );
+    let (_, response_enc_method) = response_encryption_params(config);
+    payload_map.insert(
+        "client_metadata".to_string(),
+        serde_json::json!({
+            "jwks": { "keys": [tx.ephem_public_jwk.clone()] },
+            "encrypted_response_enc_values_supported": [response_enc_method],
+            "vp_formats_supported": vp_formats_supported()
+        }),
+    );
+    // L2421 lists `transaction_data` among the supported DC API parameters.
+    // The already-encoded entries are emitted so a wallet hashes the same
+    // bytes into `transaction_data_hashes` on every transport.
+    if let Some(ref td) = tx.transaction_data {
+        payload_map.insert("transaction_data".to_string(), serde_json::json!(td));
     }
 
-    Ok(jws)
+    sign_request_object(config, payload_map)
 }
 
 #[cfg(test)]
@@ -2073,5 +2228,240 @@ mod tests {
         }))
         .await
         .expect("the payment/age/loyalty query must be accepted");
+    }
+
+    /// A real signing key plus a configured Origin: the minimum a signed DC API
+    /// request needs. Returns the config and the tempdir guard, which must stay
+    /// alive for the key file to exist.
+    fn signed_dc_api_config() -> (Config, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let key_file = dir.path().join("verifier_key.pem");
+        let km = generate_ec_key(SignatureAlgorithm::Es256).unwrap();
+        std::fs::write(&key_file, km.private_pem.as_bytes()).unwrap();
+
+        let mut config = sample_config(key_file.to_str().unwrap());
+        config.verifier.dc_api_expected_origins =
+            vec!["https://verifier-website.example".to_string()];
+        (config, dir)
+    }
+
+    fn signed_dc_api_request() -> CreateVerificationRequest {
+        CreateVerificationRequest {
+            dcql_query: Some(serde_json::json!({
+                "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+            })),
+            named_query_ref: None,
+            transport: "dc_api_signed".to_string(),
+            transaction_data: None,
+        }
+    }
+
+    /// Decode a compact JWS payload without verifying it -- the tests below
+    /// assert on payload members, and the signature is covered separately by
+    /// `test_build_signed_request_object_and_verify_jws`.
+    fn decode_jws_payload(jws: &str) -> serde_json::Value {
+        let payload_b64 = jws.split('.').nth(1).expect("compact JWS has three parts");
+        let bytes = B64URL.decode(payload_b64).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// OpenID4VP L2476: the signed request travels as the `request` member of
+    /// the DC API `data` element, and nothing else.
+    #[tokio::test]
+    async fn dc_api_signed_returns_a_compact_jws_under_the_request_key() {
+        let storage = test_storage().await;
+        let (config, _dir) = signed_dc_api_config();
+
+        let res =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .unwrap();
+
+        assert!(res.request_uri.is_none(), "DC API has no request_uri");
+        assert!(res.openid4vp_uri.is_none(), "DC API has no deep link");
+
+        let dc_req = res.dc_api_request.expect("dc_api_request must be present");
+        let obj = dc_req.as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            1,
+            "the signed DC API data element carries only `request`: {dc_req}"
+        );
+        let jws = obj["request"].as_str().expect("`request` must be a string");
+        assert_eq!(
+            jws.split('.').count(),
+            3,
+            "`request` must be a JWS Compact Serialization: {jws}"
+        );
+    }
+
+    /// OpenID4VP L2437: `client_id` MUST be present in signed DC API requests.
+    /// L2442: `expected_origins` is REQUIRED and non-empty.
+    #[tokio::test]
+    async fn dc_api_signed_request_object_carries_client_id_and_expected_origins() {
+        let storage = test_storage().await;
+        let (config, _dir) = signed_dc_api_config();
+
+        let res =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .unwrap();
+        let jws = res.dc_api_request.unwrap()["request"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let payload = decode_jws_payload(&jws);
+
+        let leaf_pem = verifier_x5c_leaf_pem(&config).unwrap();
+        let expected_client_id = x509_hash_client_id(&leaf_pem).unwrap();
+        assert_eq!(
+            payload["client_id"],
+            serde_json::json!(expected_client_id),
+            "L2437 / HAIP L256: client_id must be the x509_hash of the leaf: {payload}"
+        );
+        assert_eq!(
+            payload["expected_origins"],
+            serde_json::json!(["https://verifier-website.example"]),
+            "L2442: expected_origins must carry the configured Origins: {payload}"
+        );
+    }
+
+    /// L2421 lists the DC API request parameters; `response_uri` is not among
+    /// them, and L2448 notes `state` is not defined for the DC API. Both are
+    /// present in the redirect payload, so both are easy to copy in by mistake.
+    #[tokio::test]
+    async fn dc_api_signed_request_object_omits_response_uri_and_state() {
+        let storage = test_storage().await;
+        let (config, _dir) = signed_dc_api_config();
+
+        let res =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .unwrap();
+        let jws = res.dc_api_request.unwrap()["request"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let payload = decode_jws_payload(&jws);
+        let obj = payload.as_object().unwrap();
+
+        assert!(
+            obj.get("response_uri").is_none(),
+            "L2421: response_uri is not a DC API parameter: {payload}"
+        );
+        assert!(
+            obj.get("state").is_none(),
+            "L2448: state is not defined for the DC API: {payload}"
+        );
+    }
+
+    /// L2438 + HAIP L286 (`dc_api.jwt`), and L536 (`aud` under Static Discovery).
+    #[tokio::test]
+    async fn dc_api_signed_request_object_uses_dc_api_jwt_response_mode_and_static_discovery_aud() {
+        let storage = test_storage().await;
+        let (config, _dir) = signed_dc_api_config();
+
+        let res =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .unwrap();
+        let jws = res.dc_api_request.unwrap()["request"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let payload = decode_jws_payload(&jws);
+
+        assert_eq!(payload["response_mode"], "dc_api.jwt");
+        assert_eq!(payload["response_type"], "vp_token");
+        assert_eq!(payload["aud"], "https://self-issued.me/v2");
+        assert!(payload["nonce"].is_string());
+        assert!(payload["client_metadata"]["jwks"]["keys"].is_array());
+    }
+
+    /// L2442 makes `expected_origins` REQUIRED for this transport, and there is
+    /// no safe default -- guessing which Origins are legitimate is worse than
+    /// refusing. The failure must also precede the write, so a rejected request
+    /// leaves no transaction behind.
+    #[tokio::test]
+    async fn dc_api_signed_without_expected_origins_is_rejected_before_persisting() {
+        let storage = test_storage().await;
+        let (mut config, _dir) = signed_dc_api_config();
+        config.verifier.dc_api_expected_origins = Vec::new();
+
+        let err =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .expect_err("an unconfigured dc_api_expected_origins must be rejected");
+
+        match err {
+            VerificationError::InvalidRequest(msg) => {
+                assert!(
+                    msg.contains("dc_api_expected_origins"),
+                    "the error must name the config key an operator has to set: {msg}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// VP-0196 / VP-0197: foundry emits the DC API exchange protocol identifier
+    /// so the calling page cannot pair the wrong one with the payload shape.
+    #[tokio::test]
+    async fn protocol_identifier_matches_the_transport() {
+        let cases = [
+            ("request_uri", None),
+            ("dc_api", Some("openid4vp-v1-unsigned")),
+            ("dc_api_signed", Some("openid4vp-v1-signed")),
+        ];
+
+        for (transport, expected) in cases {
+            let storage = test_storage().await;
+            let (config, _dir) = signed_dc_api_config();
+            let req = CreateVerificationRequest {
+                dcql_query: Some(serde_json::json!({
+                    "credentials": [{"id": "c1", "format": "dc+sd-jwt"}]
+                })),
+                named_query_ref: None,
+                transport: transport.to_string(),
+                transaction_data: None,
+            };
+
+            let res = create_verification_request(&config, &storage, req, 1_700_000_000)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                res.protocol.as_deref(),
+                expected,
+                "transport {transport} must report protocol {expected:?}"
+            );
+        }
+    }
+
+    /// HAIP L190/L256 for the second builder. The existing
+    /// `haip_0045_...` test reaches only the redirect transport.
+    #[tokio::test]
+    async fn dc_api_signed_x5c_excludes_the_trust_anchor() {
+        let storage = test_storage().await;
+        let (config, _dir) = signed_dc_api_config();
+
+        let res =
+            create_verification_request(&config, &storage, signed_dc_api_request(), 1_700_000_000)
+                .await
+                .unwrap();
+        let jws = res.dc_api_request.unwrap()["request"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let header_b64 = jws.split('.').next().unwrap();
+        let header: serde_json::Value =
+            serde_json::from_slice(&B64URL.decode(header_b64).unwrap()).unwrap();
+        let chain = header["x5c"].as_array().expect("x5c must be present");
+        assert_eq!(
+            chain.len(),
+            1,
+            "x5c must carry the leaf only, never the trust anchor: {header}"
+        );
     }
 }

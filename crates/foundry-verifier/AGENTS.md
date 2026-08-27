@@ -27,7 +27,7 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 | --- | --- |
 | `lib.rs` | Module declarations and the `pub use` surface |
-| `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT (`build_signed_request_object`); derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256) |
+| `request.rs` | Creates a verification request (`create_verification_request`), generates the nonce + ephemeral ECDH key pair, and builds the signed Request Object JWT. Signing lives in one crate-private place, `sign_request_object`, shared by two payload builders on top of it — `build_signed_request_object` (the `request_uri` / redirect transport) and `build_signed_dc_api_request_object` (the `dc_api_signed` transport, OpenID4VP §A.2.1). `sign_request_object` owns the certificate handling for both: it derives `client_id` as `x509_hash:<base64url(SHA-256(DER leaf))>` via `foundry_core::trust::x509_hash_client_id_value` (HAIP OpenID4VP L256), cross-checks the leaf's dNSName SAN, and builds `x5c` — **it inserts `client_id` into the payload itself, so a payload builder must never insert it** |
 | `verify.rs` | The orchestrator: JWE decrypt → `select_presentations` → a per-credential verify-all loop (`verify_one_credential`, which returns **no `Result`**) → `requested_credentials_answered`, then computes `verified` as the conjunction over **both** check levels. Returns a `VerifyOutcome` internally so a per-credential failure can become HTTP 400/502 without discarding the other credentials' checks. Also flips `tx.state` to `Verified`/`Failed` and stores `tx.result` |
 | `dcql.rs` | `PresentedFormat` (`SdJwtVc` \| `MsoMdoc`) and `check_dcql_match`, which returns a `CheckResult` and **never errors** (fail-closed) |
 | `credential_sets.rs` | **Crate-private** DCQL Credential Set Query satisfaction — which *combinations* of answered credential queries answer the request (`check_credential_sets_satisfied`, OpenID4VP 1.0 L879-L894, L989-L1008). Pure, total, fail-closed like `check_dcql_match`: a required set is satisfied when at least one of its `options` is a subset of the answered credential query ids |
@@ -148,6 +148,24 @@ cargo nextest run -p foundry --test wallet_verification           # verification
 
 ## Gotchas
 
+- **Transport comparisons go through `tx.is_dc_api()`, never `== "dc_api"`.**
+  There are two DC API transports — `dc_api` (unsigned) and `dc_api_signed`
+  (signed) — and OpenID4VP L2543/L2963 give them the *same* response binding:
+  an `origin:`-prefixed audience and the `OpenID4VPDCAPIHandover`, "even for
+  signed requests". An equality test against a single literal silently applies
+  the redirect binding to the other form, which surfaces as a failed
+  `sd_jwt_vc_signature_and_kb_jwt` or `mdoc_issuer_auth_and_device_signature`
+  check — a policy verdict, not an error, so nothing points at the real cause.
+  Pinned by `dc_api_signed_transport_expects_the_origin_prefixed_audience` and
+  `dc_api_signed_transport_selects_the_dc_api_handover`.
+- **`verifier.dc_api_expected_origins` is required for `dc_api_signed` but
+  optional everywhere else.** The verify side still falls back to a
+  `public_base_url`-derived origin when it is unset; the request side refuses
+  with `VerificationError::InvalidRequest` (HTTP 400), raised before the
+  transaction is persisted. The asymmetry is deliberate: the fallback keeps
+  inbound verification working against pre-existing config, whereas signing
+  `expected_origins` (OpenID4VP L2442) is an assertion foundry would be
+  inventing.
 - **`check_status` treats a missing status claim as a PASS.** A credential with
   no `status.status_list` claim is considered non-revocable and the check passes.
   Only a revoked/suspended index, a malformed status claim, or a Status List
