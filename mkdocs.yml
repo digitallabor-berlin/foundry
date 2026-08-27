@@ -67,5 +67,8 @@ nav:
       - Encrypted Pre-Authorized Code: manual/issuance/encrypted-pre-auth-code.md
       - By-Reference Offers: manual/issuance/by-reference-offers.md
       - PaSO Transaction Data: manual/issuance/paso-transaction-data.md
+  - Verification (OpenID4VP):
+      - DC API Expected Origins: manual/verification/dc-api-origins.md
+      - Request Diagnostics: manual/verification/request-diagnostics.md
   - Reference:
       - Conformance Report: conformance/openid4vc-conformance.md

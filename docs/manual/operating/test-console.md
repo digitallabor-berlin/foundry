@@ -54,7 +54,7 @@ platform requirements the console cannot satisfy on your behalf:
   LAN-reachable host or a tunnel. This is the failure mode most likely to be
   misread as a `foundry` bug.
 - **`verifier.dc_api_expected_origins` must list the origin the console is
-  served from** — see DC API Expected Origins below.
+  served from** — see [DC API Expected Origins](../verification/dc-api-origins.md) below.
   This is the presentation-side equivalent of the previous bullet, and the
   second most likely thing to be misread as a `foundry` bug.
 
