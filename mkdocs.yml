@@ -70,5 +70,9 @@ nav:
   - Verification (OpenID4VP):
       - DC API Expected Origins: manual/verification/dc-api-origins.md
       - Request Diagnostics: manual/verification/request-diagnostics.md
+  - Development:
+      - Testing: manual/development/testing.md
+      - Conformance Suite: manual/development/conformance-suite.md
+      - End-to-End Suite: manual/development/end-to-end.md
   - Reference:
       - Conformance Report: conformance/openid4vc-conformance.md

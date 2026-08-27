@@ -118,5 +118,5 @@ real binary and drives both flows over HTTP:
 cargo nextest run -p foundry --test e2e_full_flow --run-ignored ignored-only
 ```
 
-See End-to-End Test
+See [End-to-End Test](../development/end-to-end.md)
 below for what it covers.
