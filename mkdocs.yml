@@ -44,5 +44,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Getting Started:
+      - Installation: manual/getting-started/installation.md
+      - Running the Project: manual/getting-started/quickstart.md
   - Reference:
       - Conformance Report: conformance/openid4vc-conformance.md
