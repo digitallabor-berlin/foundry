@@ -2142,3 +2142,211 @@ async fn without_credential_sets_the_conjunctive_check_is_still_emitted() {
         result.checks
     );
 }
+
+/// The signed DC API transport end to end: the Request Object foundry signs
+/// and the presentation it accepts must agree. Request side per OpenID4VP 1.0
+/// §A.2.1 (L2464-L2476); response side per L2543, where the audience is the
+/// Origin prefixed with `origin:` **even for signed requests**.
+#[tokio::test]
+async fn signed_dc_api_presentation_verifies_end_to_end() {
+    let (base_state, _dir, issuer_cert_pem, issuer_key_pem) = setup_test_app().await;
+
+    // L2442: a signed DC API request asserts which Origins may invoke it, and
+    // `create_verification_request` refuses the transport when the list is
+    // empty. `setup_test_app` leaves it empty, so override it here.
+    let origin = "https://verifier-website.example";
+    let mut cfg = (*base_state.config).clone();
+    cfg.verifier.dc_api_expected_origins = vec![origin.to_string()];
+    let state = AppState::new(base_state.storage.clone(), Arc::new(cfg));
+
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+
+    // 1. Create the signed DC API request.
+    let create_req_body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/pid"] }
+            }]
+        },
+        "transport": "dc_api_signed"
+    });
+
+    let create_req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(create_req_body.to_string()))
+        .unwrap();
+
+    let create_res = admin_app.clone().oneshot(create_req).await.unwrap();
+    assert_eq!(create_res.status(), StatusCode::OK);
+
+    let create_bytes = axum::body::to_bytes(create_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: CreateVerificationResponse = serde_json::from_slice(&create_bytes).unwrap();
+    let verification_id = create_resp.verification_id.clone();
+
+    assert_eq!(
+        create_resp.protocol.as_deref(),
+        Some("openid4vp-v1-signed"),
+        "VP-0196/VP-0197: the response must name the exchange protocol"
+    );
+    assert!(
+        create_resp.request_uri.is_none() && create_resp.openid4vp_uri.is_none(),
+        "the DC API transports carry no request_uri and no deep link"
+    );
+
+    let dc_api_request = create_resp
+        .dc_api_request
+        .expect("dc_api_signed must return dc_api_request");
+    let jws = dc_api_request["request"]
+        .as_str()
+        .expect("L2476: the signed request travels under `request`")
+        .to_string();
+
+    // 2. Inspect the Request Object the way a wallet does before trusting any
+    //    parameter inside it.
+    let parts: Vec<&str> = jws.split('.').collect();
+    assert_eq!(
+        parts.len(),
+        3,
+        "`request` must be a JWS Compact Serialization"
+    );
+
+    let ro_header: serde_json::Value =
+        serde_json::from_slice(&B64URL.decode(parts[0]).unwrap()).unwrap();
+    assert_eq!(ro_header["typ"], "oauth-authz-req+jwt");
+    assert_eq!(
+        ro_header["x5c"].as_array().map(|c| c.len()),
+        Some(1),
+        "HAIP L190/L256: x5c carries the leaf only, never the trust anchor"
+    );
+
+    let ro_payload: serde_json::Value =
+        serde_json::from_slice(&B64URL.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(
+        ro_payload["expected_origins"],
+        serde_json::json!([origin]),
+        "L2442: expected_origins must carry the configured Origins"
+    );
+    assert_eq!(ro_payload["response_mode"], "dc_api.jwt", "L2438");
+    assert!(
+        ro_payload["client_id"]
+            .as_str()
+            .is_some_and(|c| c.starts_with("x509_hash:")),
+        "L2437 / HAIP L256: client_id must be present and x509_hash-prefixed"
+    );
+    assert!(
+        ro_payload.get("response_uri").is_none() && ro_payload.get("state").is_none(),
+        "L2421/L2448: neither response_uri nor state is a DC API parameter"
+    );
+
+    let nonce = ro_payload["nonce"].as_str().unwrap().to_string();
+    let ephem_public_jwk = ro_payload["client_metadata"]["jwks"]["keys"][0].clone();
+
+    // 3. Issue an SD-JWT VC and bind it with a KB-JWT. L2543: over the DC API
+    //    the audience is the Origin prefixed with `origin:` EVEN FOR SIGNED
+    //    REQUESTS -- never the x509_hash Client Identifier in the object above.
+    let holder_kp = EcKeyPair::generate(EcCurve::P256).unwrap();
+    let holder_pub_jwk = serde_json::to_value(holder_kp.to_jwk_public_key()).unwrap();
+    let holder_signer =
+        FileSigner::from_pem(&holder_kp.to_pem_private_key(), SignatureAlgorithm::Es256).unwrap();
+    let issuer_signer =
+        FileSigner::from_pem(issuer_key_pem.as_bytes(), SignatureAlgorithm::Es256).unwrap();
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut select = serde_json::Map::new();
+    select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+    let claims = IssuerClaims {
+        iss: "localhost".to_string(),
+        sub: None,
+        iat: (now - 100) as i64,
+        exp: (now + 3600) as i64,
+        vct: "https://localhost:8443/vct/pid".to_string(),
+        cnf_jwk: holder_pub_jwk,
+        status_list_index: None,
+        status_list_uri: None,
+        always_disclosed: serde_json::Map::new(),
+        selectively_disclosable: select,
+    };
+
+    let issuer_pres = build_sd_jwt_vc(
+        claims,
+        &issuer_signer,
+        Some(vec![der_b64(issuer_cert_pem.as_bytes())]),
+    )
+    .unwrap();
+
+    let sd_jwt_vc_presentation = attach_kb_jwt(
+        issuer_pres,
+        &holder_signer,
+        &format!("origin:{origin}"),
+        &nonce,
+        None,
+    )
+    .unwrap();
+
+    let jwe_str = encrypt_compact(
+        &serde_json::json!({ "vp_token": { "c1": [sd_jwt_vc_presentation] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .unwrap();
+
+    // 4. Relay the response the way the console does after the DC API call.
+    let post_resp_req = Request::builder()
+        .method("POST")
+        .uri(format!(
+            "/admin/verification/requests/{verification_id}/dc-api-response"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(
+            serde_json::json!({ "response": jwe_str }).to_string(),
+        ))
+        .unwrap();
+
+    let post_resp_res = admin_app.clone().oneshot(post_resp_req).await.unwrap();
+    assert_eq!(post_resp_res.status(), StatusCode::OK);
+
+    let verify_bytes = axum::body::to_bytes(post_resp_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let verify_result: VerificationResult = serde_json::from_slice(&verify_bytes).unwrap();
+
+    assert!(
+        verify_result.verified,
+        "a conformant signed DC API presentation must verify; checks={:?}, credentials={:?}",
+        verify_result.checks, verify_result.credentials
+    );
+    assert_eq!(verify_result.credentials[0].claims["given_name"], "Alice");
+
+    // 5. The transaction reflects the verdict.
+    let get_tx_req = Request::builder()
+        .method("GET")
+        .uri(format!("/admin/verification/requests/{verification_id}"))
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::empty())
+        .unwrap();
+
+    let get_tx_res = admin_app.clone().oneshot(get_tx_req).await.unwrap();
+    assert_eq!(get_tx_res.status(), StatusCode::OK);
+
+    let tx_bytes = axum::body::to_bytes(get_tx_res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let tx: VerificationTransaction = serde_json::from_slice(&tx_bytes).unwrap();
+
+    assert_eq!(tx.state, VerificationState::Verified);
+    assert_eq!(tx.transport, "dc_api_signed");
+}
