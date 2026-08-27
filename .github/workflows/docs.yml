@@ -23,7 +23,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
+          # Without cache-dependency-path, setup-python only globs
+          # **/requirements.txt and **/pyproject.toml to key the pip cache, and
+          # fails the job outright when neither exists. This repo pins its docs
+          # deps in requirements-docs.txt, so name it explicitly.
           cache: pip
+          cache-dependency-path: requirements-docs.txt
 
       - name: Install docs dependencies
         run: pip install -r requirements-docs.txt
