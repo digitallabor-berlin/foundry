@@ -1364,7 +1364,8 @@ pub(crate) async fn get_verification_handler(
 /// form body, so the admin console submits it here as JSON instead of the
 /// `application/x-www-form-urlencoded` shape `VpResponseForm` uses.
 /// `foundry-verifier`'s `create_verification_request` always sets
-/// `response_mode: "dc_api.jwt"` for `transport: "dc_api"` (never the
+/// `response_mode: "dc_api.jwt"` for both DC API transports (`dc_api` and
+/// `dc_api_signed`) (never the
 /// plaintext `dc_api` mode), so this is always the encrypted-JWE shape — there
 /// is no unencrypted variant to additionally support here.
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
