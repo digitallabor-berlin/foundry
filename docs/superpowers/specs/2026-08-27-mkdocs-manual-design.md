@@ -44,8 +44,31 @@ be `https://digitallabor-berlin.github.io/foundry/`.
 
 ## 3. Verified Technical Facts
 
-Verified against MkDocs source and changelogs on 2026-08-27, not from memory.
-Versions: **mkdocs 1.6.1**, **mkdocs-material 9.7.7**.
+Verified against MkDocs source and changelogs on 2026-08-27, then **confirmed
+empirically** by building this repository's actual `docs/` tree with the
+proposed `exclude_docs` and `validation` settings. Versions in use locally and
+pinned for CI: **mkdocs 1.6.1**, **mkdocs-material 9.7.7**
+(`pymdown-extensions 11.0.2`, transitively).
+
+The probe's output is the evidence behind §7.1's failure-mode table. Its
+findings, verbatim:
+
+- `../../AGENTS.md` produced `WARNING - ... the target '../AGENTS.md' is not
+  found among documentation files`, and `mkdocs build --strict` **exited
+  non-zero**. Hard failure confirmed.
+- Six links into `specs/` and `superpowers/` produced
+  `INFO - ... which is excluded from the built site`. They stayed at INFO even
+  with every `validation.links` key raised to `warn`. **Unpromotable**,
+  confirming that only a repository test can enforce this (D8).
+- The bare directory link `../specs/` took a **different** code path:
+  `unrecognized relative link '../specs/', it was left as is`. Unlike the six
+  above, this one **is** promotable — `validation.links.unrecognized_links:
+  warn` turned it into a WARNING. Added to the config accordingly.
+- `docs/.venv` (117 MB, present during the probe) was **not** copied into
+  `site/`; the built site was 2.8 MB. MkDocs's implicit `.*` exclusion survives
+  an explicit `exclude_docs` override. The venv has since been relocated to the
+  repository root, so this is no longer load-bearing — but it establishes that
+  `exclude_docs` does not clobber the implicit defaults.
 
 | Fact | Verdict |
 | --- | --- |
@@ -175,9 +198,31 @@ mkdocs-material==9.7.7
 ```
 
 Placed at the root, **not** inside `docs/` — with `docs_dir: docs`, anything in
-that tree would be copied into `site/` as a static asset. Pinned with `==`; a
-compiled lock (`uv pip compile`) is more ceremony than two direct dependencies
-justify in a repository with no other Python.
+that tree would be copied into `site/` as a static asset.
+
+**Local environment (already provisioned).** A `uv`-managed virtualenv exists at
+the repository root, `.venv/`, holding exactly these two pins. Activate before
+any mkdocs command:
+
+```bash
+source .venv/bin/activate
+```
+
+`uv` writes a self-excluding `.gitignore` (`*`) inside the venv, so it is
+invisible to git — `git ls-files --others --exclude-standard` reports zero
+untracked files. Add `/.venv` to `.gitignore` regardless, so a plain
+`python -m venv .venv` cannot later be committed.
+
+> The venv originally lived at `docs/.venv`, i.e. **inside `docs_dir`**. The §3
+> probe showed MkDocs excluded it anyway, but it has been relocated to the root.
+> Do not create a virtualenv under `docs/`.
+
+**Why a `requirements-docs.txt` rather than `pyproject.toml` + `uv.lock`:** a
+`pyproject.toml` at the root of a Cargo workspace competes with `Cargo.toml` for
+the reader's idea of "the" manifest, for two direct dependencies with no
+first-party Python code. A plain pinned requirements file is installable by both
+`pip install -r` and `uv pip install -r`, so it serves the local uv workflow and
+GitHub Actions from one file. Revisit if the docs build ever grows plugins.
 
 ### 5.2 `mkdocs.yml` (repository root)
 
@@ -199,10 +244,11 @@ exclude_docs: |
 validation:
   links:
     not_found: warn
-    anchors: warn            # default is info - raised deliberately
-    absolute_links: warn     # catches accidental /rooted links
+    anchors: warn              # default is info - raised deliberately
+    absolute_links: warn       # catches accidental /rooted links
+    unrecognized_links: warn   # default is info - catches bare dir links
   nav:
-    omitted_files: warn      # a new page missing from nav fails CI
+    omitted_files: warn        # a new page missing from nav fails CI
     not_found: warn
 
 theme:
@@ -269,11 +315,15 @@ Three settings do real work rather than decoration:
   `--strict` would sail straight past the breakage most likely to occur.
 - **`nav.omitted_files: warn`** — makes "added a page, forgot the nav" a build
   failure. With 29 pages this will happen.
+- **`unrecognized_links: warn`** — proven by the §3 probe to convert the bare
+  `../specs/` directory link from a silent INFO into a build failure. This is
+  one of the eight broken conformance links moved out of the "only a test can
+  catch it" bucket at zero cost.
 - **`edit_uri`** — every page gets an edit link to GitHub, which is how a public
   docs site stays maintained.
 
-`site/` is added to `.gitignore`. The artifact-based deploy means there is no
-`gh-pages` branch to track.
+`/site` and `/.venv` are added to `.gitignore`. The artifact-based deploy means
+there is no `gh-pages` branch to track.
 
 ### 5.3 `crates/foundry/tests/docs_hygiene.rs`
 
@@ -340,11 +390,12 @@ Three classes, each with a distinct failure mode.
 `docs/conformance/openid4vc-conformance.md` (829 lines) holds 8 relative links,
 all of which break:
 
-| Target | Failure mode |
-| --- | --- |
-| `../../AGENTS.md` | **Hard fail** — outside `docs_dir`, `links.not_found: warn`, `--strict` aborts |
-| `../specs/` and 5 x `../specs/*.md` | **Silent rot** — excluded tree, INFO only |
-| `../superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md` | **Silent rot** — same |
+| Target | Count | Failure mode (empirically confirmed, §3) |
+| --- | --- | --- |
+| `../../AGENTS.md` | 1 | **Hard fail** — outside `docs_dir`; `links.not_found: warn`; `--strict` aborts |
+| `../specs/` (bare directory) | 1 | **Hard fail once `unrecognized_links: warn` is set** — a different code path from the rows below, and promotable |
+| `../specs/*.md` | 5 | **Silent rot** — excluded tree, INFO only, *unpromotable*. Caught by `docs_hygiene.rs` alone |
+| `../superpowers/specs/2026-08-13-emvco-dpc-display-metadata-design.md` | 1 | **Silent rot** — same |
 
 All 8 become absolute
 `https://github.com/digitallabor-berlin/foundry/blob/main/...` URLs, which are
@@ -430,7 +481,7 @@ moving them" is exactly what a helpful implementer does unprompted.
 
 | # | Step | Notes |
 | --- | --- | --- |
-| 1 | **Scaffold** — `mkdocs.yml`, `requirements-docs.txt`, `.github/workflows/docs.yml`, `.gitignore` += `site/`, `docs/index.md`, valid empty nav | Establishes the gate before there is anything to break |
+| 1 | **Scaffold** — `mkdocs.yml`, `requirements-docs.txt`, `.github/workflows/docs.yml`, `.gitignore` += `/site` and `/.venv`, `docs/index.md`, valid empty nav | Establishes the gate before there is anything to break |
 | 2 | **Migrate content, one nav group per commit** (7 commits) | README left **intact**; content duplicated in the interim. Each commit ends with `mkdocs build --strict` |
 | 3 | **Conformance doc link rewrite** — the 8 links | `conformance_report.rs` kept green |
 | 4 | **README truncation** to the ~150-line landing page | First destructive step; everything deleted already exists in the manual and has been strict-built |
@@ -442,7 +493,9 @@ Approximately 11 commits on branch `docs/mkdocs-manual`.
 
 ### 8.3 Verification
 
-- **Structural:** `mkdocs build --strict` after every commit.
+- **Structural:** `source .venv/bin/activate && mkdocs build --strict` after
+  every commit. The activation step is mandatory — mkdocs is not on the global
+  `PATH`.
 - **Workspace gate (`AGENTS.md` §5.1):** `cargo fmt` ->
   `cargo nextest run --workspace --no-fail-fast --status-level fail` ->
   `cargo clippy --workspace --all-targets -- -D warnings`. Not optional for a
