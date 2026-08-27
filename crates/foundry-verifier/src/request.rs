@@ -507,11 +507,21 @@ pub(crate) fn x509_hash_client_id(leaf_pem: &[u8]) -> Result<String, Verificatio
     ))
 }
 
-/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
-#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
-pub fn build_signed_request_object(
+/// Sign a Request Object payload as a JWS Compact Serialization.
+///
+/// Shared by every signed Request Object this verifier emits, whichever
+/// transport carries it. Owning the certificate handling in one place is the
+/// point: HAIP OpenID4VP L256 makes the Client Identifier the hash of the leaf
+/// certificate, and HAIP L190/L256 forbid the trust anchor in `x5c`. A second
+/// copy of this logic could drift from the audience the verify side expects,
+/// which would surface as every presentation failing as a policy verdict rather
+/// than as a visible error.
+///
+/// `client_id` is inserted **here**, not by the caller, so no payload builder
+/// can omit it or derive it differently. Callers must not insert it themselves.
+fn sign_request_object(
     config: &Config,
-    tx: &VerificationTransaction,
+    mut payload_map: serde_json::Map<String, serde_json::Value>,
 ) -> Result<String, VerificationError> {
     let key_entry = config
         .keys
@@ -532,7 +542,6 @@ pub fn build_signed_request_object(
         .public_base_url
         .trim_end_matches('/');
     let host = dns_host_only(base_url);
-    let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
     // HAIP OpenID4VP L256: for signed requests the Verifier MUST use the Client
     // Identifier Prefix `x509_hash`, narrowing OpenID4VP Section 5.9.3. The value
@@ -555,14 +564,71 @@ pub fn build_signed_request_object(
     }
 
     let client_id = x509_hash_client_id(&pem_bytes)?;
+    payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     let x5c = Some(foundry_core::trust::build_x5c(&[pem_bytes])?);
+
+    let payload_val = serde_json::Value::Object(payload_map);
+
+    let mut header_map = serde_json::Map::new();
+    header_map.insert("typ".to_string(), serde_json::json!("oauth-authz-req+jwt"));
+    header_map.insert("alg".to_string(), serde_json::json!(alg.as_str()));
+    if let Some(chain) = x5c {
+        header_map.insert("x5c".to_string(), serde_json::json!(chain));
+    }
+    // Header order is `typ, alg, x5c` -- deliberately NOT the `alg, typ, x5c`
+    // of the SD-JWT VC and status-list builders. `serde_json` preserves
+    // insertion order, so the difference is real in the signed bytes; keep it.
+    let jws = foundry_core::crypto::jws::sign_compact(&header_map, &payload_val, &signer)?;
+
+    // Always-on and payload-free: records that a Request Object really was
+    // served for this transaction, and under which algorithm. `tx_id` is
+    // already on the caller's span, so this threads into the rest of the flow.
+    tracing::debug!(
+        alg = %alg.as_str(),
+        jws_len = jws.len(),
+        "signed request object built"
+    );
+
+    // The Request Object the wallet actually receives, verbatim. Doubly gated
+    // per root AGENTS.md sect-4.5: it commits to `tx.nonce` and carries the
+    // ephemeral PUBLIC JWK in `client_metadata`, so a `debug`/`trace` level
+    // alone is not authorisation -- RUST_LOG=trace is not consent. Same tier,
+    // and the same justification, as the SessionTranscript diagnostic in
+    // `verify.rs`: a wallet-side rejection cannot be reproduced offline
+    // without the exact bytes that were sent.
+    if foundry_core::obs::sensitive_enabled() {
+        // Built here rather than before signing: `sign_compact` borrows the
+        // header map, and this diagnostic is the map's only other reader.
+        let header_val = serde_json::Value::Object(header_map);
+        tracing::trace!(
+            request_object_jws = %jws,
+            request_object_header = %header_val,
+            request_object_payload = %payload_val,
+            "SENSITIVE: signed request object served to wallet"
+        );
+    }
+
+    Ok(jws)
+}
+
+/// `skip_all` is mandatory: `tx` holds `ephem_private_jwk`.
+#[tracing::instrument(skip_all, fields(tx_id = %tx.id))]
+pub fn build_signed_request_object(
+    config: &Config,
+    tx: &VerificationTransaction,
+) -> Result<String, VerificationError> {
+    let base_url = config
+        .server
+        .wallet_facing
+        .public_base_url
+        .trim_end_matches('/');
+    let response_uri = format!("{base_url}/vp/response/{}", tx.id);
 
     let mut payload_map = serde_json::Map::new();
     payload_map.insert(
         "response_type".to_string(),
         serde_json::json!(RESPONSE_TYPE_VP_TOKEN),
     );
-    payload_map.insert("client_id".to_string(), serde_json::json!(client_id));
     payload_map.insert("response_uri".to_string(), serde_json::json!(response_uri));
     payload_map.insert(
         "response_mode".to_string(),
@@ -591,48 +657,10 @@ pub fn build_signed_request_object(
     if let Some(ref td) = tx.transaction_data {
         payload_map.insert("transaction_data".to_string(), serde_json::json!(td));
     }
-    let payload_val = serde_json::Value::Object(payload_map);
 
-    let mut header_map = serde_json::Map::new();
-    header_map.insert("typ".to_string(), serde_json::json!("oauth-authz-req+jwt"));
-    header_map.insert("alg".to_string(), serde_json::json!(alg.as_str()));
-    if let Some(chain) = x5c {
-        header_map.insert("x5c".to_string(), serde_json::json!(chain));
-    }
-    // Header order is `typ, alg, x5c` -- deliberately NOT the `alg, typ, x5c`
-    // of the SD-JWT VC and status-list builders. `serde_json` preserves
-    // insertion order, so the difference is real in the signed bytes; keep it.
-    let jws = foundry_core::crypto::jws::sign_compact(&header_map, &payload_val, &signer)?;
-
-    // Always-on and payload-free: records that a Request Object really was
-    // served for this transaction, and under which algorithm. `tx_id` is
-    // already on the span, so this threads into the rest of the flow.
-    tracing::debug!(
-        alg = %alg.as_str(),
-        jws_len = jws.len(),
-        "signed request object built"
-    );
-
-    // The Request Object the wallet actually receives, verbatim. Doubly gated
-    // per root AGENTS.md sect-4.5: it commits to `tx.nonce` and carries the
-    // ephemeral PUBLIC JWK in `client_metadata`, so a `debug`/`trace` level
-    // alone is not authorisation -- RUST_LOG=trace is not consent. Same tier,
-    // and the same justification, as the SessionTranscript diagnostic in
-    // `verify.rs`: a wallet-side rejection cannot be reproduced offline
-    // without the exact bytes that were sent.
-    if foundry_core::obs::sensitive_enabled() {
-        // Built here rather than before signing: `sign_compact` borrows the
-        // header map, and this diagnostic is the map's only other reader.
-        let header_val = serde_json::Value::Object(header_map);
-        tracing::trace!(
-            request_object_jws = %jws,
-            request_object_header = %header_val,
-            request_object_payload = %payload_val,
-            "SENSITIVE: signed request object served to wallet"
-        );
-    }
-
-    Ok(jws)
+    // `client_id` is inserted by `sign_request_object`, which derives it from
+    // the same leaf certificate it puts in `x5c`.
+    sign_request_object(config, payload_map)
 }
 
 #[cfg(test)]
