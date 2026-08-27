@@ -833,7 +833,7 @@ async fn verify_credential_payload(
             // serve several. Each configured Origin therefore yields a
             // candidate transcript, and the Device Signature decides which one
             // the wallet actually used.
-            let candidates: Vec<SessionTranscriptParams> = if ctx.tx.transport == "dc_api" {
+            let candidates: Vec<SessionTranscriptParams> = if ctx.tx.is_dc_api() {
                 let origins: Vec<String> = if ctx.config.verifier.dc_api_expected_origins.is_empty()
                 {
                     vec![ctx.base_url.to_string()]
@@ -1345,7 +1345,7 @@ async fn do_verify_vp_response(
     // deployment falls back to a single origin derived from
     // `public_base_url`, which keeps existing single-origin dev/test setups
     // working without requiring the new config field.
-    let expected_audiences: Vec<String> = if tx.transport == "dc_api" {
+    let expected_audiences: Vec<String> = if tx.is_dc_api() {
         let origins: Vec<String> = if config.verifier.dc_api_expected_origins.is_empty() {
             tracing::debug!(
                 fallback_origin = %base_url,
@@ -4637,6 +4637,117 @@ mod tests {
             res.verified,
             "a conformant wallet's Origin-prefixed KB-JWT audience for a dc_api presentation \
              should verify, but do_verify_vp_response rejected it: {:?}",
+            res.checks
+        );
+    }
+
+    /// OpenID4VP L2543: the DC API response audience is the Origin prefixed
+    /// with `origin:` **even for signed requests**. A signed DC API transport
+    /// must therefore get the same KB-JWT audience treatment as the unsigned
+    /// one -- if `verify.rs` compared `transport == "dc_api"` by equality, this
+    /// presentation would be checked against the `x509_hash:` Client Identifier
+    /// instead and fail as a policy verdict.
+    #[tokio::test]
+    async fn dc_api_signed_transport_expects_the_origin_prefixed_audience() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, _trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+        tx.transport = "dc_api_signed".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+
+        // `test_config` sets dc_api_expected_origins to this single entry.
+        let origin_audience = "origin:https://verifier-website.example";
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            origin_audience,
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        let resolver = MockResolver { token: None };
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+            .await
+            .unwrap();
+
+        assert!(
+            res.verified,
+            "a signed DC API presentation bound to `origin:<origin>` must verify; checks={:?}, credentials={:?}",
+            res.checks, res.credentials
+        );
+    }
+
+    /// The mdoc half of the same rule (L2963): a signed DC API presentation
+    /// must be bound by `OpenID4VPDCAPIHandover`, not the redirect
+    /// `OpenID4VPHandover`.
+    #[tokio::test]
+    async fn dc_api_signed_transport_selects_the_dc_api_handover() {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let (mut config, _dir) = test_config(&String::from_utf8(root_pem).unwrap());
+        config.verifier.dc_api_expected_origins = vec!["https://first.example.com".to_string()];
+
+        let (mut tx, _) = sample_tx();
+        tx.dcql_query = mdoc_dcql_query();
+        tx.transport = "dc_api_signed".to_string();
+        tx.response_mode = "dc_api.jwt".to_string();
+
+        let transcript = session_transcript_value(&SessionTranscriptParams::DcApi {
+            origin: "https://first.example.com".to_string(),
+            nonce: tx.nonce.clone(),
+            jwk_thumbprint: Some(
+                foundry_core::obs::thumbprint_bytes(&tx.ephem_public_jwk).unwrap(),
+            ),
+        })
+        .unwrap();
+        let jwe = mdoc_presentation_jwe(
+            &leaf_cert,
+            &leaf_key,
+            &transcript,
+            &tx.ephem_public_jwk,
+            now_secs(),
+        );
+
+        let res = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
+            .await
+            .unwrap();
+        assert!(
+            res.verified,
+            "a signed DC API mdoc presentation must be bound by OpenID4VPDCAPIHandover; checks={:?}",
             res.checks
         );
     }
