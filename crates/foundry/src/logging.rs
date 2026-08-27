@@ -208,7 +208,7 @@ mod tests {
             !fell_back,
             "EnvFilter accepts this as a target directive; if this ever starts \
              failing, EnvFilter got stricter and the docs on build_filter and \
-             in the README should be relaxed accordingly"
+             in `docs/manual/operating/logging.md` should be relaxed accordingly"
         );
     }
 }

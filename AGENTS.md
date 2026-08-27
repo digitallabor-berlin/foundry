@@ -10,7 +10,7 @@ Guidelines for AI agents working in the `foundry` repository.
 Issuer and OpenID4VP Verifier** service.
 
 For building, running, configuration, CLI usage, Docker, and endpoint examples,
-see **[`README.md`](README.md)** — this file does not restate it.
+see **[the manual](docs/index.md)** — this file does not restate it.
 
 ---
 
@@ -235,12 +235,12 @@ Logging is a request-path concern and is governed like one.
   `credential_type`, `format`, `check`, `passed`, `checks`, `checks_passed`,
   plus `credentials_requested` / `credentials_answered` / `credentials_failed`
   on the verdict record. Renaming one is a breaking change for whoever is
-  watching the logs; update `README.md` too.
+  watching the logs; update `docs/manual/reference/log-fields.md` too.
 
 Enforced by `crates/foundry/tests/instrumentation_hygiene.rs` (structural) and
 `crates/foundry/tests/logging_redaction.rs` (behavioural, with a positive
 control). Operator-facing documentation lives in the "Logging & Observability"
-section of [`README.md`](README.md).
+section of [`docs/manual/operating/logging.md`](docs/manual/operating/logging.md).
 
 ---
 
@@ -286,6 +286,19 @@ A run ends with one line naming the totals, in this shape:
 ```
 
 That line is the evidence §5.3 asks for.
+
+Documentation changes under `docs/` additionally require:
+
+```bash
+source .venv/bin/activate
+mkdocs build --strict
+```
+
+`--strict` fails on broken links and unresolved heading anchors. Note that a
+link into `docs/specs/` or `docs/superpowers/` is **not** caught — those trees
+are excluded from the build, and mkdocs logs such links at INFO only. Use
+absolute `https://github.com/digitallabor-berlin/foundry/blob/main/…` URLs for
+them; `crates/foundry/tests/docs_hygiene.rs` enforces this.
 
 ### 5.2 The E2E Suite
 
@@ -368,6 +381,11 @@ be reflected in:
 Specs are generated via `utoipa` annotations in `crates/foundry/src/openapi.rs`;
 see `crates/foundry/AGENTS.md` for the regeneration command.
 
+The operator-facing endpoint table lives in
+`docs/manual/operating/http-server.md` (it is deliberately not duplicated in
+`README.md`). An endpoint change updates that page as well as `openapi.json` /
+`openapi-wallet.json`.
+
 ---
 
 ## 7. Subagent-Driven Development (SDD): Role → Agent Mapping
@@ -440,6 +458,11 @@ recreate a `docs/superlight/` directory.
   spec file in `docs/specs/`** → add or update its row in the §4.4 table. A
   governing document that cannot be committed gets a **reference stub** instead,
   under §4.4's external-reference rule.
+- **Documented behaviour change** → update the relevant `docs/manual/` page. A
+  **new page** additionally requires a `nav:` entry in `mkdocs.yml` —
+  `validation.nav.omitted_files: warn` makes a page missing from the nav a build
+  failure. `README.md` is a landing page, not a manual: do not add feature
+  documentation to it.
 - **Closing a conformance gap** → update the affected rows in
   `docs/conformance/openid4vc-conformance.md` and remove the `#[ignore]` from
   the test that cites that gap ID. The report is a living document, not a

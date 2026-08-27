@@ -110,8 +110,9 @@ fn rewrite_config_for_e2e(config_path: &Path, admin_port: u16, wallet_port: u16)
 
 /// Spawn the real `foundry` binary to run `quickstart`, then `serve`, against
 /// pre-selected free ports, with `current_dir` set so the generated
-/// config's relative key/db paths resolve correctly (mirrors how `README.md`
-/// documents running `foundry serve` from the directory containing its
+/// config's relative key/db paths resolve correctly (mirrors how
+/// `docs/manual/getting-started/quickstart.md` documents running
+/// `foundry serve` from the directory containing its
 /// `config.yaml`/`keys/`/`trust/`). Polls `/ready` before returning.
 async fn spawn_server() -> (ServerGuard, tempfile::TempDir, u16, u16) {
     spawn_server_inner(|_config_path| {}).await

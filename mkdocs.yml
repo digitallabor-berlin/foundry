@@ -1,0 +1,81 @@
+site_name: Foundry
+site_description: EUDI Wallet OpenID4VCI Issuer and OpenID4VP Verifier
+site_url: https://digitallabor-berlin.github.io/foundry/
+repo_url: https://github.com/digitallabor-berlin/foundry
+repo_name: digitallabor-berlin/foundry
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+
+exclude_docs: |
+  /superpowers/
+  /specs/
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: warn
+    unrecognized_links: warn
+  nav:
+    omitted_files: warn
+    not_found: warn
+
+theme:
+  name: material
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.expand
+    - toc.follow
+    - search.suggest
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: manual/getting-started/installation.md
+      - Running the Project: manual/getting-started/quickstart.md
+  - Deployment:
+      - Docker: manual/deployment/docker.md
+      - CI Build & Push: manual/deployment/ci.md
+  - Operating:
+      - HTTP Server & Endpoints: manual/operating/http-server.md
+      - OpenAPI & Swagger UI: manual/operating/openapi.md
+      - Admin API: manual/operating/admin-api.md
+      - Admin Test Console: manual/operating/test-console.md
+      - Keys & Certificates: manual/operating/keys-and-certificates.md
+      - Logging: manual/operating/logging.md
+      - Following a Request: manual/operating/following-a-request.md
+  - Issuance (OpenID4VCI):
+      - Credential Types & Claims: manual/issuance/credential-types.md
+      - Wallet Attestation & ABCA: manual/issuance/wallet-attestation.md
+      - Android Keystore Attestation: manual/issuance/android-keystore-attestation.md
+      - DPoP: manual/issuance/dpop.md
+      - Request & Response Encryption: manual/issuance/credential-encryption.md
+      - Encrypted Pre-Authorized Code: manual/issuance/encrypted-pre-auth-code.md
+      - By-Reference Offers: manual/issuance/by-reference-offers.md
+      - PaSO Transaction Data: manual/issuance/paso-transaction-data.md
+  - Verification (OpenID4VP):
+      - DC API Expected Origins: manual/verification/dc-api-origins.md
+      - Request Diagnostics: manual/verification/request-diagnostics.md
+  - Development:
+      - Testing: manual/development/testing.md
+      - Conformance Suite: manual/development/conformance-suite.md
+      - End-to-End Suite: manual/development/end-to-end.md
+  - Reference:
+      - Configuration: manual/reference/configuration.md
+      - Log Fields: manual/reference/log-fields.md
+      - Specifications: manual/reference/specs.md
+      - Conformance Report: conformance/openid4vc-conformance.md

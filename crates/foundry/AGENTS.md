@@ -11,7 +11,7 @@ credential format encoding (`foundry-sd-jwt-vc`, `foundry-mdoc`), and
 storage/config/crypto primitives (`foundry-core`). This crate only wires those
 together and maps their errors onto HTTP.
 
-Build/run/CLI usage is documented in [`README.md`](../../README.md) — not
+Build/run/CLI usage is documented in [the manual](../../docs/index.md) — not
 restated here.
 
 ## Position in the Dependency Graph
