@@ -450,6 +450,14 @@ attested to the wallet, and the *expected* list is this config key (or, when it
 is unset, the `public_base_url`-derived fallback). Add the presented Origin to
 `dc_api_expected_origins` if it is one you intend to serve.
 
+> **`dc_api_expected_origins` is mandatory for `transport: "dc_api_signed"`.**
+> A signed request carries `expected_origins` (OpenID4VP 1.0 L2442), which the
+> wallet compares against the invoking Origin to detect replay. foundry rejects
+> a signed DC API request with HTTP 400 when the list is empty rather than
+> guessing an Origin from `public_base_url` — signing an assertion about which
+> Origins are legitimate is not something a default can do safely. The unsigned
+> `dc_api` transport is unaffected and still falls back.
+
 To confirm the wallet's side independently, CMWallet logs it as
 `GetCredentialActivity: origin <value>`, readable via `adb logcat`.
 
@@ -1233,14 +1241,15 @@ once rather than three times.
 A wallet that rejects a presentation request rarely says why, and the request
 cannot be reconstructed after the fact — the nonce and the ephemeral key are
 per transaction. Foundry therefore records the request it actually sent, on
-both transports:
+every transport:
 
 | Field | Transport | Meaning |
 | --- | --- | --- |
-| `alg` / `jws_len` | `request_uri` | Always on, at `debug`: a Request Object was signed and served, under this algorithm and of this length. Carries none of its contents. |
-| `request_object_jws` | `request_uri` | The compact JWS byte-for-byte as the wallet received it — paste into any JWT decoder, or replay against the wallet |
-| `request_object_header` / `request_object_payload` | `request_uri` | The same object decoded, for reading at a glance |
+| `alg` / `jws_len` | `request_uri`, `dc_api_signed` | Always on, at `debug`: a Request Object was signed and served, under this algorithm and of this length. Carries none of its contents. |
+| `request_object_jws` | `request_uri`, `dc_api_signed` | The compact JWS byte-for-byte as the wallet received it — paste into any JWT decoder, or replay against the wallet |
+| `request_object_header` / `request_object_payload` | `request_uri`, `dc_api_signed` | The same object decoded, for reading at a glance |
 | `dc_api_request` | `dc_api` | The request object handed to the invoking page. This transport has no signed form, so there is a JSON record only |
+| `dc_api_request.request` | `dc_api_signed` | The signed Request Object (JWS Compact) handed to the invoking page, paired with `protocol: "openid4vp-v1-signed"` |
 
 The three payload fields are `trace`-level **and** require
 `sensitive_payloads` — the request object commits to the transaction nonce and
