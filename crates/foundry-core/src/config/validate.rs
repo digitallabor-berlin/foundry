@@ -323,8 +323,63 @@ impl Config {
             }
         }
 
+        // Design §4.1 -- the webhook may carry holder PII, so plaintext to a
+        // routable host is a configuration error rather than a warning.
+        if let Some(wh) = &self.verifier.webhook {
+            if !webhook_url_is_acceptable(&wh.url) {
+                return Err(ConfigError::Validation(format!(
+                    "verifier.webhook.url must use https, or http to a loopback host; got '{}'",
+                    wh.url
+                )));
+            }
+            // Permitted (the receiver may be on a trusted network) but never
+            // silent: without a secret the receiver cannot establish that an
+            // audit record came from this verifier.
+            if wh.include_raw_artifacts && wh.secret.is_none() && wh.secret_env.is_none() {
+                tracing::warn!(
+                    "verifier.webhook.include_raw_artifacts is enabled with no secret or \
+                     secret_env; holder PII will be delivered unsigned"
+                );
+            }
+        }
+
         Ok(())
     }
+}
+
+/// Whether `url` may receive holder PII.
+///
+/// `https` always; `http` only to a loopback host. Hand-rolled rather than
+/// using a URL parser because `url` is not a workspace dependency and adding
+/// one for a scheme check is not warranted.
+///
+/// Loopback is decided by this module's existing [`is_loopback_host`] rather
+/// than a second, wider predicate: two functions answering "is this host
+/// loopback" with different answers is how one config key ends up more
+/// permissive than another for no stated reason. Its exact-four-forms rule is
+/// the stricter of the two, which is the right direction for a PII egress.
+fn webhook_url_is_acceptable(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    match webhook_http_host(url) {
+        Some(host) => is_loopback_host(host),
+        None => false,
+    }
+}
+
+/// The host of an `http://` URL, with userinfo, port, and path removed.
+/// Returns `None` for any other scheme.
+fn webhook_http_host(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    // `user:pass@host` -> `host`; a bare `host` is unchanged.
+    let authority = authority.rsplit('@').next()?;
+    // IPv6 literals are bracketed: `[::1]:9000` -> `::1`.
+    if let Some(v6) = authority.strip_prefix('[') {
+        return v6.split(']').next();
+    }
+    authority.split(':').next()
 }
 
 /// An `enc` value may be advertised only if it can actually be honoured.
@@ -798,6 +853,59 @@ mod tests {
         // Regression guard: neither new check fires on a well-formed config.
         // minimal_config() already pairs identical https URLs.
         config_passing_keyref_check().validate().unwrap();
+    }
+
+    // ---- verifier.webhook (design §4.1) ---------------------------------
+
+    fn config_with_webhook(url: &str, include_raw_artifacts: bool) -> Config {
+        let mut cfg = config_passing_keyref_check();
+        cfg.verifier.webhook = Some(crate::config::WebhookConfig {
+            url: url.to_string(),
+            secret: None,
+            secret_env: None,
+            timeout_secs: 5,
+            include_raw_artifacts,
+        });
+        cfg
+    }
+
+    #[test]
+    fn webhook_url_must_be_https_for_a_routable_host() {
+        let err = config_with_webhook("http://audit.example.com/hook", false)
+            .validate()
+            .expect_err("plaintext to a routable host must be rejected");
+        assert!(
+            err.to_string().contains("verifier.webhook.url"),
+            "error must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn webhook_url_accepts_https() {
+        config_with_webhook("https://audit.example.com/hook", false)
+            .validate()
+            .expect("https must be accepted");
+    }
+
+    #[test]
+    fn webhook_url_accepts_plaintext_on_loopback() {
+        for url in [
+            "http://localhost:9000/hook",
+            "http://127.0.0.1:9000/hook",
+            "http://[::1]:9000/hook",
+        ] {
+            config_with_webhook(url, false)
+                .validate()
+                .unwrap_or_else(|e| panic!("loopback {url} must be accepted, got: {e}"));
+        }
+    }
+
+    #[test]
+    fn webhook_rejects_a_url_with_no_recognised_scheme() {
+        let err = config_with_webhook("audit.example.com/hook", false)
+            .validate()
+            .expect_err("a schemeless url must be rejected");
+        assert!(err.to_string().contains("verifier.webhook.url"));
     }
 
     // ---- PaSO Proof Metadata §3 / PaSO Core §5.2 -------------------------

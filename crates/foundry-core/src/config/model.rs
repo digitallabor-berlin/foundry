@@ -967,6 +967,39 @@ verifier:
     }
 }
 
+/// Delivery target for verification events (design §4.1).
+///
+/// Its *presence* is the enable flag: absent, no sink is constructed and no
+/// code path changes. `include_raw_artifacts` is deliberately a second,
+/// nested gate -- it is the one that authorises holder PII to leave the
+/// process, and conflating it with "webhook on" would make a verdict feed and
+/// a PII egress the same decision.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookConfig {
+    /// Destination URL. Must be `https`, unless the host is a loopback
+    /// address -- enforced by `Config::validate()`.
+    pub url: String,
+    /// HMAC key, literal. Takes precedence over [`Self::secret_env`], the same
+    /// precedence `AdminConfig.api_key` has over `api_key_env`.
+    #[serde(default)]
+    pub secret: Option<String>,
+    /// Name of an environment variable holding the HMAC key.
+    #[serde(default)]
+    pub secret_env: Option<String>,
+    /// Per-delivery HTTP timeout. Bounds the spawned task only; no
+    /// wallet-facing request ever waits on it.
+    #[serde(default = "default_webhook_timeout")]
+    pub timeout_secs: u64,
+    /// Transmit the verbatim Request Object and `vp_token` alongside the
+    /// verdict. **Off by default: these carry holder PII in the clear.**
+    #[serde(default)]
+    pub include_raw_artifacts: bool,
+}
+
+fn default_webhook_timeout() -> u64 {
+    5
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct VerifierConfig {
     pub signing_key: String,
@@ -977,7 +1010,7 @@ pub struct VerifierConfig {
     #[serde(default)]
     pub named_queries: Vec<serde_json::Value>,
     #[serde(default)]
-    pub webhook: Option<serde_json::Value>,
+    pub webhook: Option<WebhookConfig>,
     /// Origins (e.g. `https://wallet.example.org`) that this Verifier accepts
     /// as the `origin:`-prefixed KB-JWT/response audience for the DC API
     /// transport (OpenID4VP L2543, IETF SD-JWT VC Presentation Response
