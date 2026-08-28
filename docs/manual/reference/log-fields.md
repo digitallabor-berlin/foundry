@@ -42,6 +42,29 @@ Carried by the per-request record on both listeners.
 | `credentials_answered` |
 | `credentials_failed` |
 
+## Webhook delivery records
+
+Emitted once per attempted delivery of a verification event, when
+`verifier.webhook` is configured. A successful delivery is `debug`; a failed
+one is `warn`.
+
+| Field |
+| --- |
+| `event` |
+| `tx_id` |
+| `http.status` |
+| `latency_ms` |
+| `error.kind` |
+| `error.detail` |
+
+`event` is the event type — `presentation_request_delivered` or
+`verification_completed` — and is the same value the delivered body's `event`
+member and the `X-Foundry-Event` header carry. `http.status` and `latency_ms`
+appear on the success record; `error.kind` and `error.detail` on the failure
+one. The event **body** is never logged, at any level, in any mode: it is the
+payload the feature exists to move and it carries holder PII. Neither the
+webhook secret nor the computed signature is ever logged.
+
 What each field means, and how to use them to reconstruct one wallet
 interaction, is on [Following a Request](../operating/following-a-request.md).
 How to select levels, formats and payload logging is on

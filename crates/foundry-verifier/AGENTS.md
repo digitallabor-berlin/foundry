@@ -35,11 +35,19 @@ Full layering rule: root [AGENTS.md](../../AGENTS.md) §3.
 | `status.rs` | `StatusListResolver` trait + `HttpStatusListResolver` (10s timeout); `check_status` resolves the Status List Token, verifies it against the trust store, and reads the credential's status bit |
 | `transaction.rs` | `VerificationTransaction`, `VerificationState`, `CheckResult`, `VerificationResult`, and `Storage`-backed persistence (namespace `verification_tx`) — **note: the result/check types live here, not in `error.rs`** |
 | `error.rs` | The `VerificationError` enum only |
+| `webhook.rs` | `WebhookEvent`, `WebhookSink` + `HttpWebhookSink`, secret resolution and HMAC signing |
 
 ## Key Public Types & Entry Points
 
-- **`verify_vp_response(&Config, &mut VerificationTransaction, encrypted_jwe_str, &dyn StatusListResolver) -> Result<VerificationResult, VerificationError>`**
-  — the main entry point, driven by `POST /vp/response/:id`.
+- **`verify_vp_response(&Config, &mut VerificationTransaction, encrypted_jwe_str, &dyn StatusListResolver, &mut Option<serde_json::Value>) -> Result<VerificationResult, VerificationError>`**
+  — the main entry point, driven by `POST /vp/response/:id`. The final parameter
+  is an out-param that receives the decrypted `vp_token` when
+  `verifier.webhook.include_raw_artifacts` is set; it is populated at extraction,
+  before any check runs, so it survives a failed verification.
+- **Webhook:** `WebhookSink` (trait), `HttpWebhookSink`, `WebhookEvent`
+  (`PresentationRequestDelivered` | `VerificationCompleted`), `WebhookError`,
+  plus `WebhookSecret`, `sign_body` and `build_signed_request_parts` in
+  `webhook.rs`. Dispatch itself lives in `crates/foundry/src/server.rs`.
 - **Request:** `create_verification_request`, `build_signed_request_object`,
   `CreateVerificationRequest`, `CreateVerificationResponse` — driven by
   `POST /admin/verification/requests` and `GET /vp/request/:id`.
@@ -148,6 +156,36 @@ cargo nextest run -p foundry --test wallet_verification           # verification
 
 ## Gotchas
 
+- **Webhook delivery is fire-and-forget: never `await` it in a handler.** Root
+  [AGENTS.md](../../AGENTS.md) §4.3 classifies an HTTP outcome by what the
+  protocol did — structural fault 400, policy verdict 200, status-fetch outage
+  502 — and there is no status meaning "the operator's audit sink was down".
+  `dispatch_webhook` (`crates/foundry/src/server.rs`) `tokio::spawn`s and does
+  not join, so a slow endpoint adds no latency to a wallet's request and a dead
+  one changes no status code. Delivery is best-effort and at-most-once; a
+  failure is a `warn` record, not a retry. Pinned by
+  `a_failing_sink_does_not_change_the_wallet_response`.
+- **`WebhookError` is deliberately NOT a `VerificationError` variant.** A
+  webhook failure never reaches the HTTP error mappers in
+  `crates/foundry/src/server.rs`; adding a variant they do not handle is how an
+  unmapped error silently becomes a 500.
+- **`build_signed_request_parts` returns the exact bytes to send — never
+  re-serialize them.** The HMAC covers that `String` verbatim, so
+  `HttpWebhookSink::deliver` transmits it with `.body(..)`. Calling `.json(..)`
+  would re-serialize and could transmit bytes the signature does not cover.
+  This is also why `foundry-verifier`'s `reqwest` has no `json` feature. Pinned
+  by `the_signed_bytes_are_the_bytes_that_will_be_sent`.
+- **`presentation_request_delivered` fires per FETCH, not per transaction.** A
+  wallet that fetches `GET /vp/request/:id` twice produces two events, and
+  because ECDSA signing is randomized each really is different bytes — the
+  event's contract is "these exact bytes went out now". Deduping would require
+  remembering what was sent, i.e. storage, which this feature deliberately has
+  none of. Pinned by `each_request_object_fetch_delivers_its_own_event`.
+- **The `vp_token` reaches the event through an out-param, never a field on
+  `VerificationTransaction`.** The transaction is serialized wholesale into
+  storage, so keeping the token off that type means it *cannot* reach storage —
+  a structural guarantee rather than a discipline someone must remember at each
+  save site.
 - **Transport comparisons go through `tx.is_dc_api()`, never `== "dc_api"`.**
   There are two DC API transports — `dc_api` (unsigned) and `dc_api_signed`
   (signed) — and OpenID4VP L2543/L2963 give them the *same* response binding:

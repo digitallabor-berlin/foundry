@@ -467,6 +467,18 @@ verifier:
   # superseded draft's audience unconditionally would make every deployment
   # deviate from L2543 silently.
   # dc_api_accept_legacy_web_origin_audience: true
+  #
+  # Deliver verification events to an operator-owned endpoint. Absent (the
+  # default) means no sink is constructed and nothing changes.
+  # `include_raw_artifacts` is a SECOND gate, off by default: it authorises the
+  # verbatim Request Object and the decrypted vp_token -- holder PII in the
+  # clear -- to leave this process. Foundry stores none of it.
+  # The url must be https, unless its host is a loopback address.
+  # webhook:
+  #   url: https://audit.example.com/vp-callback
+  #   secret_env: FOUNDRY_WEBHOOK_SECRET
+  #   timeout_secs: 5
+  #   include_raw_artifacts: false
   named_queries:
     # `credentials` must be non-empty (OpenID4VP 1.0 §6, enforced when a
     # verification request is created). The shipped `pid` type has no

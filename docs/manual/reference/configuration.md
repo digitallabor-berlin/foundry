@@ -55,6 +55,11 @@ Entries under `credential_types:`. Each defines one Credential Configuration.
 | --- | --- |
 | `verifier.dc_api_expected_origins` | [DC API Expected Origins](../verification/dc-api-origins.md) |
 | `verifier.dc_api_accept_legacy_web_origin_audience` | [Admin Test Console](../operating/test-console.md) |
+| `verifier.webhook.url` | [Request Diagnostics](../verification/request-diagnostics.md) |
+| `verifier.webhook.secret` | [Request Diagnostics](../verification/request-diagnostics.md) |
+| `verifier.webhook.secret_env` | [Request Diagnostics](../verification/request-diagnostics.md) |
+| `verifier.webhook.timeout_secs` | [Request Diagnostics](../verification/request-diagnostics.md) |
+| `verifier.webhook.include_raw_artifacts` | [Request Diagnostics](../verification/request-diagnostics.md) |
 
 ## Logging
 

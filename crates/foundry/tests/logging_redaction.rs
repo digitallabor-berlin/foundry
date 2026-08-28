@@ -2122,3 +2122,200 @@ async fn the_encrypted_pre_authorized_code_envelope_is_never_logged() {
          assertion above proves nothing"
     );
 }
+
+// ---- verification event webhook (root AGENTS.md §4.5) --------------------
+
+/// Planted into the encrypted response so it reaches the webhook event's
+/// `vp_token` member and nowhere else. Deliberately unlike any word that could
+/// appear in a log message by coincidence.
+const PLANTED_VP_TOKEN: &str = "Zzyzx-Planted-Vp-Token-Value-4417";
+
+/// The HMAC key configured below. Must never be logged, at any level, in any
+/// mode.
+const WEBHOOK_SECRET: &str = "Zzyzx-Webhook-Secret-6620";
+
+/// `setup()` plus a configured `verifier.webhook` and an always-failing sink.
+///
+/// The sink fails on purpose: a delivery that succeeds logs at `debug`, but a
+/// failure logs at `warn` with `error.kind`/`error.detail`, which is the record
+/// with the most fields and therefore the most opportunity to leak.
+async fn setup_with_failing_webhook() -> (AppState, tempfile::TempDir) {
+    let (state, dir) = setup().await;
+    let mut cfg = (*state.config).clone();
+    cfg.verifier.webhook = Some(foundry_core::config::WebhookConfig {
+        url: "https://audit.example.test/hook".to_string(),
+        secret: Some(WEBHOOK_SECRET.to_string()),
+        secret_env: None,
+        timeout_secs: 5,
+        include_raw_artifacts: true,
+    });
+    let state = AppState::new(state.storage.clone(), Arc::new(cfg))
+        .with_webhook_sink(Arc::new(support::FailingSink));
+    (state, dir)
+}
+
+/// Drive a verification whose JWE **decrypts** and then fails, so that
+/// `captured_vp_token` is populated and travels in the event.
+///
+/// `drive_verification` above submits junk, which fails at decryption — before
+/// the `vp_token` is extracted — so it could never carry a planted value into
+/// the event body. Here the response really is encrypted to the transaction's
+/// ephemeral key; it simply carries a string where an SD-JWT VC belongs, so
+/// verification fails at the format check with the token already captured
+/// (design D3).
+async fn drive_verification_with_planted_vp_token(state: &AppState) -> StatusCode {
+    let admin = admin_router(state.clone(), AdminApiKey(Some(ADMIN_KEY.into())));
+    let create_res = admin
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/admin/verification/requests")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {ADMIN_KEY}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "dcql_query": {
+                            "credentials": [{
+                                "id": "q1",
+                                "format": "dc+sd-jwt",
+                                "meta": { "vct_values": [format!("{ISSUER}/vct/pid")] }
+                            }]
+                        },
+                        "transport": "request_uri"
+                    })
+                    .to_string(),
+                ))
+                .expect("create verification request"),
+        )
+        .await
+        .expect("create verification response");
+    assert_eq!(create_res.status(), StatusCode::OK);
+    let id = body_json(create_res).await["verification_id"]
+        .as_str()
+        .expect("verification_id")
+        .to_string();
+
+    let get_res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/vp/request/{id}"))
+                .body(Body::empty())
+                .expect("request object request"),
+        )
+        .await
+        .expect("request object response");
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let jws_bytes = axum::body::to_bytes(get_res.into_body(), usize::MAX)
+        .await
+        .expect("jws body");
+    let jws_str = String::from_utf8(jws_bytes.to_vec()).expect("jws utf8");
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(jws_str.split('.').nth(1).expect("jws payload segment"))
+        .expect("jws payload b64");
+    let request_object: serde_json::Value =
+        serde_json::from_slice(&payload_bytes).expect("request object json");
+    let ephem_public_jwk = request_object["client_metadata"]["jwks"]["keys"][0].clone();
+
+    let jwe = foundry_core::crypto::jwe::encrypt_compact(
+        &serde_json::json!({ "vp_token": { "q1": [PLANTED_VP_TOKEN] } }),
+        &ephem_public_jwk,
+        "ECDH-ES",
+        "A128GCM",
+    )
+    .expect("encrypt planted response");
+
+    let res = wallet_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/vp/response/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("response={jwe}")))
+                .expect("vp response request"),
+        )
+        .await
+        .expect("vp response");
+    res.status()
+}
+
+/// §4.5: the webhook secret and the computed signature are never logged — and
+/// this runs at the **most permissive** setting there is (`TRACE` with
+/// sensitive payloads unlocked), so a pass means they are unreachable rather
+/// than merely gated.
+#[tokio::test]
+async fn webhook_delivery_never_logs_the_secret_or_the_signature() {
+    let _flag = lock_flag().await;
+
+    let (state, _dir) = setup_with_failing_webhook().await;
+
+    foundry_core::obs::set_sensitive(true);
+    let (guard, log) = capture_at_trace();
+    let _ = drive_verification_with_planted_vp_token(&state).await;
+    drop(guard);
+    // Restore immediately: this flag is process-global.
+    foundry_core::obs::set_sensitive(false);
+
+    // Positive control FIRST: without it, the negative assertions below pass
+    // vacuously on a capture that never saw a delivery attempt.
+    assert!(
+        log.contains_value("webhook delivery failed"),
+        "positive control: the delivery record must be present, else the \
+         negative assertions below prove nothing"
+    );
+
+    // Second control, for the sibling test below: with sensitive payloads on,
+    // `verify_vp_response`'s own `decrypted_response` diagnostic reproduces the
+    // planted value. Seeing it here proves the string really does flow through
+    // this request, so its ABSENCE in the sensitive-off sibling is a fact about
+    // the dispatch site rather than about a probe that was never present.
+    assert!(
+        log.contains_value(PLANTED_VP_TOKEN),
+        "control: the planted vp_token must be reachable at all, else the \
+         sibling test's absence assertion proves nothing"
+    );
+
+    assert!(
+        !log.contains_value(WEBHOOK_SECRET),
+        "the webhook secret must never be logged"
+    );
+    assert!(
+        !log.contains_value("sha256="),
+        "the computed signature must never be logged"
+    );
+}
+
+/// §4.5: the event body is the payload this feature exists to move, and it
+/// carries holder PII. `dispatch_webhook` must log none of it.
+///
+/// Sensitive payloads stay **off** here, unlike the test above. That is not a
+/// weaker assertion but a different one: with them on, `verify_vp_response`'s
+/// own `decrypted_response` trace diagnostic legitimately reproduces the
+/// planted value, and the probe would report that gated, pre-existing,
+/// separately-tested emission rather than a leak from the dispatch site under
+/// test. Off, the dispatcher is the only thing that has the value at all.
+#[tokio::test]
+async fn webhook_delivery_never_logs_the_event_body() {
+    let _flag = lock_flag().await;
+    foundry_core::obs::set_sensitive(false);
+
+    let (state, _dir) = setup_with_failing_webhook().await;
+
+    let (guard, log) = capture_at_trace();
+    let status = drive_verification_with_planted_vp_token(&state).await;
+    drop(guard);
+
+    // The presentation decrypts and then fails the format check, so the
+    // `vp_token` really was captured and really did travel in the event.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        log.contains_value("webhook delivery failed"),
+        "positive control: the delivery record must be present, else the \
+         negative assertion below proves nothing"
+    );
+
+    assert!(
+        !log.contains_value(PLANTED_VP_TOKEN),
+        "the event body's vp_token must never be logged"
+    );
+}
