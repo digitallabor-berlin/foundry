@@ -1733,10 +1733,65 @@ async fn submit_vp_response(
         );
     }
 
+    // Both arms: a failed verification is the case this feed exists for, and
+    // `verify_vp_response` populates `tx.result` on its error path too.
+    // `tx.state` is `Copy`, so no clone is needed.
+    if let Some(result) = tx.result.clone() {
+        dispatch_webhook(
+            state,
+            foundry_verifier::WebhookEvent::VerificationCompleted {
+                tx_id: tx.id.clone(),
+                state: tx.state,
+                result,
+                vp_token: captured_vp_token.take(),
+            },
+        );
+    }
+
     match verify_res {
         Ok(result) => Ok(Json(result)),
         Err(e) => Err(verifier_wallet_error_response(&e, surface)),
     }
+}
+
+/// Fire-and-forget delivery of one verification event.
+///
+/// Deliberately **not** awaited. Root AGENTS.md §4.3 classifies an HTTP
+/// outcome by what the protocol did — structural fault 400, policy verdict
+/// 200, status-fetch outage 502 — and "the operator's audit sink was down" is
+/// none of those. Awaiting would let a slow endpoint add latency to a wallet's
+/// request and a dead one change its status code, so delivery is best-effort
+/// and at-most-once (design D2).
+fn dispatch_webhook(state: &AppState, event: foundry_verifier::WebhookEvent) {
+    let Some(sink) = state.webhook_sink.clone() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let event_type = event.event_type();
+        let tx_id = event.tx_id().to_string();
+        let latency_ms = || started.elapsed().as_millis() as u64;
+
+        // The event body is never logged: it is the payload this feature
+        // exists to move, and carries holder PII (root AGENTS.md §4.5).
+        match sink.deliver(&event).await {
+            Ok(status) => tracing::debug!(
+                event = event_type,
+                tx_id = %tx_id,
+                http.status = status,
+                latency_ms = latency_ms(),
+                "webhook delivered"
+            ),
+            Err(e) => tracing::warn!(
+                event = event_type,
+                tx_id = %tx_id,
+                latency_ms = latency_ms(),
+                error.kind = e.kind(),
+                error.detail = %foundry_core::obs::truncate(&e.to_string(), DETAIL_MAX),
+                "webhook delivery failed"
+            ),
+        }
+    });
 }
 
 /// The OpenID4VP `direct_post.jwt` authorization response body.
