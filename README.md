@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/foundry_logo.png" />
+</p>
+
 # Foundry
 
 **Foundry** is a modular, high-performance Digital Credential Issuing & Verification Service written in Rust. It implements standards including OpenID for Verifiable Credential Issuance (OpenID4VCI), OpenID for Verifiable Presentations (OpenID4VP), W3C SD-JWT VC (`dc+sd-jwt`), ISO/IEC 18013-5 mdoc, and IETF Token Status Lists.
