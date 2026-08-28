@@ -1684,9 +1684,18 @@ async fn submit_vp_response(
         Ok(r) => r,
         Err(e) => return Err(verifier_wallet_error_response(&e, surface)),
     };
-    let verify_res =
-        foundry_verifier::verify_vp_response(&state.config, &mut tx, encrypted_jwe_str, &resolver)
-            .await;
+    // Populated at `vp_token` extraction when
+    // `verifier.webhook.include_raw_artifacts` is set, so it survives a failed
+    // verification (design D3). Consumed by the webhook dispatch below.
+    let mut captured_vp_token: Option<serde_json::Value> = None;
+    let verify_res = foundry_verifier::verify_vp_response(
+        &state.config,
+        &mut tx,
+        encrypted_jwe_str,
+        &resolver,
+        &mut captured_vp_token,
+    )
+    .await;
 
     // Losing this write is its own defect: it makes the admin API and the console
     // disagree with what actually happened. It must not change the response the

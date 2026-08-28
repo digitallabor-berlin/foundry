@@ -221,6 +221,15 @@ pub async fn verify_vp_response(
     tx: &mut VerificationTransaction,
     encrypted_jwe_str: &str,
     resolver: &dyn StatusListResolver,
+    // Receives the decrypted `vp_token` when `verifier.webhook.include_raw_artifacts`
+    // is set -- populated at extraction, so it survives every later failure.
+    //
+    // An out-param rather than a field on `VerificationTransaction`: the
+    // transaction is serialized wholesale into storage, so keeping the token
+    // off that type means it *cannot* reach storage -- a structural guarantee
+    // rather than a discipline someone must remember at each save site
+    // (design D8).
+    captured_vp_token: &mut Option<serde_json::Value>,
 ) -> Result<VerificationResult, VerificationError> {
     tracing::info!("verifying vp response");
 
@@ -233,7 +242,7 @@ pub async fn verify_vp_response(
         );
     }
 
-    match do_verify_vp_response(config, tx, encrypted_jwe_str, resolver).await {
+    match do_verify_vp_response(config, tx, encrypted_jwe_str, resolver, captured_vp_token).await {
         Ok(outcome) => {
             let VerifyOutcome { result, deferred } = outcome;
 
@@ -1283,6 +1292,7 @@ async fn do_verify_vp_response(
     tx: &VerificationTransaction,
     encrypted_jwe_str: &str,
     resolver: &dyn StatusListResolver,
+    captured_vp_token: &mut Option<serde_json::Value>,
 ) -> Result<VerifyOutcome, VerificationError> {
     // 1. JWE Decryption
     let jwk_str = serde_json::to_string(&tx.ephem_private_jwk)
@@ -1318,6 +1328,18 @@ async fn do_verify_vp_response(
     let vp_token = response_json.get("vp_token").ok_or_else(|| {
         VerificationError::Failed("missing vp_token in response payload".to_string())
     })?;
+
+    // Captured BEFORE any check runs, so a structural failure later still
+    // yields the bytes the receiver needs to diagnose it (design D3/§4.5).
+    // Gated so an unconfigured deployment does not even clone the value.
+    if config
+        .verifier
+        .webhook
+        .as_ref()
+        .is_some_and(|w| w.include_raw_artifacts)
+    {
+        *captured_vp_token = Some(vp_token.clone());
+    }
 
     let trust_store = TrustStore::from_config(&config.trust_anchors)?;
 
@@ -1734,7 +1756,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -1812,7 +1834,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -1899,7 +1921,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -1984,7 +2006,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -2063,7 +2085,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -2141,7 +2163,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -2205,7 +2227,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -2350,7 +2372,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -2456,7 +2478,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -2482,7 +2504,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
@@ -2499,9 +2521,15 @@ mod tests {
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver)
-            .await
-            .unwrap_err();
+        let err = verify_vp_response(
+            &config,
+            &mut tx,
+            "not.a.valid.jwe.token",
+            &resolver,
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, VerificationError::Decryption(_)));
         assert_eq!(tx.state, VerificationState::Failed);
 
@@ -2543,7 +2571,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let _ = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let _ = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
 
@@ -2586,7 +2614,7 @@ mod tests {
         // must be bounded.
         let junk = "j".repeat(DETAIL_MAX * 8);
         let resolver = MockResolver { token: None };
-        let _ = verify_vp_response(&config, &mut tx, &junk, &resolver)
+        let _ = verify_vp_response(&config, &mut tx, &junk, &resolver, &mut None)
             .await
             .unwrap_err();
 
@@ -2609,9 +2637,15 @@ mod tests {
         let (mut tx, _ephem_pub_jwk) = sample_tx();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, "not.a.valid.jwe.token", &resolver)
-            .await
-            .unwrap_err();
+        let err = verify_vp_response(
+            &config,
+            &mut tx,
+            "not.a.valid.jwe.token",
+            &resolver,
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, VerificationError::Decryption(_)));
         assert_eq!(tx.state, VerificationState::Failed);
     }
@@ -2662,7 +2696,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(matches!(err, VerificationError::Failed(_)));
@@ -2727,7 +2761,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(!res.verified, "DCQL vct mismatch must not verify");
@@ -2739,6 +2773,114 @@ mod tests {
             res.all_checks()
                 .any(|c| c.check == "sd_jwt_vc_signature_and_kb_jwt" && c.passed)
         );
+    }
+
+    /// A verification that decrypts cleanly and then fails a **policy** check
+    /// (a `vct` the DCQL query did not ask for), lifted from
+    /// `test_verify_vp_response_dcql_vct_mismatch_is_not_verified` above.
+    ///
+    /// A policy verdict rather than a structural 400 is the right shape for
+    /// exercising design D3: a structural failure aborts before the `vp_token`
+    /// is even extracted, so it could not show that capture survives a later
+    /// failure. The `TempDir` is returned because it owns the trust-anchor
+    /// directory `config` points at -- dropping it would break the run.
+    async fn failing_verification_fixture() -> (
+        Config,
+        VerificationTransaction,
+        String,
+        MockResolver,
+        tempfile::TempDir,
+    ) {
+        let (root_pem, leaf_cert, leaf_key) = test_pki();
+        let ca_str = String::from_utf8(root_pem).unwrap();
+        let (config, trust_dir) = test_config(&ca_str);
+
+        let issuer_signer = FileSigner::from_pem(&leaf_key, SignatureAlgorithm::Es256).unwrap();
+        let (holder_signer, holder_pub) = holder();
+        let (mut tx, _ephem_pub_jwk) = sample_tx();
+
+        // Require a vct the credential will NOT have.
+        tx.dcql_query = serde_json::json!({
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": ["https://localhost:8443/vct/OTHER"] }
+            }]
+        });
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut select = serde_json::Map::new();
+        select.insert("given_name".to_string(), serde_json::json!("Alice"));
+
+        let claims = IssuerClaims {
+            iss: "localhost".to_string(),
+            sub: None,
+            iat: (now - 100) as i64,
+            exp: (now + 3600) as i64,
+            vct: "https://localhost:8443/vct/pid".to_string(),
+            cnf_jwk: holder_pub,
+            status_list_index: None,
+            status_list_uri: None,
+            always_disclosed: serde_json::Map::new(),
+            selectively_disclosable: select,
+        };
+        let issuer_pres =
+            build_sd_jwt_vc(claims, &issuer_signer, Some(vec![der_b64(&leaf_cert)])).unwrap();
+        let presentation = attach_kb_jwt(
+            issuer_pres,
+            &holder_signer,
+            &expected_client_id(&config),
+            &tx.nonce,
+            None,
+        )
+        .unwrap();
+
+        let jwe_str = encrypt_compact(
+            &serde_json::json!({ "vp_token": { "c1": [presentation] } }),
+            &tx.ephem_public_jwk,
+            "ECDH-ES",
+            "A128GCM",
+        )
+        .unwrap();
+
+        (config, tx, jwe_str, MockResolver { token: None }, trust_dir)
+    }
+
+    /// The case the feed exists for: a verification that FAILED still yields
+    /// the token, because it is captured at extraction before any check runs
+    /// (design D3/§4.5).
+    #[tokio::test]
+    async fn vp_token_is_captured_even_when_verification_fails() {
+        let (mut config, mut tx, jwe, resolver, _trust_dir) = failing_verification_fixture().await;
+
+        config.verifier.webhook = Some(foundry_core::config::WebhookConfig {
+            url: "https://audit.example.com/hook".to_string(),
+            secret: None,
+            secret_env: None,
+            timeout_secs: 5,
+            include_raw_artifacts: true,
+        });
+
+        let mut captured = None;
+        let _ = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut captured).await;
+
+        assert_eq!(tx.state, VerificationState::Failed, "precondition");
+        let token = captured.expect("vp_token must survive a failed verification");
+        assert!(token.is_object(), "vp_token is an object keyed by query id");
+    }
+
+    /// Off by default: no webhook configured means nothing is even cloned.
+    #[tokio::test]
+    async fn vp_token_is_not_captured_when_no_webhook_is_configured() {
+        let (config, mut tx, jwe, resolver, _trust_dir) = failing_verification_fixture().await;
+
+        let mut captured = None;
+        let _ = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut captured).await;
+
+        assert!(captured.is_none());
     }
 
     /// VP-0175, VP-0177, VP-0179, VP-0180 -- OpenID4VP 1.0 Security /
@@ -2805,9 +2947,15 @@ mod tests {
         )
         .unwrap();
         let resolver = MockResolver { token: None };
-        let ok = verify_vp_response(&config, &mut tx1_for_check, &jwe_for_tx1, &resolver)
-            .await
-            .unwrap();
+        let ok = verify_vp_response(
+            &config,
+            &mut tx1_for_check,
+            &jwe_for_tx1,
+            &resolver,
+            &mut None,
+        )
+        .await
+        .unwrap();
         assert!(
             ok.verified,
             "sanity check: the presentation must verify against its own transaction"
@@ -2830,7 +2978,7 @@ mod tests {
             "A128GCM",
         )
         .unwrap();
-        let err = verify_vp_response(&config, &mut tx2, &jwe_for_tx2, &resolver)
+        let err = verify_vp_response(&config, &mut tx2, &jwe_for_tx2, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -2897,7 +3045,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None }; // errors on fetch
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -2989,7 +3137,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -3155,7 +3303,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver).await;
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None).await;
         (res, tx)
     }
 
@@ -3318,7 +3466,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -3366,7 +3514,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -3456,7 +3604,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -3589,7 +3737,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .expect_err("an unanchored issuer chain is a structural failure (§4.3 -> 400)");
 
@@ -3813,7 +3961,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .expect_err("both credentials failed, in different ways");
 
@@ -3937,7 +4085,7 @@ mod tests {
         foundry_core::obs::set_sensitive(false);
         let resolver = MockResolver { token: None };
         let guard = tracing::subscriber::set_default(subscriber);
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver).await;
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None).await;
         drop(guard);
 
         assert!(res.expect("both credentials are valid").verified);
@@ -4022,7 +4170,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -4064,7 +4212,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe, &resolver, &mut None)
             .await
             .expect("a subset is a policy verdict, not a structural error");
 
@@ -4271,9 +4419,15 @@ mod tests {
         )
         .unwrap();
 
-        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
-            .await
-            .expect_err("an unreachable status list is a network fault, so HTTP 502");
+        let err = verify_vp_response(
+            &config,
+            &mut tx,
+            &jwe,
+            &MockResolver { token: None },
+            &mut None,
+        )
+        .await
+        .expect_err("an unreachable status list is a network fault, so HTTP 502");
 
         assert!(
             matches!(err, VerificationError::StatusUnavailable(_)),
@@ -4629,7 +4783,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -4701,7 +4855,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
 
@@ -4742,9 +4896,15 @@ mod tests {
             now_secs(),
         );
 
-        let res = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
-            .await
-            .unwrap();
+        let res = verify_vp_response(
+            &config,
+            &mut tx,
+            &jwe,
+            &MockResolver { token: None },
+            &mut None,
+        )
+        .await
+        .unwrap();
         assert!(
             res.verified,
             "a signed DC API mdoc presentation must be bound by OpenID4VPDCAPIHandover; checks={:?}",
@@ -4811,7 +4971,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -4880,7 +5040,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -4945,7 +5105,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -5009,7 +5169,7 @@ mod tests {
         .unwrap();
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -5102,7 +5262,7 @@ mod tests {
         );
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -5131,7 +5291,7 @@ mod tests {
         );
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -5161,7 +5321,7 @@ mod tests {
         );
 
         let resolver = MockResolver { token: None };
-        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let err = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap_err();
         assert!(
@@ -5190,7 +5350,7 @@ mod tests {
         );
 
         let resolver = MockResolver { token: None };
-        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver)
+        let res = verify_vp_response(&config, &mut tx, &jwe_str, &resolver, &mut None)
             .await
             .unwrap();
         assert!(
@@ -5356,9 +5516,15 @@ mod tests {
             now_secs(),
         );
 
-        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
-            .await
-            .unwrap_err();
+        let err = verify_vp_response(
+            &config,
+            &mut tx,
+            &jwe,
+            &MockResolver { token: None },
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:?}").contains("mdoc verification failed"),
             "a DeviceAuth over the pre-fix ad-hoc transcript must no longer verify, got: {err:?}"
@@ -5400,9 +5566,15 @@ mod tests {
             now_secs(),
         );
 
-        let res = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
-            .await
-            .unwrap();
+        let res = verify_vp_response(
+            &config,
+            &mut tx,
+            &jwe,
+            &MockResolver { token: None },
+            &mut None,
+        )
+        .await
+        .unwrap();
         assert!(res.verified, "checks={:?}", res.checks);
     }
 
@@ -5435,9 +5607,15 @@ mod tests {
             now_secs(),
         );
 
-        let err = verify_vp_response(&config, &mut tx, &jwe, &MockResolver { token: None })
-            .await
-            .unwrap_err();
+        let err = verify_vp_response(
+            &config,
+            &mut tx,
+            &jwe,
+            &MockResolver { token: None },
+            &mut None,
+        )
+        .await
+        .unwrap_err();
         assert!(
             format!("{err:?}").contains("mdoc verification failed"),
             "an Origin matching no configured candidate must be rejected, got: {err:?}"
@@ -5481,12 +5659,15 @@ mod tests {
                 now_secs(),
             );
             let mut tx_ok = tx.clone();
-            let res =
-                verify_vp_response(&config, &mut tx_ok, &ok_jwe, &MockResolver { token: None })
-                    .await
-                    .unwrap_or_else(|e| {
-                        panic!("{response_mode}: correct transcript must verify: {e:?}")
-                    });
+            let res = verify_vp_response(
+                &config,
+                &mut tx_ok,
+                &ok_jwe,
+                &MockResolver { token: None },
+                &mut None,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{response_mode}: correct transcript must verify: {e:?}"));
             assert!(res.verified, "{response_mode}: checks={:?}", res.checks);
 
             let bad_jwe = mdoc_presentation_jwe(
@@ -5502,6 +5683,7 @@ mod tests {
                 &mut tx_bad,
                 &bad_jwe,
                 &MockResolver { token: None },
+                &mut None,
             )
             .await
             .unwrap_err();
