@@ -123,6 +123,36 @@ A zero-code workaround exists — set `issuer.status_list.signing_key:
 issuer_sdjwt` — but it merely inverts the coupling: the issuance key would then
 sign Status List Tokens. One field cannot express two roles. Rejected.
 
+> **Amended 2026-08-28, later the same day: this rejection does not hold, and the
+> coupling it rejected is now the recommended configuration.**
+>
+> The reasoning above is sound on key hygiene and wrong on interop, because it
+> was written without knowing how wallets resolve a Status List Token's
+> verification key. They do not resolve it from the token. The Credo / `@sd-jwt`
+> stack verifies a Status List Token with the **credential issuer's** key and
+> never decodes the token's own `x5c`, so the moment the two keys differ, every
+> credential carrying a `status` claim fails status validation in every wallet
+> built on it — Paradym included.
+>
+> "Out of scope" below states that "the code change alone re-keys nothing." True
+> of the code; not true of the operator action it enabled. Setting
+> `issuer.credential_signing_key: issuer_sdjwt` in `dl-infra-k8s` re-keyed
+> credentials while Status List Tokens stayed on `statuslist_signer`, and **broke
+> Paradym issuance**. Before this field existed, `statuslist_signer` signed both
+> — the accidental coupling this design set out to remove was also what made
+> status checks work.
+>
+> The two goals are in direct conflict and interop wins: one key must sign both
+> roles until Credo ships its `statusVerifier` path *and* wallets configure a
+> dedicated trusted status certificate. What this design got right is that the
+> coupling must be **explicit and honestly named** — naming `issuer_sdjwt` in
+> both fields says out loud what the implicit fallback did silently under a
+> misleading name.
+>
+> `Config::validate()` now warns when the two diverge (advisory, never a
+> rejection — §13.5 permits a separate Status Issuer). Record:
+> [`../changes/2026-08-28-status-list-signer-interop.md`](../changes/2026-08-28-status-list-signer-interop.md).
+
 ## Constraints on the implementation
 
 1. **One resolver, no second answer.** `credential.rs`, `metadata.rs`,

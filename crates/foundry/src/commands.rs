@@ -299,7 +299,16 @@ issuer:
   key_attestation: { mode: optional }
   status_list:
     enabled: true
-    signing_key: statuslist_signer
+    # Deliberately the SAME key as credential_signing_key above, not the
+    # generated `statuslist_signer`. draft-ietf-oauth-status-list-14 §11.3/§13.5
+    # permit a separate Status Issuer key, and foundry's token carries it in the
+    # token's own x5c per HAIP L327 -- but the Credo/@sd-jwt wallet stack
+    # verifies a Status List Token with the CREDENTIAL ISSUER's key and ignores
+    # that x5c, so a divergent signer makes every credential with a `status`
+    # claim fail status validation in wallets built on it (e.g. Paradym).
+    # `Config::validate` warns when these two differ. The statuslist_signer key
+    # is still generated, for a deployment that can diverge; it is unused here.
+    signing_key: issuer_sdjwt
     list_size: 1048576
     public_base_url: https://localhost:8443/statuslists
   # OpenID4VCI Credential Request / Response encryption on top of TLS

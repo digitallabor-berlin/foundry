@@ -146,6 +146,22 @@ cargo nextest run -p foundry-core                                 # narrow, whil
   or conformance row VCI-0234 (advertised algorithm equals signing algorithm)
   silently reopens. Design record:
   `docs/superpowers/specs/2026-08-28-explicit-credential-signing-key-design.md`.
+- **A Status List Token signed by a key other than the credential signing key is
+  spec-legal and wallet-fatal.** `draft-ietf-oauth-status-list-14` §11.3 mandates
+  no key-resolution method and §13.5 permits a wholly separate Status Issuer, and
+  foundry's token is conformant either way — HAIP L327's required `x5c` is
+  present, anchor-free and CA-signed. But the Credo / `@sd-jwt` wallet stack
+  verifies the Status List Token with the **credential issuer's** key and never
+  decodes the token's own `x5c` (`SDJwtVcInstance.verifyStatus()` falls through
+  to `userConfig.verifier`), so a divergent signer makes every credential with a
+  `status` claim fail status validation there — surfacing as
+  `SLException: … Verify Error: Invalid JWT Signature`, which blames the token
+  rather than the key wiring. `Config::validate` therefore **warns and does not
+  reject** via `status_list_signer_divergence()`; keep it a warning, since a
+  separate Status Issuer is legitimate. It compares resolved key *material*, not
+  config labels, so two `keys:` names for one PEM stay silent. Diagnosed
+  2026-08-28 against `foundry.digitallabor.dev` with the Paradym wallet; record:
+  `docs/superpowers/changes/2026-08-28-status-list-signer-interop.md`.
 - **`CredentialType` and `ClaimDef` use the `Option` + resolver pattern.**
   `resolved_scope()`, `resolved_validity_seconds()` (default `31_536_000`) and
   `ClaimDef::is_required()` (default `!selectively_disclosable`) all exist so an

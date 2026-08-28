@@ -7,6 +7,50 @@ use std::path::Path;
 use std::str::FromStr;
 
 impl Config {
+    /// Warn-level diagnostic: the Status List Token signer is not the key that
+    /// signs credentials. `None` means nothing to report.
+    ///
+    /// draft-ietf-oauth-status-list-14 §11.3 mandates no key-resolution method
+    /// at all, and §13.5 explicitly permits a wholly separate Status Issuer, so
+    /// this configuration is legal and must **never** be a rejection. It is
+    /// nonetheless almost always a deployment mistake: the Credo / `@sd-jwt`
+    /// wallet stack verifies a Status List Token with the *credential issuer's*
+    /// key and never decodes the token's own `x5c`, so a divergent signer makes
+    /// every credential carrying a `status` claim fail status validation there.
+    /// Diagnosed 2026-08-28 against the `foundry.digitallabor.dev` deployment
+    /// with the Paradym wallet.
+    ///
+    /// Compares resolved key *material*, not config labels — two `keys:` entries
+    /// naming one PEM are confusing but interoperable. Path comparison is
+    /// textual, so two spellings of one path (`./k.pem` vs `k.pem`) still warn:
+    /// a false positive on an advisory line, preferred over missing the real
+    /// case.
+    fn status_list_signer_divergence(&self) -> Option<String> {
+        if !self.issuer.status_list.enabled {
+            return None;
+        }
+        // Unset while enabled is a *different* defect, surfaced by the
+        // `/statuslists/:id` route at request time. Not this warning's business.
+        let sl_name = self.issuer.status_list.signing_key.as_deref()?;
+        // The single resolver — never a second lookup. See the design note on
+        // `Config::credential_signing_key`.
+        let (cred_name, cred_entry) = self.credential_signing_key()?;
+        let sl_entry = self.keys.get(sl_name)?;
+        if sl_name == cred_name || sl_entry.private_key == cred_entry.private_key {
+            return None;
+        }
+        Some(format!(
+            "issuer.status_list.signing_key '{sl_name}' is not the credential signing key \
+             '{cred_name}', so Status List Tokens are signed by a different key than the \
+             credentials that reference them. This is permitted \
+             (draft-ietf-oauth-status-list-14 §11.3, §13.5), but the Credo/@sd-jwt wallet \
+             stack verifies a Status List Token with the credential issuer's key and \
+             ignores the token's own x5c, so wallets built on it will reject every \
+             credential carrying a `status` claim. Point both fields at one key unless you \
+             are deliberately operating a separate Status Issuer"
+        ))
+    }
+
     pub fn validate(&self) -> Result<(), ConfigError> {
         // Every verifier.signing_key must resolve into keys.
         if !self.keys.contains_key(&self.verifier.signing_key) {
@@ -34,6 +78,11 @@ impl Config {
             return Err(ConfigError::Validation(format!(
                 "issuer.credential_signing_key references unknown key '{sk}'"
             )));
+        }
+        // Permitted by the status-list draft, but a wallet-interop trap — so
+        // permitted and never silent. See `status_list_signer_divergence`.
+        if let Some(warning) = self.status_list_signer_divergence() {
+            tracing::warn!("{warning}");
         }
         // Credential types: supported formats + required identifier per format.
         for ct in &self.credential_types {
@@ -1841,6 +1890,107 @@ mod tests {
         let (mut cfg, _dir) = cfg_with_signing_key();
         cfg.credential_types = vec![sd_jwt_type(vec![], Some(43_200))];
         cfg.validate().expect("a 12-hour lifetime is valid");
+    }
+
+    // ---- status-list signer divergence (draft-ietf-oauth-status-list-14 §11.3)
+    //
+    // A Status List Token signed by a key other than the credential signing key
+    // is spec-legal but unverifiable in the Credo / `@sd-jwt` wallet stack. The
+    // warning is advisory, so these tests assert the *predicate*, not log output
+    // -- a tracing subscriber in a unit test would be testing tracing, not this.
+
+    /// Two named keys with distinct PEMs, both resolvable; status lists on.
+    fn cfg_with_two_signers(
+        credential_signing_key: Option<&str>,
+        status_list_signing_key: Option<&str>,
+        status_list_enabled: bool,
+    ) -> Config {
+        let mut cfg = config_passing_keyref_check();
+        cfg.keys.insert(
+            "issuer_sdjwt".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "issuer_sdjwt.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg.keys.insert(
+            "statuslist_signer".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "statuslist_signer.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg.issuer.credential_signing_key = credential_signing_key.map(str::to_string);
+        cfg.issuer.status_list.enabled = status_list_enabled;
+        cfg.issuer.status_list.signing_key = status_list_signing_key.map(str::to_string);
+        cfg
+    }
+
+    #[test]
+    fn status_list_signer_divergence_reported_when_signer_differs() {
+        let cfg = cfg_with_two_signers(Some("issuer_sdjwt"), Some("statuslist_signer"), true);
+        let warning = cfg
+            .status_list_signer_divergence()
+            .expect("a status-list signer that is not the credential signer must be reported");
+        assert!(
+            warning.contains("statuslist_signer") && warning.contains("issuer_sdjwt"),
+            "warning must name both keys so it is actionable, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn status_list_signer_divergence_is_a_warning_not_a_rejection() {
+        // draft-ietf-oauth-status-list-14 §13.5 permits a separate Status Issuer,
+        // so this configuration must still boot.
+        cfg_with_two_signers(Some("issuer_sdjwt"), Some("statuslist_signer"), true)
+            .validate()
+            .expect("a divergent status-list signer must not fail startup");
+    }
+
+    #[test]
+    fn status_list_signer_divergence_silent_when_one_key_signs_both() {
+        let cfg = cfg_with_two_signers(Some("issuer_sdjwt"), Some("issuer_sdjwt"), true);
+        assert!(
+            cfg.status_list_signer_divergence().is_none(),
+            "one key naming both roles is the interoperable case"
+        );
+    }
+
+    #[test]
+    fn status_list_signer_divergence_silent_when_two_names_share_one_pem() {
+        // A wallet verifies with a *key*, not a config label. Two names for one
+        // PEM is confusing config but not an interop failure, so it must not warn.
+        let mut cfg = cfg_with_two_signers(Some("issuer_sdjwt"), Some("statuslist_signer"), true);
+        cfg.keys
+            .get_mut("statuslist_signer")
+            .expect("fixture inserts it")
+            .private_key = "issuer_sdjwt.pem".to_string();
+        assert!(
+            cfg.status_list_signer_divergence().is_none(),
+            "two labels for the same private key must not warn"
+        );
+    }
+
+    #[test]
+    fn status_list_signer_divergence_silent_when_status_lists_disabled() {
+        let cfg = cfg_with_two_signers(Some("issuer_sdjwt"), Some("statuslist_signer"), false);
+        assert!(
+            cfg.status_list_signer_divergence().is_none(),
+            "no Status List Token is ever served, so there is nothing to warn about"
+        );
+    }
+
+    #[test]
+    fn status_list_signer_divergence_silent_when_status_list_names_no_key() {
+        // Enabled with no signing_key is a different defect: the route fails at
+        // request time. Not this warning's business.
+        let cfg = cfg_with_two_signers(Some("issuer_sdjwt"), None, true);
+        assert!(
+            cfg.status_list_signer_divergence().is_none(),
+            "an unset status_list.signing_key is a separate misconfiguration"
+        );
     }
 
     /// An empty claims path pointer addresses nothing, so no supplied value can
