@@ -132,6 +132,7 @@ async fn setup() -> (AppState, tempfile::TempDir) {
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: ISSUER.to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
@@ -1405,6 +1406,7 @@ async fn setup_with_required_attestation() -> (
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: ISSUER.to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Required,
                 trusted_anchors: vec![TrustAnchor {

@@ -152,6 +152,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir, String, String) {
         }],
         issuer: IssuerConfig {
             credential_issuer: "https://localhost:8443".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),

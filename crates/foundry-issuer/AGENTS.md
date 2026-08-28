@@ -188,7 +188,9 @@ cargo nextest run -p foundry --test wallet_issuance               # issuance flo
   rejected for the av.1 configuration. Do not "simplify" it back to `String`.
   Two further constraints hold it in place: the value is derived from
   `Config::credential_signing_key` (the same resolver `handle_credential_request`
-  uses, so metadata cannot describe a different key than the one that signs), and
+  uses, so metadata cannot describe a different key than the one that signs —
+  never resolve the signing key any other way; see the resolution-order Gotcha
+  in [`crates/foundry-core/AGENTS.md`](../foundry-core/AGENTS.md)), and
   `SignatureAlgorithm::cose_value` is the single owner of the JOSE/COSE
   correspondence, pinned against `foundry-mdoc`'s `alg_label` by
   `alg_label_agrees_with_cose_value`. `proof_signing_alg_values_supported` is

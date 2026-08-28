@@ -58,6 +58,7 @@ async fn setup(status_list_enabled: bool) -> (AppState, tempfile::TempDir) {
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: "https://issuer.example.com".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),

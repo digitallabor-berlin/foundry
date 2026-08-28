@@ -865,6 +865,7 @@ mod tests {
             trust_anchors: vec![],
             issuer: IssuerConfig {
                 credential_issuer: "https://issuer.example.com".to_string(),
+                credential_signing_key: None,
                 wallet_attestation: Default::default(),
                 key_attestation: Default::default(),
                 status_list: StatusListConfig {

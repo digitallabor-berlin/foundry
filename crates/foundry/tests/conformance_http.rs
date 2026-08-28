@@ -100,6 +100,7 @@ async fn setup_test_app() -> (AppState, tempfile::TempDir) {
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: "https://issuer.example.com".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),
@@ -806,6 +807,7 @@ async fn gap_vci_11_well_known_metadata_ignores_credential_issuer_path_component
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: "https://issuer.example.com/tenant1".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
@@ -958,6 +960,7 @@ async fn setup_verifier_flow_app() -> (AppState, tempfile::TempDir, String, Stri
         }],
         issuer: IssuerConfig {
             credential_issuer: "https://localhost:8443".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Disabled,
                 trusted_anchors: Vec::new(),
@@ -1446,6 +1449,7 @@ async fn setup_pop_test_app_with_modes(
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: "https://issuer.example.com".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: wallet_attestation_mode,
                 trusted_anchors: vec![TrustAnchor {

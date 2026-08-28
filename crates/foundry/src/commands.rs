@@ -290,6 +290,11 @@ trust_anchors:
     certs: ./trust/root.pem
 issuer:
   credential_issuer: https://localhost:8443
+  # The key that signs issued credentials. Optional only for backward
+  # compatibility: omitted, foundry falls back to status_list.signing_key and
+  # then to the ALPHABETICALLY first `keys:` entry. Always name it -- the
+  # fallbacks make one key serve two trust roles, or pick one by accident.
+  credential_signing_key: issuer_sdjwt
   wallet_attestation: { mode: optional }
   key_attestation: { mode: optional }
   status_list:

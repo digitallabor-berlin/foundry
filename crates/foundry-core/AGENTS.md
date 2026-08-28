@@ -26,9 +26,9 @@ rule: root [AGENTS.md](../../AGENTS.md) §3.
 | File | Responsibility |
 | --- | --- |
 | `lib.rs` | Declares `config`, `crypto`, `error`, `obs`, `pki`, `status_list`, `storage`, `trust`, `url` |
-| `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
+| `config/mod.rs` | `Config::load(&Path)` — reads the file and parses **JSON if the extension is `.json`, otherwise YAML**; re-exports all of `model`. `Config::credential_signing_key() -> Option<(&str, &KeyEntry)>` — the **single** resolver for the key that signs credentials (`issuer.credential_signing_key`, else `issuer.status_list.signing_key`, else the first `keys` entry); see Gotchas. `Config::load_request_decryption_keys(base_dir) -> Result<Vec<DecryptionKey>, ConfigError>` reads and returns the `issuer.request_encryption.keys` PEMs (empty vec when unconfigured) |
 | `config/mdoc.rs` | What foundry knows about specific mdoc doctypes, keyed on the doctype string: `namespace_for_doctype` (ISO mDL is the exception — doctype `org.iso.18013.5.1.mDL`, namespace `org.iso.18013.5.1`; every EUDI attestation uses its doctype verbatim) and `validate_av_claims`, which enforces EU Age Verification Annex A §4.1.2's closed attribute set for `AV_DOCTYPE`. Also exports `AV_DOCTYPE` / `MDL_DOCTYPE`. Lives here because both `config/validate.rs` and `foundry-issuer` need it and core is the only crate below both |
-| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig`, `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`), and PaSO's `TransactionDataTypeMetadata` / `PasoMetadataConfig` plus `CredentialType::transaction_data_types` — whose **presence alone** makes a credential type a PaSO Credential type |
+| `config/model.rs` | The whole config tree: `Config`, `ServerConfig`, `WalletFacingConfig`, `AdminConfig`, `StorageConfig`, `KeyEntry`, `TrustAnchor`, `IssuerConfig` (including `credential_signing_key`), `AttestationMode`, `Mode`, `StatusListConfig`, `CredentialType`, `ClaimDef`, `VerifierConfig`, `LoggingConfig`, `LogFormat`, `RequestEncryptionConfig`, `ResponseEncryptionConfig`, `SUPPORTED_ENC_VALUES` (`{A128GCM, A256GCM}`), and PaSO's `TransactionDataTypeMetadata` / `PasoMetadataConfig` plus `CredentialType::transaction_data_types` — whose **presence alone** makes a credential type a PaSO Credential type |
 | `config/validate.rs` | Post-load semantic validation (notably that key references resolve to configured/readable key material). Also the `pub` `validate_paso_transaction_data_type_metadata` (PaSO Core §5.2's identifier grammar plus PaSO Proof Metadata §3/§3.1/§3.2's structure), exported because two channels publish that shape — startup validation and `foundry-issuer`'s ad-hoc mint override — and a channel accepting what the other rejects would make validation advisory. A PaSO deployment whose credential signing key has no `x5c` is rejected at startup (§4 puts the chain in the JWT header) |
 | `crypto/mod.rs` | `SignatureAlgorithm` (`Es256`/`Es384`/`Es512`) and the `Signer` trait (`algorithm`, `sign`, `public_jwk`) |
 | `crypto/signer.rs` | `FileSigner` — PEM-file-backed `Signer` implementation |
@@ -127,6 +127,25 @@ cargo nextest run -p foundry-core                                 # narrow, whil
   so a dependency change that silently disabled it fails loudly instead of
   reordering signed headers.
 
+- **`Config::credential_signing_key()` is the only place that answers "which key
+  signs credentials", and two of its three resolution steps are historical
+  hazards.** Order: `issuer.credential_signing_key`, else
+  `issuer.status_list.signing_key`, else the first `keys` entry. Only the first
+  is design. The second dates from when no field named the credential signer at
+  all, and couples two distinct trust roles to one key — the deployed
+  `foundry.digitallabor.dev` issuer shipped credentials whose `x5c` subject read
+  `CN=Foundry statuslist_signer` because of it. The third is `BTreeMap` order,
+  i.e. **alphabetical**, not the order the operator wrote — so a
+  Credential-Request decryption key named early in the alphabet can win and
+  sign credentials with an ECDH-ES key that has no `x5c`. `Config::validate`
+  rejects that specific case by comparing the request-encryption keys against
+  the **resolution result**, not against the named fields; the two older
+  reuse checks there compare against named fields and structurally cannot see
+  the fallback. Do not add a second resolution path — `credential.rs`,
+  `metadata.rs`, `paso_metadata.rs` and `validate.rs` must get the same answer
+  or conformance row VCI-0234 (advertised algorithm equals signing algorithm)
+  silently reopens. Design record:
+  `docs/superpowers/specs/2026-08-28-explicit-credential-signing-key-design.md`.
 - **`CredentialType` and `ClaimDef` use the `Option` + resolver pattern.**
   `resolved_scope()`, `resolved_validity_seconds()` (default `31_536_000`) and
   `ClaimDef::is_required()` (default `!selectively_disclosable`) all exist so an

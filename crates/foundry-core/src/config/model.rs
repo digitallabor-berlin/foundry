@@ -127,6 +127,18 @@ pub struct TrustAnchor {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IssuerConfig {
     pub credential_issuer: String,
+    /// The `keys` entry that signs issued credentials.
+    ///
+    /// Absent falls back to `issuer.status_list.signing_key`, then to the
+    /// first `keys` entry — the historical behaviour, kept so that a
+    /// deployment which never mentions this field is not silently re-keyed.
+    /// See `Config::credential_signing_key`, the single resolver.
+    ///
+    /// Set it. The fallback couples two distinct trust roles (credential
+    /// issuer and status-list authority) to one key, and its last step is
+    /// order-dependent in a way no operator can see from the config.
+    #[serde(default)]
+    pub credential_signing_key: Option<String>,
     /// PaSO Proof Metadata §4 / §5.2 — lifetimes of the metadata JWTs. Absent
     /// uses the defaults; the block is inert for a deployment with no PaSO
     /// credential types.

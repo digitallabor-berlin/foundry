@@ -27,6 +27,8 @@ Entries under `credential_types:`. Each defines one Credential Configuration.
 
 | Key | Documented in |
 | --- | --- |
+| `issuer.credential_signing_key` | [Keys & Certificates](../operating/keys-and-certificates.md) |
+| `issuer.status_list.signing_key` | [Keys & Certificates](../operating/keys-and-certificates.md) |
 | `issuer.offer_by_reference` | [By-Reference Offers](../issuance/by-reference-offers.md) |
 | `issuer.access_token_ttl_secs` | [Encrypted Pre-Authorized Code](../issuance/encrypted-pre-auth-code.md) |
 | `issuer.wallet_attestation.mode` | [Wallet Attestation & ABCA](../issuance/wallet-attestation.md) |

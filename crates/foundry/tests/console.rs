@@ -35,6 +35,7 @@ fn test_config(console_enabled: bool) -> Config {
         trust_anchors: Vec::new(),
         issuer: IssuerConfig {
             credential_issuer: "https://localhost:8443".to_string(),
+            credential_signing_key: None,
             wallet_attestation: AttestationMode {
                 mode: Mode::Optional,
                 trusted_anchors: Vec::new(),

@@ -23,6 +23,18 @@ impl Config {
                 "issuer.status_list.signing_key references unknown key '{sk}'"
             )));
         }
+        // credential_signing_key, when set, must resolve. Same rule as the two
+        // above: a signing key named but absent is a startup failure, never a
+        // silent fall-through to the next step of the resolution order --
+        // falling through would sign credentials with a key the operator did
+        // not choose, which is the failure mode this field exists to end.
+        if let Some(sk) = &self.issuer.credential_signing_key
+            && !self.keys.contains_key(sk)
+        {
+            return Err(ConfigError::Validation(format!(
+                "issuer.credential_signing_key references unknown key '{sk}'"
+            )));
+        }
         // Credential types: supported formats + required identifier per format.
         for ct in &self.credential_types {
             match ct.format.as_str() {
@@ -251,6 +263,21 @@ impl Config {
                         "issuer.request_encryption.keys references '{name}', which is also \
                          issuer.status_list.signing_key; an encryption key must not be reused \
                          for signing"
+                    )));
+                }
+                // The credential signing key is *resolved*, not always named:
+                // with neither issuer.credential_signing_key nor
+                // issuer.status_list.signing_key set it falls back to the
+                // alphabetically first `keys` entry, which can be this very
+                // encryption key. The two checks above compare against named
+                // fields and so cannot see that path; this one compares against
+                // the resolution result, which is the only thing that closes it.
+                if self.credential_signing_key().map(|(n, _)| n) == Some(name.as_str()) {
+                    return Err(ConfigError::Validation(format!(
+                        "issuer.request_encryption.keys references '{name}', which also resolves \
+                         as the credential signing key; an encryption key must not be reused for \
+                         signing. Set issuer.credential_signing_key explicitly to name a \
+                         different key"
                     )));
                 }
             }
@@ -728,6 +755,7 @@ mod tests {
             trust_anchors: Vec::new(),
             issuer: IssuerConfig {
                 credential_issuer: "https://issuer.example.com".to_string(),
+                credential_signing_key: None,
                 wallet_attestation: AttestationMode {
                     mode: Mode::Optional,
                     trusted_anchors: Vec::new(),
@@ -1421,6 +1449,13 @@ mod tests {
 
     /// `config_passing_keyref_check()` plus a second key entry that is not the
     /// verifier's signing key, so it may legally be named as an encryption key.
+    ///
+    /// It also names a credential signing key explicitly, and must: `req_dec`
+    /// sorts before `verifier_signing`, so without one the `keys` fallback
+    /// would resolve the *encryption* key as the credential signer and
+    /// `Config::validate` would reject the whole fixture. That rejection is
+    /// correct -- it is the guard doing its job -- so the fixture is
+    /// disambiguated here rather than the guard weakened.
     fn cfg_with_enc_key() -> Config {
         let mut cfg = config_passing_keyref_check();
         cfg.keys.insert(
@@ -1431,6 +1466,15 @@ mod tests {
                 alg: "ES256".to_string(),
             },
         );
+        cfg.keys.insert(
+            "cred_signer".to_string(),
+            crate::config::model::KeyEntry {
+                private_key: "unused-cred.pem".to_string(),
+                x5c: None,
+                alg: "ES256".to_string(),
+            },
+        );
+        cfg.issuer.credential_signing_key = Some("cred_signer".to_string());
         cfg
     }
 
@@ -1554,6 +1598,107 @@ mod tests {
             msg.contains("verifier_signing") && msg.contains("signing"),
             "got: {msg}"
         );
+    }
+
+    /// A `keys` entry for tests that care only about the map's shape.
+    fn dummy_key_entry() -> crate::config::model::KeyEntry {
+        crate::config::model::KeyEntry {
+            private_key: "unused.pem".to_string(),
+            x5c: None,
+            alg: "ES256".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_explicit_credential_signing_key_wins_over_the_status_list_key() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.keys
+            .insert("issuer_sdjwt".to_string(), dummy_key_entry());
+        cfg.keys
+            .insert("statuslist_signer".to_string(), dummy_key_entry());
+        cfg.issuer.status_list.signing_key = Some("statuslist_signer".to_string());
+        cfg.issuer.credential_signing_key = Some("issuer_sdjwt".to_string());
+        assert_eq!(cfg.credential_signing_key().unwrap().0, "issuer_sdjwt");
+    }
+
+    /// The historical resolution order, retained so that a deployment which
+    /// never mentions the new field is not silently re-keyed.
+    #[test]
+    fn the_credential_signing_key_falls_back_to_the_status_list_key() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.keys
+            .insert("issuer_sdjwt".to_string(), dummy_key_entry());
+        cfg.keys
+            .insert("statuslist_signer".to_string(), dummy_key_entry());
+        cfg.issuer.status_list.signing_key = Some("statuslist_signer".to_string());
+        cfg.issuer.credential_signing_key = None;
+        assert_eq!(cfg.credential_signing_key().unwrap().0, "statuslist_signer");
+    }
+
+    /// `Config.keys` is a `BTreeMap`, so the last-resort fallback is the
+    /// **alphabetically** first entry, not the first one written in YAML. Pinned
+    /// because the ordering is load-bearing: it is what makes an encryption key
+    /// reachable as a credential signer, which
+    /// `an_encryption_key_may_not_be_the_resolved_credential_signing_key`
+    /// then rejects.
+    #[test]
+    fn the_credential_signing_key_falls_back_to_the_alphabetically_first_key() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.keys
+            .insert("zzz_written_first".to_string(), dummy_key_entry());
+        cfg.keys
+            .insert("aaa_written_last".to_string(), dummy_key_entry());
+        cfg.issuer.status_list.signing_key = None;
+        cfg.issuer.credential_signing_key = None;
+        assert_eq!(cfg.credential_signing_key().unwrap().0, "aaa_written_last");
+    }
+
+    #[test]
+    fn an_unknown_credential_signing_key_is_rejected() {
+        let mut cfg = config_passing_keyref_check();
+        cfg.issuer.credential_signing_key = Some("no_such_key".to_string());
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("issuer.credential_signing_key") && msg.contains("no_such_key"),
+            "got: {msg}"
+        );
+    }
+
+    /// The fallback hole: with neither `issuer.credential_signing_key` nor
+    /// `issuer.status_list.signing_key` set, the alphabetically first key wins
+    /// -- and an ECDH-ES Credential-Request decryption key can be it. Signing
+    /// credentials with a key-agreement key (and, since such a key needs no
+    /// certificate, with no `x5c` at all) must be a startup failure, not a
+    /// silent choice. The pre-existing guard compared against the two *named*
+    /// signing-key fields and so could not see this path.
+    #[test]
+    fn an_encryption_key_may_not_be_the_resolved_credential_signing_key() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.keys
+            .insert("aaa_request_enc".to_string(), dummy_key_entry());
+        cfg.issuer.request_encryption = Some(req_enc(vec!["aaa_request_enc".to_string()]));
+        cfg.issuer.status_list.signing_key = None;
+        cfg.issuer.credential_signing_key = None;
+        let msg = cfg.validate().unwrap_err().to_string();
+        assert!(
+            msg.contains("aaa_request_enc") && msg.contains("credential signing key"),
+            "got: {msg}"
+        );
+    }
+
+    /// The same guard must not fire when an explicit credential signing key
+    /// steers resolution away from the encryption key.
+    #[test]
+    fn an_explicit_credential_signing_key_clears_the_encryption_key_conflict() {
+        let (mut cfg, _dir) = cfg_with_signing_key();
+        cfg.keys
+            .insert("aaa_request_enc".to_string(), dummy_key_entry());
+        cfg.keys
+            .insert("issuer_sdjwt".to_string(), dummy_key_entry());
+        cfg.issuer.request_encryption = Some(req_enc(vec!["aaa_request_enc".to_string()]));
+        cfg.issuer.credential_signing_key = Some("issuer_sdjwt".to_string());
+        cfg.validate()
+            .expect("an explicit credential signing key resolves away from the encryption key");
     }
 
     #[test]

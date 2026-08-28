@@ -34,13 +34,25 @@ impl Config {
 
     /// The key that signs issued credentials, as `(name, entry)`.
     ///
-    /// Resolution order — `issuer.status_list.signing_key`, else the first entry
-    /// in `keys` — is the behaviour `handle_credential_request` has always had.
-    /// The name is a historical artefact: one configured key signs both Status
+    /// Resolution order: `issuer.credential_signing_key`, else
+    /// `issuer.status_list.signing_key`, else the first entry in `keys`.
+    ///
+    /// Only the first step is design. The other two are the behaviour
+    /// `handle_credential_request` has always had, back when no field named
+    /// the credential signer at all: one configured key signed both Status
     /// List Tokens and credentials, and only the status-list spelling was ever
-    /// given a config field. It is preserved verbatim rather than tidied,
-    /// because changing which key signs credentials would silently re-key every
-    /// existing deployment.
+    /// given a config field. They are retained rather than removed because
+    /// dropping them would silently re-key every deployment that has not yet
+    /// set `issuer.credential_signing_key`.
+    ///
+    /// Both fallbacks are hazards, not conveniences. The second couples two
+    /// distinct trust roles — credential issuer and status-list authority —
+    /// so rotating one key invalidates the other identity with it. The third
+    /// is `BTreeMap` order, i.e. **alphabetical**, not the order the operator
+    /// wrote: an ECDH-ES Credential-Request decryption key named early in the
+    /// alphabet can win, which would sign credentials with a key-agreement key
+    /// and emit no `x5c`. `Config::validate` rejects that last case rather
+    /// than letting it resolve.
     ///
     /// It exists as a method because two call sites need the *same* answer:
     /// `handle_credential_request` builds the signer from it, and
@@ -56,9 +68,9 @@ impl Config {
     pub fn credential_signing_key(&self) -> Option<(&str, &KeyEntry)> {
         let name = self
             .issuer
-            .status_list
-            .signing_key
+            .credential_signing_key
             .as_deref()
+            .or(self.issuer.status_list.signing_key.as_deref())
             .or_else(|| self.keys.keys().next().map(|s| s.as_str()))?;
         self.keys.get_key_value(name).map(|(k, v)| (k.as_str(), v))
     }
