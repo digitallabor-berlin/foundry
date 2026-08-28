@@ -10,6 +10,7 @@
 foundry.db
 config.yaml
 .worktrees/
+.DS_Store
 
 # pi agent harness scratch state (task widget), not project content
 .pi/tasks/
