@@ -6,6 +6,7 @@ pub mod request;
 pub mod status;
 pub mod transaction;
 pub mod verify;
+pub mod webhook;
 
 pub use dcql::{PresentedFormat, check_dcql_match};
 pub use error::VerificationError;
