@@ -34,6 +34,10 @@ pub struct AppState {
     /// `issuer.request_encryption` is absent, which is what makes the feature
     /// default-off.
     pub request_decryption_keys: Arc<Vec<foundry_core::crypto::jwe::DecryptionKey>>,
+    /// Destination for verification events, or `None` when
+    /// `verifier.webhook` is unconfigured — which makes "webhook off" an
+    /// `is_none()` check at each dispatch site rather than a config re-read.
+    pub webhook_sink: Option<Arc<dyn foundry_verifier::WebhookSink>>,
 }
 
 impl AppState {
@@ -44,6 +48,7 @@ impl AppState {
             config,
             nonce_secret: Arc::new(foundry_issuer::NonceSecret::random()),
             request_decryption_keys: Arc::new(Vec::new()),
+            webhook_sink: None,
         }
     }
 
@@ -56,6 +61,16 @@ impl AppState {
         keys: Vec<foundry_core::crypto::jwe::DecryptionKey>,
     ) -> Self {
         self.request_decryption_keys = Arc::new(keys);
+        self
+    }
+
+    /// Attach the verification-event sink.
+    ///
+    /// A builder rather than another `new` parameter, for the same reason
+    /// `with_request_decryption_keys` is one: the many existing
+    /// `AppState::new` call sites stay unchanged.
+    pub fn with_webhook_sink(mut self, sink: Arc<dyn foundry_verifier::WebhookSink>) -> Self {
+        self.webhook_sink = Some(sink);
         self
     }
 }
@@ -1919,6 +1934,22 @@ pub async fn serve(
     }
     let state = AppState::new(storage.clone(), config.clone())
         .with_request_decryption_keys(request_decryption_keys);
+
+    // Built once: a reqwest::Client owns a connection pool, and this endpoint
+    // is fixed for the process lifetime.
+    let state = match &cfg.verifier.webhook {
+        Some(w) => {
+            let sink = foundry_verifier::HttpWebhookSink::new(w)?;
+            // The setting, never the URL's contents beyond what config already
+            // holds, and never the secret (root AGENTS.md §4.5).
+            tracing::info!(
+                include_raw_artifacts = w.include_raw_artifacts,
+                "verification event webhook enabled"
+            );
+            state.with_webhook_sink(Arc::new(sink))
+        }
+        None => state,
+    };
     let _sweeper = spawn_sweeper(storage, 60);
 
     let api_key = AdminApiKey::resolve(&cfg.server.admin);

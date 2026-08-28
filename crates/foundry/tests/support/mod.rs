@@ -549,3 +549,56 @@ pub async fn setup_with_encryption() -> (AppState, tempfile::TempDir) {
         .with_request_decryption_keys(vec![key]);
     (state, dir)
 }
+
+/// A `WebhookSink` that hands every delivered event to the test over a
+/// channel.
+///
+/// A channel rather than a shared `Vec`: dispatch is `tokio::spawn`ed, so a
+/// test that inspects a `Vec` right after the HTTP call races the spawned
+/// task. Awaiting `recv()` blocks until delivery has actually happened.
+pub struct RecordingSink {
+    tx: tokio::sync::mpsc::UnboundedSender<foundry_verifier::WebhookEvent>,
+}
+
+#[async_trait::async_trait]
+impl foundry_verifier::WebhookSink for RecordingSink {
+    async fn deliver(
+        &self,
+        event: &foundry_verifier::WebhookEvent,
+    ) -> Result<u16, foundry_verifier::WebhookError> {
+        let _ = self.tx.send(event.clone());
+        Ok(200)
+    }
+}
+
+pub fn recording_sink() -> (
+    std::sync::Arc<RecordingSink>,
+    tokio::sync::mpsc::UnboundedReceiver<foundry_verifier::WebhookEvent>,
+) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    (std::sync::Arc::new(RecordingSink { tx }), rx)
+}
+
+/// Await the next delivered event, failing the test rather than hanging.
+pub async fn next_event(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<foundry_verifier::WebhookEvent>,
+) -> foundry_verifier::WebhookEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for a webhook event")
+        .expect("sink channel closed without delivering an event")
+}
+
+/// A sink that always fails, for proving §4.3: delivery problems must be
+/// invisible to the wallet.
+pub struct FailingSink;
+
+#[async_trait::async_trait]
+impl foundry_verifier::WebhookSink for FailingSink {
+    async fn deliver(
+        &self,
+        _event: &foundry_verifier::WebhookEvent,
+    ) -> Result<u16, foundry_verifier::WebhookError> {
+        Err(foundry_verifier::WebhookError::Status(500))
+    }
+}
