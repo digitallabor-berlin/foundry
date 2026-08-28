@@ -411,6 +411,52 @@ async fn the_verdict_is_delivered_without_artifacts_by_default() {
     }
 }
 
+/// `POST /admin/verification/requests` with `transport`, returning the new
+/// `verification_id`.
+async fn create_verification(state: &AppState, transport: &str) -> String {
+    let admin_app = admin_router(state.clone(), AdminApiKey(Some("test-admin-key".into())));
+    let body = serde_json::json!({
+        "dcql_query": {
+            "credentials": [{
+                "id": "c1",
+                "format": "dc+sd-jwt",
+                "meta": { "vct_values": [REQUESTED_VCT] }
+            }]
+        },
+        "transport": transport
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/admin/verification/requests")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, "Bearer test-admin-key")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = admin_app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp: CreateVerificationResponse = serde_json::from_slice(&bytes).unwrap();
+    resp.verification_id
+}
+
+/// `GET /vp/request/:id`, returning the served Request Object JWS.
+async fn fetch_request_object(state: &AppState, verification_id: &str) -> String {
+    let wallet_app = wallet_router(state.clone());
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/vp/request/{verification_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = wallet_app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
 /// Drop the members of a verdict body that legitimately differ between two
 /// runs of the same flow: the credential's `iat`/`exp` are wall-clock seconds
 /// and `cnf.jwk` is a freshly generated holder key. Everything else --
@@ -463,4 +509,87 @@ async fn a_failing_sink_does_not_change_the_wallet_response() {
         baseline_body["credentials"][0]["claims"]["given_name"],
         "Alice"
     );
+}
+
+/// D5: the event means "these exact bytes went out now", so two fetches are
+/// two events. ECDSA signing is randomized, so they genuinely differ.
+#[tokio::test]
+async fn each_request_object_fetch_delivers_its_own_event() {
+    let (state, _dir, ..) = setup_with_webhook(true).await;
+    let (sink, mut rx) = support::recording_sink();
+    let state = state.with_webhook_sink(sink);
+
+    let verification_id = create_verification(&state, "request_uri").await;
+    let _ = fetch_request_object(&state, &verification_id).await;
+    let _ = fetch_request_object(&state, &verification_id).await;
+
+    let first = support::next_event(&mut rx).await;
+    let second = support::next_event(&mut rx).await;
+
+    let jws_of = |e: &foundry_verifier::WebhookEvent| match e {
+        foundry_verifier::WebhookEvent::PresentationRequestDelivered {
+            request_object_jws,
+            transport,
+            ..
+        } => {
+            assert_eq!(transport, "request_uri");
+            request_object_jws
+                .clone()
+                .expect("signed transport carries the JWS")
+        }
+        other => panic!("expected PresentationRequestDelivered, got {other:?}"),
+    };
+
+    assert_ne!(
+        jws_of(&first),
+        jws_of(&second),
+        "ECDSA is randomized, so each served copy is different bytes"
+    );
+}
+
+/// The unsigned transport has no JWS, so it carries the JSON object instead.
+#[tokio::test]
+async fn the_unsigned_dc_api_transport_delivers_its_request_object() {
+    let (state, _dir, ..) = setup_with_webhook(true).await;
+    let (sink, mut rx) = support::recording_sink();
+    let state = state.with_webhook_sink(sink);
+
+    let _ = create_verification(&state, "dc_api").await;
+
+    match support::next_event(&mut rx).await {
+        foundry_verifier::WebhookEvent::PresentationRequestDelivered {
+            transport,
+            request_object_jws,
+            dc_api_request,
+            ..
+        } => {
+            assert_eq!(transport, "dc_api");
+            assert!(request_object_jws.is_none(), "no signed form exists");
+            assert!(dc_api_request.is_some());
+        }
+        other => panic!("expected PresentationRequestDelivered, got {other:?}"),
+    }
+}
+
+/// O1: the event fires even with artifacts off, as a PII-free record that a
+/// request was served.
+#[tokio::test]
+async fn a_request_event_fires_without_artifacts_when_they_are_disabled() {
+    let (state, _dir, ..) = setup_with_webhook(false).await;
+    let (sink, mut rx) = support::recording_sink();
+    let state = state.with_webhook_sink(sink);
+
+    let _ = create_verification(&state, "dc_api").await;
+
+    match support::next_event(&mut rx).await {
+        foundry_verifier::WebhookEvent::PresentationRequestDelivered {
+            request_object_jws,
+            dc_api_request,
+            ..
+        } => {
+            assert!(request_object_jws.is_none());
+            assert!(dc_api_request.is_none(), "artifacts are gated off");
+        }
+        other => panic!("expected PresentationRequestDelivered, got {other:?}"),
+    }
 }

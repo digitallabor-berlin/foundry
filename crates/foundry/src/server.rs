@@ -1350,10 +1350,50 @@ pub(crate) async fn create_verification_handler(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    foundry_verifier::create_verification_request(&state.config, state.storage.as_ref(), req, now)
-        .await
-        .map(Json)
-        .map_err(|e| verifier_admin_error_response(&e))
+    let resp = foundry_verifier::create_verification_request(
+        &state.config,
+        state.storage.as_ref(),
+        req,
+        now,
+    )
+    .await
+    .map_err(|e| verifier_admin_error_response(&e))?;
+
+    // The two DC API transports hand their request object to the invoking page
+    // right here, so this is the moment it is "delivered". The `request_uri`
+    // transport has no object yet — its event fires from
+    // `get_request_object_handler` when the wallet fetches it.
+    if let Some(dc_api) = &resp.dc_api_request {
+        let include = state
+            .config
+            .verifier
+            .webhook
+            .as_ref()
+            .is_some_and(|w| w.include_raw_artifacts);
+        // `dc_api_signed` wraps the JWS in a `request` member (OpenID4VP 1.0
+        // L2476); the unsigned form is the object itself.
+        let signed_jws = dc_api.get("request").and_then(|v| v.as_str());
+        let (request_object_jws, dc_api_request) = match (include, signed_jws) {
+            (false, _) => (None, None),
+            (true, Some(jws)) => (Some(jws.to_string()), None),
+            (true, None) => (None, Some(dc_api.clone())),
+        };
+        dispatch_webhook(
+            &state,
+            foundry_verifier::WebhookEvent::PresentationRequestDelivered {
+                tx_id: resp.verification_id.clone(),
+                transport: if signed_jws.is_some() {
+                    "dc_api_signed".to_string()
+                } else {
+                    "dc_api".to_string()
+                },
+                request_object_jws,
+                dc_api_request,
+            },
+        );
+    }
+
+    Ok(Json(resp))
 }
 
 #[utoipa::path(
@@ -1642,6 +1682,27 @@ async fn get_request_object_handler(
     };
     let jws_str = foundry_verifier::build_signed_request_object(&state.config, &tx)
         .map_err(|e| internal_error("build_signed_request_object", e.kind(), e))?;
+
+    // Fires per fetch, not per transaction: ECDSA signing is randomized, so
+    // this JWS is genuinely different bytes from any previous one, and the
+    // event's contract is "these exact bytes went out now" (design D5).
+    // Deduping would require remembering what was sent, i.e. storage.
+    let include = state
+        .config
+        .verifier
+        .webhook
+        .as_ref()
+        .is_some_and(|w| w.include_raw_artifacts);
+    dispatch_webhook(
+        &state,
+        foundry_verifier::WebhookEvent::PresentationRequestDelivered {
+            tx_id: tx.id.clone(),
+            transport: tx.transport.clone(),
+            request_object_jws: include.then(|| jws_str.clone()),
+            dc_api_request: None,
+        },
+    );
+
     Ok((
         [(
             axum::http::header::CONTENT_TYPE,
