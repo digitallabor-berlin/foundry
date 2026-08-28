@@ -20,3 +20,4 @@ pub use transaction::{
     VerificationTransaction, load_verification_transaction, save_verification_transaction,
 };
 pub use verify::verify_vp_response;
+pub use webhook::{HttpWebhookSink, WebhookError, WebhookEvent, WebhookSink};

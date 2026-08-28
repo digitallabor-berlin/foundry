@@ -11,6 +11,7 @@ use foundry_core::config::WebhookConfig;
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
+use std::time::Duration;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -148,6 +149,91 @@ pub fn sign_body(secret: &WebhookSecret, body: &str) -> Result<Option<String>, W
     )))
 }
 
+/// Where verification events go.
+///
+/// A trait rather than a concrete call so tests inject a recording fake and
+/// the suite needs no mock HTTP server -- the same shape as
+/// [`crate::status::StatusListResolver`].
+#[async_trait::async_trait]
+pub trait WebhookSink: Send + Sync {
+    /// Deliver one event, returning the HTTP status on success so the caller
+    /// can record `http.status`.
+    async fn deliver(&self, event: &WebhookEvent) -> Result<u16, WebhookError>;
+}
+
+/// The exact `(body, signature)` pair to transmit.
+///
+/// Factored out of [`HttpWebhookSink::deliver`] so the bytes-and-signature
+/// invariant is testable without a network.
+pub fn build_signed_request_parts(
+    secret: &WebhookSecret,
+    event: &WebhookEvent,
+) -> Result<(String, Option<String>), WebhookError> {
+    let body =
+        serde_json::to_string(event).map_err(|e| WebhookError::Serialization(e.to_string()))?;
+    let signature = sign_body(secret, &body)?;
+    Ok((body, signature))
+}
+
+/// Production sink: one `POST` per event.
+///
+/// The `reqwest::Client` is built once and held, unlike
+/// `HttpStatusListResolver::new()` which `crates/foundry/src/server.rs`
+/// constructs per request -- a `Client` owns a connection pool, and rebuilding
+/// it per delivery would defeat keep-alive to a single, fixed endpoint.
+pub struct HttpWebhookSink {
+    client: reqwest::Client,
+    url: String,
+    secret: WebhookSecret,
+}
+
+impl HttpWebhookSink {
+    pub fn new(cfg: &WebhookConfig) -> Result<Self, WebhookError> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(cfg.timeout_secs))
+            .build()
+            .map_err(|e| WebhookError::ClientInit(e.to_string()))?;
+        Ok(Self {
+            client,
+            url: cfg.url.clone(),
+            secret: WebhookSecret::resolve(cfg),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl WebhookSink for HttpWebhookSink {
+    async fn deliver(&self, event: &WebhookEvent) -> Result<u16, WebhookError> {
+        let (body, signature) = build_signed_request_parts(&self.secret, event)?;
+
+        let mut req = self
+            .client
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .header("x-foundry-event", event.event_type());
+        if let Some(sig) = signature {
+            req = req.header("x-foundry-signature", sig);
+        }
+
+        // `.body(body)` and never `.json(event)`: the signature above covers
+        // these exact bytes, and re-serializing could transmit different ones.
+        let resp = req
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| WebhookError::Delivery {
+                url: self.url.clone(),
+                detail: e.to_string(),
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(WebhookError::Status(status.as_u16()));
+        }
+        Ok(status.as_u16())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +323,49 @@ mod tests {
         assert_eq!(v["state"], "failed");
         assert_eq!(v["result"]["verified"], false);
         assert!(v.get("vp_token").is_none());
+    }
+
+    #[test]
+    fn the_signed_bytes_are_the_bytes_that_will_be_sent() {
+        let secret = WebhookSecret(Some("k".to_string()));
+        let event = WebhookEvent::PresentationRequestDelivered {
+            tx_id: "v_1".to_string(),
+            transport: "request_uri".to_string(),
+            request_object_jws: Some("eyJ0eXAi.aaa.bbb".to_string()),
+            dc_api_request: None,
+        };
+
+        let (body, signature) = build_signed_request_parts(&secret, &event).unwrap();
+
+        // The signature must verify against `body` verbatim -- this is the
+        // invariant that forbids `.json(..)` re-serialization at the call site.
+        assert_eq!(signature, sign_body(&secret, &body).unwrap());
+        assert!(signature.is_some());
+
+        // And `body` must really be the event.
+        let round_tripped: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(round_tripped["tx_id"], "v_1");
+        assert_eq!(round_tripped["request_object_jws"], "eyJ0eXAi.aaa.bbb");
+    }
+
+    #[test]
+    fn an_unsecured_sink_produces_a_body_and_no_signature() {
+        let secret = WebhookSecret(None);
+        let event = WebhookEvent::PresentationRequestDelivered {
+            tx_id: "v_1".to_string(),
+            transport: "dc_api".to_string(),
+            request_object_jws: None,
+            dc_api_request: Some(serde_json::json!({ "response_type": "vp_token" })),
+        };
+
+        let (body, signature) = build_signed_request_parts(&secret, &event).unwrap();
+        assert!(signature.is_none());
+        assert!(body.contains("\"dc_api_request\""));
+    }
+
+    #[test]
+    fn http_sink_construction_succeeds_for_a_valid_config() {
+        HttpWebhookSink::new(&cfg(Some("k"), None)).expect("client must build");
     }
 
     #[test]
