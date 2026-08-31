@@ -92,4 +92,9 @@ a valid ad-hoc JWT makes the type supported even when it is absent from the
 signed credential metadata. Overrides are held to exactly the same structural
 rules as configuration, so the two channels cannot diverge.
 
+The [Admin Test Console](../operating/test-console.md#paso-ad-hoc-transaction-data-metadata)
+wraps this endpoint: it mints the JWT from a form and splices it into the
+`metadata` member of the `transaction_data` entry whose `type` matches, which is
+the equality §5.2 requires between the two.
+
 ---

@@ -254,6 +254,39 @@
         <label for="transaction-data-json">transaction_data (JSON array)</label>
         <textarea id="transaction-data-json" placeholder='[{"type": "…", "credential_ids": ["…"]}]'></textarea>
       </div>
+      <!-- PaSO Proof Metadata §5.1 makes the ad-hoc metadata JWT a `metadata`
+           member of a transaction_data entry, so the mint control belongs here
+           rather than in a card of its own: the artifact has no other use. Both
+           text inputs ship empty -- a mint needs a credential type that declares
+           `transaction_data_types` (§3), and the in-repo config.yaml declares
+           none, so a baked default would be a value that always fails. -->
+      <p class="hint">PaSO ad-hoc metadata (§5.2) — mints a JWT and splices it into the entry above whose "type" matches.</p>
+      <div class="field">
+        <label for="paso-adhoc-credential-type">credential_type_id</label>
+        <input type="text" id="paso-adhoc-credential-type" placeholder="a credential type declaring transaction_data_types">
+      </div>
+      <div class="field">
+        <label for="paso-adhoc-transaction-data-type">transaction_data_type</label>
+        <input type="text" id="paso-adhoc-transaction-data-type" placeholder="urn:paso:sca:&lt;domain&gt;:&lt;suffix&gt;:&lt;version&gt;">
+      </div>
+      <div class="field">
+        <label for="paso-adhoc-metadata-override">metadata override (JSON, optional — §5.4)</label>
+        <textarea id="paso-adhoc-metadata-override" placeholder='{"claims": [{"path": ["…"], "display": [{"locale": "en-US", "name": "…"}]}]}'></textarea>
+      </div>
+      <div class="field">
+        <label for="paso-adhoc-ttl">ttl_secs (optional)</label>
+        <input type="text" id="paso-adhoc-ttl" inputmode="numeric" placeholder="defaults to issuer.paso_metadata.adhoc_ttl_secs">
+      </div>
+      <button class="primary" id="paso-adhoc-mint-btn">Mint ad-hoc metadata JWT</button>
+      <div class="error-banner hidden" id="paso-adhoc-error"></div>
+      <div class="result hidden" id="paso-adhoc-result">
+        <div class="uri-row">
+          <span class="uri-text" id="paso-adhoc-jwt"></span>
+          <button class="copy-btn" data-copy-target="paso-adhoc-jwt">Copy</button>
+        </div>
+        <p class="hint" id="paso-adhoc-exp"></p>
+        <p class="hint" id="paso-adhoc-splice"></p>
+      </div>
     </details>
     <button class="primary" id="create-verification-btn">Create Verification Request</button>
     <div class="error-banner hidden" id="verification-error"></div>
@@ -3212,6 +3245,123 @@ var qrcode = function() {
     });
   }
 
+  /* PaSO Proof Metadata §5.2 -- render the minted JWT's `exp` so an operator
+     need not decode the artifact to see how long a Relying Party may reuse it.
+     The endpoint echoes `exp` for exactly this reason. */
+  function describeAdHocExpiry(exp) {
+    if (typeof exp !== 'number') return '';
+    const remaining = exp - Math.floor(Date.now() / 1000);
+    return 'exp ' + new Date(exp * 1000).toISOString() + ' (' + remaining + 's from now)';
+  }
+
+  /* PaSO Proof Metadata §5.1: the ad-hoc metadata JWT is a `metadata` member of
+     a transaction_data entry. §5.2 requires the JWT's `transaction_data_type` to
+     EQUAL the `type` of that enclosing entry, and §5.3 step 7 makes a Wallet
+     reject the entry outright when the two differ -- so keying the splice on
+     that equality is the spec's own binding rule, not a convenience: the console
+     structurally cannot hand a wallet a mismatched pair.
+
+     Anything it cannot splice is REPORTED and the JWT is still shown for manual
+     use. A silent no-op here would read as "spliced" and send a request whose
+     entry carries no metadata at all. */
+  function spliceAdHocMetadata(txDataEl, transactionDataType, jwt) {
+    const raw = txDataEl.value;
+    if (!raw.trim()) {
+      return 'Not spliced: transaction_data is empty. Copy the JWT into a "metadata" member of your entry.';
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      return 'Not spliced: transaction_data is not valid JSON (' + e.message + '). The JWT above is unaffected.';
+    }
+    if (!Array.isArray(parsed)) {
+      return 'Not spliced: transaction_data is not a JSON array.';
+    }
+    let spliced = 0;
+    parsed.forEach(function (entry) {
+      if (entry && typeof entry === 'object' && entry.type === transactionDataType) {
+        entry.metadata = jwt;
+        spliced += 1;
+      }
+    });
+    if (spliced === 0) {
+      return 'Not spliced: no transaction_data entry has type "' + transactionDataType +
+        '". PaSO Proof Metadata §5.2 requires the JWT and the enclosing entry to name the same type.';
+    }
+    txDataEl.value = JSON.stringify(parsed, null, 2);
+    return 'Spliced into ' + spliced + ' transaction_data ' + (spliced === 1 ? 'entry' : 'entries') +
+      ' with type "' + transactionDataType + '".';
+  }
+
+  function initPasoAdHocMetadata() {
+    const btn = document.getElementById('paso-adhoc-mint-btn');
+    if (!btn) return;
+    const errorEl = document.getElementById('paso-adhoc-error');
+    const resultEl = document.getElementById('paso-adhoc-result');
+    const txDataEl = document.getElementById('transaction-data-json');
+
+    btn.addEventListener('click', async function () {
+      clearError(errorEl);
+
+      const credentialTypeId = document.getElementById('paso-adhoc-credential-type').value.trim();
+      const transactionDataType = document.getElementById('paso-adhoc-transaction-data-type').value.trim();
+      if (!credentialTypeId || !transactionDataType) {
+        showError(errorEl, new Error('credential_type_id and transaction_data_type are both required.'));
+        return;
+      }
+
+      const payload = {
+        credential_type_id: credentialTypeId,
+        transaction_data_type: transactionDataType
+      };
+
+      /* §5.4: an override replaces the configured entry for this one artifact,
+         and MAY name a transaction data type the issuer has not configured at
+         all -- the only way to exercise the endpoint against an instance whose
+         credential types declare no `transaction_data_types`. */
+      const overrideRaw = document.getElementById('paso-adhoc-metadata-override').value;
+      if (overrideRaw.trim()) {
+        let parsed;
+        try {
+          parsed = JSON.parse(overrideRaw);
+        } catch (e) {
+          showError(errorEl, new Error('metadata override is not valid JSON: ' + e.message));
+          return;
+        }
+        payload.metadata = parsed;
+      }
+
+      const ttlRaw = document.getElementById('paso-adhoc-ttl').value.trim();
+      if (ttlRaw) {
+        const ttl = Number(ttlRaw);
+        if (!Number.isInteger(ttl) || ttl <= 0) {
+          showError(errorEl, new Error('ttl_secs must be a positive whole number of seconds.'));
+          return;
+        }
+        payload.ttl_secs = ttl;
+      }
+
+      btn.disabled = true;
+      try {
+        const body = await adminFetch('/admin/paso/ad-hoc-metadata', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+
+        document.getElementById('paso-adhoc-jwt').textContent = body.jwt || '';
+        document.getElementById('paso-adhoc-exp').textContent = describeAdHocExpiry(body.exp);
+        document.getElementById('paso-adhoc-splice').textContent =
+          spliceAdHocMetadata(txDataEl, transactionDataType, body.jwt);
+        resultEl.classList.remove('hidden');
+      } catch (err) {
+        showError(errorEl, err);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+
   /* The markup ships `open` and this closes it on small screens, rather than
      shipping closed and opening on desktop. `open` is an HTML attribute CSS
      cannot set, so the reverse arrangement would leave the QR unreachable
@@ -3228,6 +3378,7 @@ var qrcode = function() {
     initApiKey();
     initIssuance();
     initVerification();
+    initPasoAdHocMetadata();
     setupCopyButtons();
     initQrDisclosure();
   });

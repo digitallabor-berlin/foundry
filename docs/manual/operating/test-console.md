@@ -25,7 +25,8 @@ It lets you trigger the two admin flows from a browser instead of hand-rolling
   pass/fail, and the disclosed claims once the wallet responds. When
   `transaction_data` was requested, the checks list gains a
   `transaction_data_binding` entry reporting whether the wallet hashed the
-  advertised entries into its Key Binding JWT.
+  advertised entries into its Key Binding JWT. The same disclosure also holds
+  the PaSO ad-hoc metadata minter described below.
 
 The console only calls the existing Admin API (same endpoints as the `curl`
 example above) — paste your Admin API key into the field at the top of the
@@ -33,6 +34,45 @@ page; it is remembered in the browser's `localStorage` for convenience,
 since the Admin listener is loopback-only by default. Disable it entirely
 with `server.admin.console_enabled: false` if you don't want it exposed;
 like Swagger UI, this only affects the Admin listener.
+
+## PaSO Ad-Hoc Transaction Data Metadata
+
+The "Transaction data (optional)" disclosure in the Verification card also mints
+an ad-hoc transaction data metadata JWT (PaSO Proof Metadata §5.2) and splices
+it into the entry it belongs to. It sits there rather than in a card of its own
+because §5.1 makes the artifact a `metadata` member of a `transaction_data`
+entry — it has no other use.
+
+Fill in `credential_type_id` and `transaction_data_type`, optionally a
+`metadata` override and a `ttl_secs`, and click **Mint ad-hoc metadata JWT**.
+The console POSTs to `/admin/paso/ad-hoc-metadata` and shows the compact JWT
+(copyable) plus its `exp`, both as an absolute timestamp and as seconds
+remaining.
+
+Both text inputs ship **empty**. A mint is only accepted for a credential type
+that declares `transaction_data_types` — that declaration is what makes a type a
+PaSO Credential type (§3) — and the shipped `config.yaml` declares none, so a
+prefilled default would be a value that always fails. Supplying a `metadata`
+override is the way to exercise the endpoint on such an instance: §5.4 lets an
+override name a transaction data type the issuer has not configured, and a valid
+ad-hoc JWT makes that type supported for the transaction it accompanies.
+
+**The splice is keyed on the type.** On success the console parses the
+`transaction_data` textarea and writes the JWT to the `metadata` member of every
+entry whose `type` equals the minted `transaction_data_type`, then rewrites the
+textarea pretty-printed. That is not a convenience: §5.2 requires the JWT's
+`transaction_data_type` to equal the `type` of the enclosing entry, and §5.3
+step 7 makes a wallet reject the entry outright when they differ — so matching
+on `type` is the spec's own binding rule, and the console cannot produce a
+mismatched pair.
+
+When the textarea is empty, unparsable, not an array, or has no entry of that
+type, the JWT is still shown for manual use and a line under it says what was
+**not** spliced and why. There is no silent no-op — that would read as success
+while sending an entry carrying no metadata at all.
+
+For the endpoint itself, its configuration, and the `curl` equivalent, see
+[PaSO Transaction Data](../issuance/paso-transaction-data.md).
 
 ## Digital Credentials API prerequisites
 

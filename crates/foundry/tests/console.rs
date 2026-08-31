@@ -463,3 +463,81 @@ async fn console_has_display_metadata_inputs_for_dpc_issuance() {
          make the default pid flow fail the server-side DPC gate"
     );
 }
+
+#[tokio::test]
+async fn console_has_paso_adhoc_metadata_minting_for_verification() {
+    // PaSO Proof Metadata §5.1 makes `metadata` a member of a `transaction_data`
+    // entry, so the mint control lives inside the transaction-data disclosure
+    // rather than in a card of its own -- the JWT has no use anywhere else.
+    //
+    // Both text inputs ship EMPTY with a placeholder rather than pre-filled:
+    // a mint is only accepted for a credential type that declares
+    // `transaction_data_types` (§3), and the in-repo config.yaml declares none,
+    // so any baked default would be a value that fails on this very instance.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let storage = Arc::new(SqliteStorage::connect(db.to_str().unwrap()).await.unwrap());
+    let config = Arc::new(test_config(true));
+    let app = admin_router(AppState::new(storage, config), AdminApiKey(None));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body_bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body_bytes);
+
+    assert!(
+        html.contains(r#"id="paso-adhoc-credential-type"#),
+        "console should have a credential_type_id input for the mint"
+    );
+    assert!(
+        html.contains(r#"id="paso-adhoc-transaction-data-type"#),
+        "console should have a transaction_data_type input for the mint"
+    );
+    assert!(
+        html.contains(r#"id="paso-adhoc-metadata-override"#),
+        "console should have a metadata-override textarea: §5.4 lets an override \
+         name a type this issuer has not configured, which is the only way to \
+         exercise the endpoint on an instance with no transaction_data_types"
+    );
+    assert!(
+        html.contains(r#"id="paso-adhoc-ttl"#),
+        "console should have a ttl_secs input overriding adhoc_ttl_secs"
+    );
+    assert!(
+        html.contains("/admin/paso/ad-hoc-metadata"),
+        "the mint button should POST to the ad-hoc metadata endpoint"
+    );
+    assert!(
+        html.contains(r#"data-copy-target="paso-adhoc-jwt"#),
+        "the minted JWT should be copyable through the existing copy-button wiring"
+    );
+    // §5.2 requires the JWT's `transaction_data_type` to equal the `type` of the
+    // enclosing entry, and §5.3 step 7 makes a Wallet reject the entry when they
+    // differ. Keying the splice on that equality is the spec's own binding rule:
+    // it is what stops the console handing a wallet a mismatched pair.
+    assert!(
+        html.contains("entry.type === transactionDataType"),
+        "the splice must select entries by §5.2 type equality"
+    );
+    assert!(
+        html.contains("entry.metadata = jwt"),
+        "the splice must write the JWT to the entry's §5.1 `metadata` member"
+    );
+    assert!(
+        html.contains(r#"id="paso-adhoc-splice"#),
+        "a splice that matched nothing must be reported, never a silent no-op"
+    );
+    assert!(
+        !html.contains(r#"<input type="text" id="paso-adhoc-credential-type" value="#),
+        "the credential_type_id input must ship empty: no in-repo credential type \
+         declares transaction_data_types, so a default would always fail the mint"
+    );
+}
